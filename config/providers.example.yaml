@@ -1,0 +1,119 @@
+# ===========================================================================
+# ZK-AI —— 供应商配置（示例文件）
+#
+# 复制为 config/providers.yaml 后修改。切勿提交真实密钥：每个凭据只引用一个
+# 环境变量名，启动时用 `${VAR}` 或 `${VAR:-默认值}` 语法解析（本文件里任何
+# 位置都可以用这种写法）。
+#
+# 【最容易配错的一点】
+#   env 填的是「环境变量的名字」，不是密钥本身，也不是 ${} 引用。
+#   写 env: ${OPENAI_KEY_01} 会被 YAML 插值展开成密钥本体，导致凭据拿着一个
+#   不存在的变量名，每个请求都 401；启动时会给出告警。
+#   要按「由另一个变量决定用哪个变量名」来间接指定，请写：
+#     env: ${OPENAI_KEY_01_ENV:-OPENAI_KEY_01}
+#   含义：若设置了 OPENAI_KEY_01_ENV（例如 =KEY_A），就用 KEY_A 的值；
+#         否则退回变量名 OPENAI_KEY_01。
+#
+# 凭据字段：
+#   id                        唯一标识，会出现在日志 / 统计 / 管理接口里
+#   env                       `${环境变量名}` 引用（推荐用法）
+#   env_var                   env 的别名，二者填一个即可
+#   value                     直接把密钥写在这里（仅限开发调试，生产禁用）
+#   enabled                   默认 true；置 false 可临时停用某把 Key
+#   priority                  数值越大越优先（100 > 90）
+#   weight                    供 `weighted`（加权）轮换策略使用
+#   max_consecutive_failures  连续 N 次 5xx/超时后，把该 Key 停用（停泊）
+#
+# 轮换策略在 config.yaml 的 `credential_rotation` 中指定：
+#   priority | round_robin | weighted | least_failures | fastest
+# ===========================================================================
+
+providers:
+  # -------------------------------------------------------------------------
+  # OpenAI —— https://platform.openai.com/docs/api-reference/chat
+  # type: openai 走原生适配器（会自动处理 reasoning 模型的参数差异）
+  # -------------------------------------------------------------------------
+  - id: openai
+    type: openai
+    # 想走代理/Azure 风格网关，改 OPENAI_BASE_URL 即可，不用动本文件
+    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    enabled: ${OPENAI_ENABLED:-true}
+    # 单次请求超时（秒）
+    timeout: 120
+    # 适配器自身的重试次数（网关层面的重试在 retry 段配置）
+    max_retries: 2
+    credentials:
+      - id: openai-01
+        env: ${OPENAI_KEY_01_ENV:-OPENAI_KEY_01}
+        priority: 100
+        weight: 1.0
+      - id: openai-02
+        env: ${OPENAI_KEY_02_ENV:-OPENAI_KEY_02}
+        priority: 90
+        weight: 1.0
+
+  # -------------------------------------------------------------------------
+  # Anthropic —— https://docs.claude.com/en/api/messages
+  # x-api-key 与 anthropic-version 请求头由适配器自动补齐，不用手写。
+  # -------------------------------------------------------------------------
+  - id: anthropic
+    type: anthropic
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
+    enabled: ${ANTHROPIC_ENABLED:-true}
+    # Anthropic 要求的 API 版本号，随官方废弃节奏调整
+    api_version: "2023-06-01"
+    timeout: 120
+    options:
+      # 该供应商的默认输出上限（客户端未指定时使用）
+      default_max_tokens: 2048
+    credentials:
+      - id: anthropic-01
+        env: ${ANTHROPIC_KEY_01_ENV:-ANTHROPIC_KEY_01}
+        priority: 100
+
+  # -------------------------------------------------------------------------
+  # Google Gemini —— https://ai.google.dev/api/generate-content
+  # 鉴权使用 x-goog-api-key 请求头；刻意不用 `?key=` 查询参数，
+  # 因为查询串会明文留在代理/网关的访问日志里。
+  # -------------------------------------------------------------------------
+  - id: gemini
+    type: gemini
+    base_url: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+    enabled: ${GEMINI_ENABLED:-true}
+    timeout: 120
+    credentials:
+      - id: gemini-01
+        env: ${GEMINI_KEY_01_ENV:-GEMINI_KEY_01}
+        priority: 100
+
+  # -------------------------------------------------------------------------
+  # OpenRouter —— https://openrouter.ai/docs/api-reference/overview
+  # OpenAI 兼容协议 + 归属信息请求头（用于官方排行榜统计）。
+  # -------------------------------------------------------------------------
+  - id: openrouter
+    type: openrouter
+    base_url: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+    enabled: ${OPENROUTER_ENABLED:-true}
+    # HTTP-Referer 与 X-Title，OpenRouter 用于区分调用来源
+    referer: ${OPENROUTER_REFERER:-https://github.com/zk-ai}
+    app_title: ${OPENROUTER_TITLE:-ZK-AI}
+    timeout: 120
+    credentials:
+      - id: openrouter-01
+        env: ${OPENROUTER_KEY_01_ENV:-OPENROUTER_KEY_01}
+        priority: 100
+
+  # -------------------------------------------------------------------------
+  # Ollama（本地）—— https://github.com/ollama/ollama/blob/main/docs/api.md
+  # 不需要 API Key。没在跑 Ollama 时保持 `enabled: false`；
+  # 执行 `ollama serve` 之后把 ZKAI_OLLAMA_ENABLED 设为 true 即可启用。
+  # -------------------------------------------------------------------------
+  - id: ollama
+    type: ollama
+    base_url: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+    enabled: ${ZKAI_OLLAMA_ENABLED:-false}
+    # 本地模型冷启动慢，超时给宽一点
+    timeout: 300
+    health_check_enabled: true
+    # 本地服务无需密钥，留空数组即可
+    credentials: []

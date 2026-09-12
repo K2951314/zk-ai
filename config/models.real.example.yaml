@@ -1,0 +1,193 @@
+# ===========================================================================
+# ZK-AI - models.yaml（可见模型 + 别名 + 部署，可直接复制为 models.yaml）
+#
+# 复制方式：
+#   cp config/models.real.example.yaml config/models.yaml
+#
+# 三层概念（务必分清，配错就路由不到）：
+#   模型 model        —— 你对外暴露的名字，如 kimi-k3
+#   部署 deployment   —— 「哪个 provider 上的哪个上游模型」= 故障转移的最小单位
+#   别名 alias        —— 稳定入口，如 zk-coding；改了后端模型，客户端不用动
+#
+# capabilities 是能力路由的打分依据（0-10）：
+#   coding / reasoning / tool_use / vision / long_context /
+#   structured_output / speed / cost        （cost 越大 = 越便宜）
+# ===========================================================================
+
+models:
+  # -------------------------------------------------------------------------
+  # Kimi K3 —— 2.8T 参数、原生多模态、1M 上下文、支持思考模式
+  # 双部署：商汤优先（免费），Kimi 官方兜底（花钱但稳）
+  # 商汤把上游打挂 / 限流时，scheduler 会自动切到第二部署
+  # -------------------------------------------------------------------------
+  - id: kimi-k3
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 9.5
+      reasoning: 9.5
+      tool_use: 9.0
+      vision: 9.5          # 原生视觉，可传图
+      long_context: 10.0   # 1M
+      structured_output: 8.5
+      speed: 6.0
+      cost: 9.0            # 商汤公测期免费 → 便宜
+    deployments:
+      # 部署 1：商汤日日新上的 Kimi K3（免费，优先）
+      - id: kimi-k3-sensenova
+        provider_id: sensenova
+        model: kimi-k3          # 上游真实 model id
+        priority: 120
+        context_window: 1000000
+        max_output_tokens: 32768
+        capabilities:
+          vision: 9.5
+      # 部署 2：Kimi 官方平台兜底（需开通 moonshot provider）
+      - id: kimi-k3-moonshot
+        provider_id: moonshot
+        model: kimi-k3
+        priority: 70
+        context_window: 1000000
+        max_output_tokens: 32768
+
+  # -------------------------------------------------------------------------
+  # DeepSeek V4 Flash —— 日常主力，1M 上下文，便宜快
+  # -------------------------------------------------------------------------
+  - id: deepseek-v4-flash
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 8.5
+      reasoning: 8.5
+      tool_use: 9.0
+      vision: 0.0
+      long_context: 10.0
+      structured_output: 9.0
+      speed: 9.0
+      cost: 10.0
+    deployments:
+      - id: ds-v4-flash-sensenova
+        provider_id: sensenova
+        model: deepseek-v4-flash
+        priority: 110
+        max_output_tokens: 32768
+        context_window: 1000000
+
+  # -------------------------------------------------------------------------
+  # GLM-5.2 —— 长程 Coding（1M 上下文）
+  # -------------------------------------------------------------------------
+  - id: glm-5.2
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 9.5
+      reasoning: 9.0
+      tool_use: 8.5
+      vision: 0.0
+      long_context: 10.0
+      structured_output: 8.5
+      speed: 7.0
+      cost: 9.0
+    deployments:
+      - id: glm-5.2-sensenova
+        provider_id: sensenova
+        model: glm-5.2
+        priority: 105
+        max_output_tokens: 32768
+        context_window: 1000000
+
+  # -------------------------------------------------------------------------
+  # SenseNova 6.8 Flash Lite —— 看图 / OCR / 图表解读（256K）
+  # -------------------------------------------------------------------------
+  - id: sensenova-6.8-flash-lite
+    enabled: true
+    context_window: 256000
+    capabilities:
+      coding: 6.0
+      reasoning: 6.5
+      tool_use: 8.0
+      vision: 9.0
+      long_context: 7.0
+      structured_output: 7.0
+      speed: 9.5
+      cost: 10.0
+    deployments:
+      - id: senova-68-lite
+        provider_id: sensenova
+        model: sensenova-6.8-flash-lite
+        priority: 100
+        max_output_tokens: 32768
+        context_window: 256000
+
+  # -------------------------------------------------------------------------
+  # NVIDIA NIM 上的 Nemotron —— 本地/自托管兜底，免费额度
+  # 注意 deployment.model 要写带厂商前缀的调用名
+  # -------------------------------------------------------------------------
+  - id: nemotron-super-49b
+    enabled: true
+    context_window: 128000
+    capabilities:
+      coding: 6.5
+      reasoning: 7.0
+      tool_use: 7.5
+      vision: 0.0
+      long_context: 5.0
+      structured_output: 6.5
+      speed: 7.0
+      cost: 8.0
+    deployments:
+      - id: nemotron-nvidia
+        provider_id: nvidia
+        model: nvidia/llama-3.3-nemotron-super-49b-v1
+        priority: 60
+        max_output_tokens: 8192
+        context_window: 128000
+
+# ---------------------------------------------------------------------------
+# 别名：客户端只认这些稳定名字
+#   strategy: capability | priority | speed | cost
+#   requires: 硬门槛（不满足的模型直接淘汰，权重被抬到 GATE_WEIGHT=8.0）
+#   weights:  覆盖打分权重
+# ---------------------------------------------------------------------------
+aliases:
+  - name: zk-coding
+    description: 编程主力：Kimi K3 → GLM-5.2 → DeepSeek V4 Flash
+    strategy: capability
+    targets: [kimi-k3, glm-5.2, deepseek-v4-flash]
+    requires: { coding: 8.0 }
+    weights: { coding: 6.0, tool_use: 2.0, long_context: 1.0 }
+
+  - name: zk-reasoning
+    description: 深度推理：Kimi K3 → GLM-5.2
+    strategy: capability
+    targets: [kimi-k3, glm-5.2]
+    requires: { reasoning: 8.0 }
+    weights: { reasoning: 6.0, long_context: 1.5 }
+
+  - name: zk-vision
+    description: 看图/OCR：Kimi K3（原生视觉）→ 6.8 Flash Lite
+    strategy: capability
+    targets: [kimi-k3, sensenova-6.8-flash-lite]
+    requires: { vision: 8.0 }      # 硬门槛：无视觉的模型直接出局
+    weights: { vision: 5.0, coding: 1.0 }
+
+  - name: zk-long
+    description: 超长上下文（>256K）：只留 1M 级别的模型
+    strategy: capability
+    targets: [kimi-k3, deepseek-v4-flash, glm-5.2]
+    requires: { long_context: 9.0 }
+
+  - name: zk-fast
+    description: 低延迟优先
+    strategy: speed
+    targets: [deepseek-v4-flash, sensenova-6.8-flash-lite]
+
+  - name: zk-cheap
+    description: 便宜优先（商汤公测期全免费，主要用来避开官方付费额度）
+    strategy: cost
+    targets: [deepseek-v4-flash, sensenova-6.8-flash-lite, kimi-k3]
+
+  - name: zk-auto
+    description: 默认入口：均衡
+    strategy: capability
+    targets: [kimi-k3, deepseek-v4-flash, glm-5.2, sensenova-6.8-flash-lite]

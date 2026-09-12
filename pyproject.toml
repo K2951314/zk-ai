@@ -1,0 +1,90 @@
+[project]
+name = "zk-ai"
+version = "0.1.0"
+description = "ZK-AI - personal AI gateway: provider abstraction, credential pool, capability router, retry/failover, usage stats."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "zhangkun" }]
+keywords = ["ai-gateway", "llm", "router", "openai-compatible", "fastapi"]
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    # Declared explicitly: provider credentials are resolved from os.environ, and
+    # ``.env`` must be loaded into it (pydantic-settings only reads it for Settings).
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.2",
+    # [asyncio] pulls in greenlet, required by SQLAlchemy's async engine.
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20.0",
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "mypy>=1.13.0",
+    "ruff>=0.7.0",
+    "types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+zkai-health = "scripts.health_check:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+exclude = [".venv", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "ASYNC", "S", "RUF"]
+ignore = [
+    "S101",    # assert (used in tests)
+    "S104",    # bind 0.0.0.0 is intentional inside Docker
+    "B008",    # FastAPI Depends() in defaults
+    "RUF001",  # ambiguous unicode in docstrings
+    "RUF002",
+    "RUF003",
+    "UP042",   # explicit ``(str, Enum)`` keeps serialisation identical on every
+               # supported Python; StrEnum changes ``str(enum)`` semantics.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S311"]
+"scripts/*" = ["S311", "T201"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+# `tests/` is intentionally excluded: the suite uses duck-typed doubles
+# (StubRequest, optional pool lookups) that strict analysis rejects, and adding
+# casts there would hide nothing about `app/` correctness. Type checking targets
+# the shipped code: `mypy app scripts`.
+exclude = ["^\\.venv", "^data", "^tests"]

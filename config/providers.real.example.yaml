@@ -1,0 +1,83 @@
+# ===========================================================================
+# ZK-AI - providers.yaml（商汤日日新 + NVIDIA NIM，可直接复制为 providers.yaml）
+#
+# 复制方式：
+#   cp config/providers.real.example.yaml config/providers.yaml
+# 然后编辑 config/models.yaml 与 config/.env。providers.yaml 已被 git 忽略。
+#
+# 三个关键概念（踩坑都在这）：
+#   1) type 决定「协议族」，不是厂牌。
+#      商汤和 NVIDIA 都是 OpenAI 兼容协议 → type: openai_compatible
+#      （适配器实现见 app/providers/base.py: OpenAICompatibleAdapter）
+#   2) base_url 要带 /v1，适配器会在后面拼 /chat/completions
+#   3) credentials[].env 填「环境变量名」，不是密钥本身，也不是 ${} 引用。
+#      写成 ${SENSENOVA_API_KEY} 会被 YAML 插值展开成密钥本体 → 启动时告警。
+# ===========================================================================
+
+providers:
+  # -------------------------------------------------------------------------
+  # 商汤日日新 SenseNova
+  #   Base URL: https://token.sensenova.cn/v1
+  #   鉴权:     Authorization: Bearer sk-xxx
+  #   一款 Key 可调 7 个模型：自家 6.8 Flash Lite / U1 Fast / U1.5 Lite，
+  #   以及第三方 deepseek-v4-flash / deepseek-v4-pro / glm-5.2 / kimi-k3
+  #   公测期免费（积分制：5h 窗口 60,000 积分，周额度 600,000）
+  #   限流较狠，429 属常态 → 建议配多把 Key 并开启冷却轮换
+  # -------------------------------------------------------------------------
+  - id: sensenova
+    type: openai_compatible
+    base_url: https://token.sensenova.cn/v1
+    enabled: true
+    timeout: 300          # Kimi K3 / GLM-5.2 开思考模式时会跑很久
+    connect_timeout: 10
+    max_retries: 2
+    credentials:
+      - id: sensenova-01
+        env: SENSENOVA_API_KEY
+        priority: 100
+        weight: 1.0
+        max_consecutive_failures: 3
+      # 商汤同账户所有 Key 共享额度，第二把 Key 只在「单 Key 被限流」时有意义；
+      # 无第二把就删掉这段。
+      - id: sensenova-02
+        env: SENSENOVA_API_KEY_02
+        priority: 90
+        weight: 1.0
+        max_consecutive_failures: 3
+
+  # -------------------------------------------------------------------------
+  # NVIDIA NIM（build.nvidia.com）
+  #   Base URL: https://integrate.api.nvidia.com/v1
+  #   鉴权:     Authorization: Bearer nvapi-xxx
+  #   注意: 调用名必须带厂商前缀，如 nvidia/llama-3.3-nemotron-super-49b-v1
+  #         （models.yaml 的 deployment.model 填这个带前缀的完整名）
+  #   免费额度按 build 账号的 credit 计，用完会 402/429
+  # -------------------------------------------------------------------------
+  - id: nvidia
+    type: openai_compatible
+    base_url: https://integrate.api.nvidia.com/v1
+    enabled: true
+    timeout: 180
+    connect_timeout: 15
+    max_retries: 2
+    credentials:
+      - id: nvidia-01
+        env: NVIDIA_API_KEY
+        priority: 100
+        weight: 1.0
+
+  # -------------------------------------------------------------------------
+  # （可选）Kimi 官方平台 —— 需要更稳/更高配额时，直连月之暗面官方
+  #   与本项目已有的 Kimi K3 用法互补：官方按量付费，商汤那张 Key 免费试
+  #   同期发布的 K2.7 Code 更便宜且专攻编程：kimi-k2.7-code
+  # -------------------------------------------------------------------------
+  - id: moonshot
+    type: openai_compatible
+    base_url: https://api.moonshot.cn/v1
+    enabled: false        # 开通并填入 MOONSHOT_API_KEY 后改为 true
+    timeout: 300
+    max_retries: 2
+    credentials:
+      - id: moonshot-01
+        env: MOONSHOT_API_KEY
+        priority: 100

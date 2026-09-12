@@ -1,0 +1,55 @@
+# --- secrets / local configuration -----------------------------------------
+.env
+.env.*
+!.env.example
+config/config.yaml
+config/providers.yaml
+config/models.yaml
+config/*.local.yaml
+
+# --- runtime data -----------------------------------------------------------
+data/*
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# --- tooling ----------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit*.xml
+.tox/
+
+# --- editors / OS -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- logs -------------------------------------------------------------------
+*.log
+logs/
+config/*.bak

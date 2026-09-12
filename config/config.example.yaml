@@ -1,0 +1,130 @@
+# ===========================================================================
+# ZK-AI —— 主配置（示例文件）
+#
+# 复制为 config/config.yaml 后修改。每一项都可以用带 ZKAI_ 前缀的环境变量
+# 覆盖，且环境变量优先级高于本文件：
+#   ZKAI_HOST、ZKAI_PORT、ZKAI_LOG_LEVEL、ZKAI_LOG_JSON、ZKAI_DATABASE_URL、
+#   ZKAI_ADMIN_TOKEN、ZKAI_CONFIG_DIR、ZKAI_DATA_DIR、ZKAI_REQUEST_TIMEOUT、
+#   ZKAI_HEALTH_CHECK_MODE、ZKAI_HEALTH_CHECK_INTERVAL、ZKAI_ALLOW_INLINE_SECRETS
+#
+# 如果 config.yaml 不存在，网关会自动回退到本示例文件，保证开箱即能跑起来。
+# ===========================================================================
+
+app:
+  name: ZK-AI
+  # 运行环境标识（development / staging / production），仅用于展示与日志
+  environment: development
+  # 监听地址。0.0.0.0 = 同一局域网内其他机器也能访问；
+  # 只想本机访问就改成 127.0.0.1（更安全，推荐本地开发时使用）。
+  host: 0.0.0.0
+  port: 8000
+
+logging:
+  # 日志级别：DEBUG / INFO / WARNING / ERROR
+  level: INFO
+  # 每行输出一个 JSON 对象；接了日志收集系统（如 ELK、Loki）时建议开启
+  json: false
+
+database:
+  # 默认用 SQLite；任何 SQLAlchemy 异步 URL 都可以，例如：
+  # postgresql+asyncpg://用户:密码@主机:5432/zkai
+  url: ${ZKAI_DATABASE_URL:-sqlite+aiosqlite:///./data/zkai.db}
+
+admin:
+  # 是否启用 /admin/* 管理接口
+  enabled: true
+  # 对外暴露网关前一定要设置令牌，请求需带其中之一：
+  #   X-Admin-Token: <令牌>
+  #   Authorization: Bearer <令牌>
+  # 留空 = 管理接口不校验令牌，仅限本机调试使用。
+  token: ${ZKAI_ADMIN_TOKEN:-}
+
+request:
+  # 单次上游调用的硬性上限（秒），超时即中断并进入重试/转移流程
+  timeout: 120
+  # 客户端没有传 max_tokens 时使用的兜底值
+  default_max_tokens: 1024
+
+# 同一个 provider 内部优先用哪把 Key：
+#   priority | round_robin | weighted | least_failures | fastest
+#   （优先级 / 轮询 / 加权 / 失败最少 / 最快）
+credential_rotation: priority
+
+# ---------------------------------------------------------------------------
+# 会话亲和（sticky session）：同一通对话优先复用上一步成功的那把 Key。
+# 供应商的前缀缓存（prompt cache）是按账号计的，来回换 Key 会让每轮重新付
+# 全量 prefill、重算历史。开启后网关把「会话 → Key」记住一段时间，命中缓存；
+# 这是偏好不是锁：被钉的 Key 一旦冷却/失败就自动回退常规轮换并在下次成功时
+# 重新锚定。客户端也可在请求体传 session_id（或复用 user）显式指定会话。
+# ---------------------------------------------------------------------------
+credential_affinity:
+  enabled: true
+  ttl_seconds: 1800        # 空闲多久解除绑定；每次成功自动续期
+  max_sessions: 4096       # LRU 上限，防止内存无限增长
+
+# ---------------------------------------------------------------------------
+# 重试与故障转移策略。每个开关都有上限，调度器绝不会无限循环
+# （max_total_attempts 是一次客户端请求的绝对尝试次数上限）。
+# ---------------------------------------------------------------------------
+retry:
+  # 对「同一把 Key」的重试次数（指数退避 + 抖动）
+  max_retries_per_credential: 2
+  # 同一个部署最多尝试几把兄弟 Key
+  max_credentials_per_deployment: 3
+  # 故障转移深度：总共最多尝试几个模型/部署
+  max_deployments: 3
+  # 一次客户端请求的绝对尝试次数上限
+  max_total_attempts: 8
+  # 建立流式连接时（收到第一个数据块之前）允许的重试次数
+  stream_open_retries: 1
+  # 退避起始延迟（秒）
+  base_delay: 0.5
+  # 退避延迟上限（秒）
+  max_delay: 8.0
+  # 退避倍数：下一次延迟 = 上一次 × multiplier
+  multiplier: 2.0
+  # 0.3 = 上下浮动 30%；跑确定性测试时设为 0
+  jitter: 0.3
+  # 抖动模式：full（全抖动）/ equal（等抖动）/ none（无抖动）
+  jitter_mode: full
+  # 上游返回 Retry-After 时是否遵守它给出的等待时间
+  respect_retry_after: true
+
+# ---------------------------------------------------------------------------
+# 凭据冷却：一次失败后，这把 Key / 这个部署要休息多久（秒）
+# 429 分两类：分钟级限流（tpm/rpm，指数退避）与额度耗尽（token plan 用尽）。
+# 后者不会在 60 秒后回来——直接小时级长休，避免每个请求都白扫一遍兄弟 Key，
+# 把它们全部拖进指数冷却、整个池子集体黑洞。
+# ---------------------------------------------------------------------------
+cooldown:
+  # 分钟级 429：首次冷却基数，按连续限流次数 × multiplier 递增
+  rate_limit_base: ${ZKAI_RATE_LIMIT_BASE:-60}
+  rate_limit_multiplier: 2.0
+  rate_limit_max: ${ZKAI_RATE_LIMIT_MAX:-900}
+  # 额度耗尽类 429 的平铺冷却（不参与指数放大）
+  quota_cooldown: ${ZKAI_QUOTA_COOLDOWN:-1800}
+  quota_cooldown_max: ${ZKAI_QUOTA_COOLDOWN_MAX:-14400}
+  # 5xx / 超时 / 连接失败累计到 max_consecutive_failures 后的冷却
+  server_error_cooldown: 15
+  # 部署被 503 / 504 / 529 打挂后的冷却
+  deployment_cooldown: 30
+  # ±jitter 抖动，让 6 把 Key 错开复活，而不是集体同一秒醒来一起撞 429
+  jitter: 0.15
+
+# ---------------------------------------------------------------------------
+# 健康检查：manual（仅手动）/ startup（启动时）/ scheduled（定时）/ off（关闭）
+# 探活只调用 GET /models（免费接口），不会消耗任何推理额度。
+# ---------------------------------------------------------------------------
+health_check:
+  mode: startup
+  # scheduled 模式下的检查间隔（秒）；900 = 15 分钟
+  interval_seconds: 900
+  # 是否在进程启动时先做一轮探活
+  on_startup: true
+  # 单次探活超时（秒）
+  timeout: 20
+
+security:
+  # 为 false 时，providers.yaml 里直接写死的 value: 密钥会被拒绝加载。
+  # 生产环境请保持 false；始终优先使用环境变量引用。
+  allow_inline_secrets: true

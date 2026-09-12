@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZK-AI 控制台</title>
+<style>
+  :root {
+    /* 浅色主题：对齐 菱华/提取器、自动录订单 的 qfluent 观感 */
+    --bg: #f4f5f7; --panel: #ffffff; --panel2: #f1f3f4; --border: #e4e7ec;
+    --text: #1e293b; --muted: #64748b; --accent: #1a73e8;
+    --green: #1e8e3e; --amber: #b45309; --red: #d93025; --gray: #94a3b8;
+  }
+  :root[data-theme="dark"] {
+    /* 暗色：之前的 GitHub Dark 观感，主题切换按钮一键切回 */
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --border: #2d333b;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4da3ff;
+    --green: #3fb950; --amber: #d29922; --red: #f85149; --gray: #6e7681;
+  }
+  :root[data-theme="dark"] .pill.green { color: #3fb950; border-color: #3fb950; background: rgba(63,185,80,.08); }
+  :root[data-theme="dark"] .pill.red { color: #f85149; border-color: #f85149; background: rgba(248,81,73,.08); }
+  :root[data-theme="dark"] .pill.amber { color: #d29922; border-color: #d29922; background: rgba(210,153,34,.08); }
+  :root[data-theme="dark"] .pill.gray { color: #8b949e; border-color: #6e7681; background: rgba(110,118,129,.08); }
+  :root[data-theme="dark"] .pill.blue { color: #4da3ff; border-color: #4da3ff; background: rgba(77,163,255,.08); }
+  :root[data-theme="dark"] button { color: var(--text); }
+  :root[data-theme="dark"] .card, :root[data-theme="dark"] .tablewrap,
+  :root[data-theme="dark"] .filters { box-shadow: none; }
+  :root[data-theme="dark"] .toast { box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+  :root[data-theme="dark"] #auth { background: rgba(13,17,23,.92); backdrop-filter: none; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.5 "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+           padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+           position: sticky; top: 0; z-index: 10; }
+  .brand { font-size: 18px; font-weight: 700; letter-spacing: .2px; color: #0f172a; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.off { background: var(--red); }
+  .grow { flex: 1; }
+  input[type=text], input[type=number], select, textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 9px; font: inherit; }
+  input[type=text]:focus, select:focus { outline: 1px solid var(--accent); }
+  button { background: var(--panel2); color: #45505f; border: 1px solid var(--border);
+           border-radius: 6px; padding: 6px 12px; font: inherit; font-weight: 600; cursor: pointer;
+           transition: background .15s, border-color .15s, color .15s; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+  button.primary:hover { background: #1557b0; border-color: #1557b0; color: #fff; }
+  button.mini { padding: 2px 8px; font-size: 12px; }
+  nav { display: flex; gap: 2px; padding: 12px 20px 0; max-width: 1360px; margin: 0 auto; }
+  nav button { border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; border: none;
+               padding: 8px 16px; background: transparent; color: var(--muted); font-weight: 600; }
+  nav button:hover { color: var(--accent); border-color: transparent; }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); background: transparent; }
+  main { padding: 16px 20px 60px; max-width: 1360px; margin: 0 auto; }
+  section.view { display: none; }
+  section.view.active { display: block; }
+  .grid { display: grid; gap: 12px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .cards { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+          padding: 14px; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
+  .card h3 { margin: 0 0 8px; font-size: 11px; color: var(--muted); font-weight: 600;
+             text-transform: uppercase; letter-spacing: .3px; }
+  .kpi-value { font-size: 24px; font-weight: 650; }
+  .kpi-sub { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  tbody tr:hover { background: var(--panel2); }
+  tbody.clickable { cursor: pointer; }
+  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+               overflow: auto; max-height: 66vh; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
+  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 6px;
+          font-size: 12px; font-weight: 600; border: 1px solid transparent; }
+  .pill.green { color: #15803d; border-color: #bbf7d0; background: #f0fdf4; }
+  .pill.red { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+  .pill.amber { color: #b45309; border-color: #fde68a; background: #fffbeb; }
+  .pill.gray { color: #64748b; border-color: #e2e8f0; background: #f1f5f9; }
+  .pill.blue { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+          border-radius: 5px; padding: 0 6px; font-size: 12px; color: var(--muted); margin: 1px 2px 1px 0; }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .ell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+             background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+             padding: 10px 12px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
+  .bar { height: 7px; background: var(--panel2); border-radius: 4px; overflow: hidden; min-width: 60px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  #drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(680px, 92vw);
+            background: var(--panel); border-left: 1px solid var(--border);
+            transform: translateX(105%); transition: transform .18s ease;
+            z-index: 40; overflow: auto; padding: 18px; }
+  #drawer.open { transform: none; }
+  #drawer h2 { margin: 0 0 10px; font-size: 16px; }
+  dl.detail { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; font-size: 13px; margin: 0 0 14px; }
+  dl.detail dt { color: var(--muted); } dl.detail dd { margin: 0; word-break: break-all; white-space: normal; }
+  #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
+  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+           border-radius: 8px; padding: 10px 14px; max-width: 420px; font-size: 13px;
+           box-shadow: 0 6px 20px rgba(16,24,40,.15); }
+  .toast.err { border-left-color: var(--red); } .toast.ok { border-left-color: var(--green); }
+  #auth { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: none;
+          align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(2px); }
+  #auth.show { display: flex; }
+  #auth .card { width: 420px; }
+  #auth input { width: 100%; margin: 10px 0; }
+  .row-flex { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  h4.sec { margin: 22px 0 8px; font-size: 14px; color: var(--muted); }
+  details.raw { font-size: 12px; color: var(--muted); }
+  details.raw pre { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">⚡ ZK-AI 控制台</span>
+  <span class="row-flex"><span class="dot off" id="server-dot"></span><span class="small muted" id="server-line">未连接</span></span>
+  <span class="grow"></span>
+  <label class="small muted">自动刷新
+    <select id="auto-interval">
+      <option value="0">关</option><option value="5">5 秒</option>
+      <option value="10" selected>10 秒</option><option value="30">30 秒</option>
+    </select>
+  </label>
+  <button id="btn-theme" title="切换浅色/暗色">🌙</button>
+  <button id="btn-refresh">⟳ 刷新</button>
+  <button id="btn-token">🔑 令牌</button>
+</header>
+
+<nav id="tabs">
+  <button data-view="overview" class="active">总览</button>
+  <button data-view="pool">凭据池</button>
+  <button data-view="requests">请求记录</button>
+  <button data-view="usage">用量统计</button>
+  <button data-view="models">模型与别名</button>
+</nav>
+
+<main>
+  <section class="view active" id="view-overview"></section>
+  <section class="view" id="view-pool"></section>
+  <section class="view" id="view-requests"></section>
+  <section class="view" id="view-usage"></section>
+  <section class="view" id="view-models"></section>
+</main>
+
+<aside id="drawer"></aside>
+<div id="toasts"></div>
+<div id="auth"><div class="card">
+  <h3>需要管理员令牌</h3>
+  <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
+  <input type="text" id="auth-token" placeholder="粘贴 X-Admin-Token …">
+  <div class="row-flex"><button class="primary" id="auth-save">保存并连接</button>
+  <button id="auth-cancel">取消</button></div>
+</div></div>
+
+<script>
+"use strict";
+/* ================= 基础工具 ================= */
+const $ = sel => document.querySelector(sel);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const state = {
+  view: "overview",
+  token: localStorage.getItem("zkai_admin_token") || "",
+  timer: null,
+  poolAt: 0,
+  req: { offset: 0, size: 50, total: 0 },
+  providers: [],
+  usageDays: 7,
+};
+
+function toast(msg, kind = "") {
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+/** DB 时间戳是「无时区 UTC」——补上 Z 再按本地时区展示。 */
+function fmtTime(iso) {
+  if (!iso) return "-";
+  let s = String(iso);
+  if (s.includes("T") && !/([Zz]|[+-]\d\d:?\d\d)$/.test(s)) s += "Z";
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString("zh-CN", { hour12: false });
+}
+function fmtEpoch(ts) {
+  if (!ts) return "-";
+  return new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+function ago(iso) {
+  let s = String(iso || "");
+  if (s.includes("T") && !/([Zz]|[+-]\d\d:?\d\d)$/.test(s)) s += "Z";
+  const d = new Date(s); if (isNaN(d)) return "-";
+  const sec = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return Math.round(sec) + " 秒前";
+  if (sec < 3600) return Math.round(sec / 60) + " 分钟前";
+  if (sec < 86400) return (sec / 3600).toFixed(1) + " 小时前";
+  return (sec / 86400).toFixed(1) + " 天前";
+}
+function num(n) { return (n ?? 0).toLocaleString("zh-CN"); }
+function pct(v) { return v == null ? "-" : (v * 100).toFixed(1) + "%"; }
+function dur(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m" + (sec % 60 ? (sec % 60) + "s" : "");
+  return Math.floor(sec / 3600) + "h" + Math.floor((sec % 3600) / 60) + "m";
+}
+const STATUS_PILL = {
+  healthy: ["green", "正常"], cooldown: ["amber", "冷却"],
+  unhealthy: ["red", "异常"], disabled: ["gray", "禁用"],
+  success: ["green", "成功"], error: ["red", "失败"],
+  cancelled: ["gray", "取消"], pending: ["blue", "进行中"],
+};
+function pill(status) {
+  const [cls, label] = STATUS_PILL[status] || ["gray", status || "-"];
+  return `<span class="pill ${cls}">${esc(label)}</span>`;
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers);
+  if (state.token) headers["X-Admin-Token"] = state.token;
+  if (opts.json !== undefined) {
+    headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(opts.json);
+  }
+  const resp = await fetch(path, Object.assign({}, opts, { headers }));
+  if (resp.status === 401) { showAuth(); throw new Error("管理令牌无效或缺失"); }
+  let data = null;
+  try { data = await resp.json(); } catch { /* 无 body */ }
+  if (!resp.ok) {
+    const msg = data && data.error && data.error.message
+      ? data.error.message : (data && data.detail && data.detail.error
+        ? data.detail.error.message : "HTTP " + resp.status);
+    throw new Error(path + " → " + msg);
+  }
+  return data;
+}
+
+/* ================= 视图注册 ================= */
+const LOADERS = {
+  overview: loadOverview, pool: loadPool, requests: loadRequests,
+  usage: loadUsage, models: loadModels,
+};
+function switchView(name) {
+  state.view = name;
+  document.querySelectorAll("nav button").forEach(b =>
+    b.classList.toggle("active", b.dataset.view === name));
+  document.querySelectorAll("section.view").forEach(s =>
+    s.classList.toggle("active", s.id === "view-" + name));
+  refresh();
+}
+async function refresh() {
+  const fn = LOADERS[state.view];
+  if (!fn) return;
+  try { await fn(); }
+  catch (err) { toast(err.message, "err"); }
+}
+function setupTimer() {
+  clearInterval(state.timer);
+  const sec = Number($("#auto-interval").value);
+  if (sec > 0) state.timer = setInterval(refresh, sec * 1000);
+}
+setInterval(tickCountdowns, 1000);
+function tickCountdowns() {
+  document.querySelectorAll("[data-cd-until]").forEach(el => {
+    const left = Number(el.dataset.cdUntil) - Date.now() / 1000;
+    if (left <= 0) { el.textContent = "已到期"; el.className = "muted"; }
+    else { el.textContent = dur(left); el.className = "small" ; el.style.color = "var(--amber)"; }
+  });
+}
+
+/* ================= 总览 ================= */
+async function loadOverview() {
+  const [health, stats, providers] = await Promise.all([
+    fetch("/health").then(r => r.json()),
+    api("/admin/stats?days=7&recent=10"),
+    api("/admin/providers"),
+  ]);
+  state.providers = providers.data;
+  $("#server-dot").className = "dot " + (health.status === "healthy" ? "on" : "off");
+  $("#server-line").textContent =
+    `${health.app} v${health.version} · 数据库 ${health.database.ok ? "正常" : "异常"} · 运行 ${dur(health.uptime_seconds)}`;
+
+  const pool = stats.pool || {};
+  const total60 = Object.values(stats.error_rates || {}).reduce((a, r) => a + r.attempts, 0);
+  const fail60 = Object.values(stats.error_rates || {}).reduce((a, r) => a + r.failures, 0);
+
+  const kpi = (label, value, sub) => `<div class="card"><h3>${esc(label)}</h3>
+    <div class="kpi-value">${value}</div><div class="kpi-sub">${esc(sub || "")}</div></div>`;
+
+  const providerCards = providers.data.map(p => {
+    const byStatus = {};
+    (p.credentials || []).forEach(c => byStatus[c.status] = (byStatus[c.status] || 0) + 1);
+    const chips = Object.entries(byStatus)
+      .map(([s, n]) => pill(s) + "×" + n).join(" ");
+    return `<div class="card">
+      <h3><span class="dot ${p.available ? "on" : "off"}"></span>
+        ${esc(p.id)} <span class="chip">${esc(p.type)}</span></h3>
+      <div class="small muted ell" title="${esc(p.base_url)}">${esc(p.base_url)}</div>
+      <div class="row-flex" style="margin:8px 0">${chips || '<span class="muted">无凭据</span>'}</div>
+      <div class="small muted">${(p.models || []).length ? "模型: " + (p.models || []).map(esc).join(" · ") : "（该供应商无挂载模型）"}</div>
+    </div>`;
+  }).join("");
+
+  const recent = (stats.recent_requests || []).map(r => `
+    <tr class="row-click" data-rid="${esc(r.id)}">
+      <td class="muted">${ago(r.started_at)}</td>
+      <td>${esc(r.requested_model)}</td>
+      <td class="muted">${esc(r.resolved_model || "-")}</td>
+      <td>${esc(r.provider || "-")}<span class="muted">/${esc(r.credential_id || "-")}</span></td>
+      <td>${pill(r.status)}</td>
+      <td class="muted" title="${esc(r.error_type || "")}">${r.error_type ? esc(zhType(r.error_type)) : ""}</td>
+      <td>${r.latency_ms ? Math.round(r.latency_ms) + "ms" : "-"}</td>
+    </tr>`).join("");
+
+  $("#view-overview").innerHTML = `
+    <div class="toolbar">
+      <button class="primary" id="ov-health">▶ 立即健康检查</button>
+      <button id="ov-reload">↻ 重载配置</button>
+      <button id="ov-clear">🧹 清空全部冷却</button>
+    </div>
+    <div class="grid kpis">
+      ${kpi("可用凭据", `${pool.usable ?? "-"}/${pool.total ?? "-"}`,
+        `正常 ${byCount(pool.by_status, "healthy")} · 冷却 ${byCount(pool.by_status, "cooldown")} · 异常 ${byCount(pool.by_status, "unhealthy")} · 禁用 ${byCount(pool.by_status, "disabled")}`)}
+      ${kpi("池成功率", pct(pool.success_rate), `尝试 ${num(pool.requests)} · 限流 ${num(pool.rate_limits)}`)}
+      ${kpi("60 分钟失败率", total60 ? pct(fail60 / total60) : "-", `上游尝试 ${num(total60)} 次`)}
+      ${kpi("7 天 Token", fmtK(pool7(stats)), `用量记录 ${num(stats.usage?.requests)} 条`)}
+      ${kpi("7 天等价成本", fmtCost(stats.usage?.cost_usd), "按公开牌价折算（免费渠道也计）")}
+    </div>
+    <h4 class="sec">供应商</h4>
+    <div class="grid cards">${providerCards}</div>
+    <div id="ov-health-result"></div>
+    <h4 class="sec">最近请求（点击行看明细）</h4>
+    <div class="tablewrap"><table>
+      <thead><tr><th>时间</th><th>请求模型</th><th>实际模型</th><th>供应商/凭据</th><th>状态</th><th>错误</th><th>延迟</th></tr></thead>
+      <tbody class="clickable">${recent || '<tr><td colspan="7" class="muted">暂无记录</td></tr>'}</tbody>
+    </table></div>`;
+
+  bindRowClicks($("#view-overview"));
+  $("#ov-health").onclick = async e => {
+    e.target.disabled = true;
+    try {
+      const r = await api("/admin/health/check", { method: "POST", json: {} });
+      $("#ov-health-result").innerHTML = `<h4 class="sec">健康检查结果（${esc(r.kind)} · ${dur((r.duration_ms || 0) / 1000)}）</h4>
+        <div class="tablewrap"><table><thead><tr><th>凭据</th><th>结果</th><th>延迟</th><th>错误</th></tr></thead><tbody>
+        ${r.results.map(x => `<tr><td>${esc(x.provider_id)}/${esc(x.credential_id || "-")}</td>
+          <td>${x.ok ? pill("healthy") : pill("unhealthy")}</td>
+          <td>${Math.round(x.latency_ms)}ms</td>
+          <td class="muted ell" title="${esc(x.detail || "")}">${esc(x.error_type ? zhErr(x.error_type, x.detail) : "")}</td></tr>`).join("")}
+        </tbody></table></div>`;
+      toast(`健康检查完成：${r.ok} 正常 / ${r.failed} 失败`, r.failed ? "err" : "ok");
+    } finally { e.target.disabled = false; refresh(); }
+  };
+  $("#ov-reload").onclick = async () => {
+    const r = await api("/admin/config/reload", { method: "POST" });
+    toast(`配置已热重载：${r.models} 模型 / ${r.providers.length} 供应商`, "ok"); refresh();
+  };
+  $("#ov-clear").onclick = async () => {
+    const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
+    toast(`已解除 ${r.cleared} 把凭据的冷却`, "ok"); refresh();
+  };
+}
+function byCount(map, k) { return (map && map[k]) ?? 0; }
+function pool7(stats) { return stats.usage?.total_tokens ?? 0; }
+function fmtK(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : num(n); }
+const CNY_RATE = 7.2;   // USD→CNY 展示换算，牌价以 USD 存储，这里只是给人看的近似
+function fmtCost(v) {
+  v = Number(v) || 0;
+  if (v <= 0) return "$0";
+  // 大额给两位小数，极小额保留有效位，避免一片 $0.0000
+  const usd = v >= 0.01 ? "$" + v.toFixed(2) : "$" + v.toPrecision(2);
+  return `${usd} ≈¥${(v * CNY_RATE >= 0.01 ? (v * CNY_RATE).toFixed(2) : (v * CNY_RATE).toPrecision(2))}`;
+}
+
+/* ---- 中文翻译层：错误类型 + 上游错误原文 → 中文 ----
+ * error_type 机器码保持不变（日志/API 稳定），只翻译给人看的展示层。 */
+const ERR_TYPE_ZH = {
+  rate_limit_error: "限流（429）",
+  no_available_credential: "暂无可用 Key",
+  no_available_deployment: "无可用部署",
+  timeout: "超时",
+  connection_error: "连接失败",
+  upstream_error: "上游错误",
+  unknown_error: "未知错误",
+  invalid_request_error: "请求参数错误",
+  unsupported_parameter: "不支持的参数",
+  authentication_error: "Key 认证失败（401）",
+  permission_denied: "无权限（403）",
+  model_not_found: "模型不存在",
+  context_length_exceeded: "上下文超长",
+  content_filter: "内容被安全策略拦截",
+  overloaded: "上游过载（529）",
+  conflict_error: "请求冲突",
+  client_disconnected: "客户端断开",
+  no_stream_meta: "流式元数据缺失",
+  provider_unavailable: "供应商不可用",
+  config_error: "配置错误",
+  invalid_alias: "别名无效",
+  internal_error: "网关内部错误",
+  zkai_error: "网关错误",
+};
+function zhType(type) {
+  if (!type) return "-";
+  return ERR_TYPE_ZH[type] ? `${ERR_TYPE_ZH[type]}` : type;
+}
+/** 把上游/网关的英文错误详情翻译成中文（保留原文在 tooltip）。 */
+const ERR_DETAIL_PATTERNS = [
+  [/inference exceeds tpm\/?rpm limit/i, "超出该账号每分钟限流（tpm/rpm），稍候自动恢复"],
+  [/token plan entitlement exhausted/i, "套餐额度已耗尽（5 小时/周窗口重置）"],
+  [/upstream returned HTTP 429/i, "上游返回 429 限流"],
+  [/no usable credential for provider ['"]?([\w-]+)['"]?/i, "供应商 $1 当前没有可用的 Key"],
+  [/pool recovers in ~(\d+)s/i, "约 $1 秒后可重试"],
+  [/timed out after ([\d.]+)s/i, "超过 $1 秒无响应（超时）"],
+  [/timeout while opening stream/i, "建立流式连接超时"],
+  [/stream connection failed/i, "流式连接失败"],
+  [/connection failed/i, "连接失败"],
+  [/stream dropped/i, "流式连接中断"],
+  [/environment variable (\S+) is not set/i, "环境变量 $1 未设置"],
+  [/validationerror/i, "网关解析上游返回格式失败"],
+  [/all (\d+) attempt\(s\) failed for model ['"]([^'"]+)['"]:?\s*(.*)/i, "模型 $2 的 $1 次尝试全部失败：$3"],
+  [/disabled by operator/i, "已被手动禁用"],
+  [/disabled in config/i, "配置中禁用"],
+  [/invalid credential \(401\)/i, "Key 无效（401 认证失败）"],
+  [/permission denied \(403\)/i, "无权限（403）"],
+  [/returned a non-JSON body/i, "上游返回了非 JSON 内容"],
+];
+function zhDetail(detail) {
+  if (!detail) return "-";
+  let out = String(detail);
+  for (const [re, zh] of ERR_DETAIL_PATTERNS) {
+    if (re.test(out)) { out = out.replace(re, zh); break; }
+  }
+  return out;
+}
+/** 组合展示：类型中文 + 详情中文；英文原文留给 title 悬停查看。 */
+function zhErr(type, detail) {
+  const t = zhType(type);
+  if (!detail) return t;
+  const d = zhDetail(detail);
+  return d === t ? t : (t === "-" ? d : `${t}：${d}`);
+}
+function bindRowClicks(root) {
+  root.querySelectorAll("tr.row-click").forEach(tr =>
+    tr.onclick = () => openDrawer(tr.dataset.rid));
+}
+
+/* ================= 凭据池 ================= */
+async function loadPool() {
+  const resp = await api("/admin/credentials");
+  state.poolAt = Date.now() / 1000;
+  const aff = resp.affinity || {};
+  // 每把 Key 被多少通会话钉住
+  const pinned = {};
+  Object.values(aff.bindings || {}).forEach(list =>
+    list.forEach(b => pinned[b.credential_id] = (pinned[b.credential_id] || 0) + 1));
+  const rows = resp.data.map(c => {
+    const until = (c.status === "cooldown" && c.cooldown_until)
+      ? ` data-cd-until="${c.cooldown_until}"` : "";
+    const cd = c.status === "cooldown" ? `<span${until}></span>` : "-";
+    const pin = pinned[c.id] ? ` <span class="pill blue" title="钉住的会话数">📌${pinned[c.id]}</span>` : "";
+    const actions = [];
+    if (c.status !== "disabled") actions.push(`<button class="mini" data-act="disable" data-id="${esc(c.id)}">禁用</button>`);
+    else actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">启用</button>`);
+    if (c.status === "cooldown" || c.status === "unhealthy")
+      actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">解除冷却</button>`);
+    return `<tr>
+      <td><b>${esc(c.id)}</b>${pin}<div class="small muted">${c.tags.map(esc).join(" ")}</div></td>
+      <td>${esc(c.provider_id)}</td>
+      <td>${pill(c.status)}</td>
+      <td>${c.priority}</td>
+      <td>${c.success_count}</td>
+      <td>${c.failure_count}</td>
+      <td>${c.rate_limit_count}</td>
+      <td>${cd}</td>
+      <td class="muted ell" title="${esc(c.last_error_detail || "")}${esc(c.disabled_reason || "")}">
+        ${esc(c.last_error_type ? zhErr(c.last_error_type, c.last_error_detail) : (c.disabled_reason ? zhDetail(c.disabled_reason) : "-"))}</td>
+      <td class="muted small" title="${esc(c.secret_ref || "")}">${esc(c.secret_masked || c.secret_source)}</td>
+      <td class="row-flex">${actions.join("")}</td>
+    </tr>`;
+  }).join("");
+  const s = resp.stats;
+  const totalPins = Object.values(pinned).reduce((a, b) => a + b, 0);
+  $("#view-pool").innerHTML = `
+    <div class="toolbar">
+      <span class="small muted">轮转策略：${esc(s.rotation)}</span>
+      <span class="pill ${aff.enabled ? "green" : "gray"}">会话亲和 ${aff.enabled ? "开" : "关"}${aff.enabled ? ` · ${totalPins} 通会话 · TTL ${dur(aff.ttl_seconds || 0)}` : ""}</span>
+      <span class="pill blue">可用 ${s.usable}/${s.total}</span>
+      <span class="pill green">成功 ${s.success}</span>
+      <span class="pill red">失败 ${s.failure}</span>
+      <span class="pill amber">限流 ${s.rate_limits}</span>
+      <span class="grow"></span>
+      <button id="pool-clear-all">🧹 全部清冷却</button>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>凭据</th><th>供应商</th><th>状态</th><th>优先级</th><th>成功</th><th>失败</th>
+      <th>限流</th><th>冷却剩余</th><th>最后错误</th><th>密钥</th><th>操作</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="11" class="muted">无凭据</td></tr>'}</tbody>
+    </table></div>
+    <p class="small muted" style="margin-top:10px">📌 = 当前钉在该 Key 上的会话数。同一通对话会优先复用上一步成功的 Key
+    （命中供应商侧前缀缓存，历史不重算）；该 Key 冷却/故障时自动换下一把并在成功瞬间把锚点带过去。
+    冷却规则：分钟限流指数退避（60→900 秒），额度耗尽（token plan exhausted）平铺休 30 分钟。</p>`;
+  tickCountdowns();
+  $("#pool-clear-all").onclick = async () => {
+    const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
+    toast(`已解除 ${r.cleared} 把`, "ok"); loadPool();
+  };
+  document.querySelectorAll("#view-pool button[data-act]").forEach(btn =>
+    btn.onclick = async () => {
+      await api(`/admin/credentials/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.act}`, { method: "POST" });
+      toast(`${btn.dataset.id} 已${btn.dataset.act === "enable" ? "启用" : "禁用"}`, "ok");
+      loadPool();
+    });
+}
+
+/* ================= 请求记录 ================= */
+function reqFilterParams() {
+  const p = new URLSearchParams();
+  // First render happens before the filter bar exists - guard against null.
+  const g = id => { const el = $(id); return el ? (el.value || "").trim() : ""; };
+  if (g("#f-status")) p.set("status", g("#f-status"));
+  if (g("#f-provider")) p.set("provider", g("#f-provider"));
+  if (g("#f-alias")) p.set("alias", g("#f-alias"));
+  if (g("#f-model")) p.set("model", g("#f-model"));
+  if (g("#f-error")) p.set("error_type", g("#f-error"));
+  if (g("#f-q")) p.set("q", g("#f-q"));
+  p.set("limit", state.req.size);
+  p.set("offset", state.req.offset);
+  return p;
+}
+async function loadRequests(keepFilters) {
+  const prev = keepFilters ? collectFilters() : null;
+  const p = reqFilterParams();
+  const resp = await api("/admin/requests?" + p.toString());
+  state.req.total = resp.total;
+  if (prev) restoreFilters(prev);
+  const opts = (arr, sel) => ["<option value=''>全部</option>"]
+    .concat(arr.map(x => `<option ${x === sel ? "selected" : ""}>${esc(x)}</option>`)).join("");
+  const rows = resp.data.map(r => `<tr class="row-click" data-rid="${esc(r.id)}">
+      <td class="muted">${ago(r.started_at)}<div class="small muted">${fmtTime(r.started_at)}</div></td>
+      <td>${esc(r.requested_model)}</td>
+      <td class="muted">${esc(r.resolved_model || "-")}</td>
+      <td>${esc(r.alias || "-")}</td>
+      <td>${esc(r.provider || "-")}<span class="muted">/${esc(r.credential_id || "-")}</span></td>
+      <td>${r.stream ? "流式" : "普通"}</td>
+      <td>${pill(r.status)}</td>
+      <td>${r.http_status ?? "-"}</td>
+      <td class="muted ell" style="max-width:170px" title="${esc(r.error_type || "")}">${esc(r.error_type ? zhType(r.error_type) : "-")}</td>
+      <td>${r.attempt_count}${r.fallback_used ? " ↪" : ""}</td>
+      <td>${r.latency_ms ? Math.round(r.latency_ms) + "ms" : "-"}</td>
+      <td>${fmtK(r.total_tokens)}</td>
+      <td>${r.total_tokens ? fmtCost(r.cost_usd) : "-"}</td>
+    </tr>`).join("");
+  const page = Math.floor(state.req.offset / state.req.size) + 1;
+  const pages = Math.max(1, Math.ceil(resp.total / state.req.size));
+  $("#view-requests").innerHTML = `
+    <div class="filters">
+      <select id="f-status">${opts(["success","error","cancelled","pending"], keepFilters ? prev.status : "")}</select>
+      <select id="f-provider">${opts(state.providers.map(x => x.id), keepFilters ? prev.provider : "")}</select>
+      <input id="f-alias" size="10" placeholder="别名" value="${keepFilters ? esc(prev.alias) : ""}">
+      <input id="f-model" size="14" placeholder="模型（模糊）" value="${keepFilters ? esc(prev.model) : ""}">
+      <input id="f-error" size="16" placeholder="错误类型" value="${keepFilters ? esc(prev.error) : ""}">
+      <input id="f-q" size="22" placeholder="关键词：id / 模型 / 凭据 / 错误" value="${keepFilters ? esc(prev.q) : ""}">
+      <button class="primary" id="r-go">查询</button>
+      <button id="r-reset">重置</button>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>时间</th><th>请求模型</th><th>实际模型</th><th>别名</th><th>供应商/凭据</th>
+      <th>模式</th><th>状态</th><th>HTTP</th><th>错误</th><th>尝试</th><th>延迟</th><th>Tokens</th><th>成本</th></tr></thead>
+      <tbody class="clickable">${rows || '<tr><td colspan="13" class="muted">无匹配记录</td></tr>'}</tbody>
+    </table></div>
+    <div class="toolbar" style="margin-top:10px">
+      <button id="r-prev" ${state.req.offset <= 0 ? "disabled" : ""}>← 上一页</button>
+      <span class="muted small">第 ${page}/${pages} 页 · 共 ${num(resp.total)} 条</span>
+      <button id="r-next" ${state.req.offset + state.req.size >= resp.total ? "disabled" : ""}>下一页 →</button>
+      <span class="grow"></span>
+      <span class="small muted">↪ 表示发生了故障转移</span>
+    </div>`;
+  $("#r-go").onclick = () => { state.req.offset = 0; loadRequests(true); };
+  $("#r-reset").onclick = () => {
+    ["#f-status","#f-provider","#f-alias","#f-model","#f-error","#f-q"].forEach(id => $(id).value = "");
+    state.req.offset = 0; loadRequests();
+  };
+  $("#r-prev").onclick = () => { state.req.offset = Math.max(0, state.req.offset - state.req.size); loadRequests(true); };
+  $("#r-next").onclick = () => { state.req.offset += state.req.size; loadRequests(true); };
+  bindRowClicks($("#view-requests"));
+}
+function collectFilters() {
+  const g = id => ($(id) ? ($(id).value || "").trim() : "");
+  return { status: g("#f-status"), provider: g("#f-provider"), alias: g("#f-alias"),
+           model: g("#f-model"), error: g("#f-error"), q: g("#f-q") };
+}
+function restoreFilters(prev) {
+  const s = (id, v) => { if ($(id)) $(id).value = v; };
+  s("#f-status", prev.status); s("#f-provider", prev.provider); s("#f-alias", prev.alias);
+  s("#f-model", prev.model); s("#f-error", prev.error); s("#f-q", prev.q);
+}
+
+/* ---------- 详情抽屉 ---------- */
+async function openDrawer(requestId) {
+  if (!requestId) return;
+  try {
+    const d = await api("/admin/requests/" + encodeURIComponent(requestId));
+    const r = d.request || {};
+    const attempts = (d.attempts || []).map(a => `<tr>
+      <td>#${a.attempt_number}</td>
+      <td>${esc(a.provider)}<div class="small muted">${esc(a.model || "")}</div></td>
+      <td>${esc(a.credential_id || "-")}</td>
+      <td>${pill(a.status)}</td>
+      <td>${a.http_status ?? "-"}</td>
+      <td class="muted" title="${esc(a.error_type || "")}">${esc(a.error_type ? zhType(a.error_type) : "")}</td>
+      <td class="ell small" style="max-width:220px" title="${esc(a.detail || "")}">${esc(a.detail ? zhDetail(a.detail) : "")}</td>
+      <td>${a.latency_ms ? Math.round(a.latency_ms) + "ms" : "-"}</td>
+      <td>${fmtK((a.input_tokens || 0) + (a.output_tokens || 0))}</td>
+    </tr>`).join("");
+    $("#drawer").innerHTML = `
+      <div class="row-flex" style="margin-bottom:10px">
+        <h2 class="grow">请求详情</h2><button id="dr-close">✕ 关闭</button></div>
+      <dl class="detail">
+        <dt>请求 ID</dt><dd>${esc(r.id || requestId)}</dd>
+        <dt>请求模型</dt><dd>${esc(r.requested_model || "-")}${r.alias ? `（别名 ${esc(r.alias)}）` : ""}</dd>
+        <dt>实际模型</dt><dd>${esc(r.resolved_model || "-")}</dd>
+        <dt>落点</dt><dd>${esc(r.provider || "-")} / ${esc(r.deployment_id || "-")} / ${esc(r.credential_id || "-")}</dd>
+        <dt>状态</dt><dd>${pill(r.status)} ${r.http_status ?? ""} ${r.error_type ? "· " + esc(zhType(r.error_type)) : ""}</dd>
+        <dt>流式 / 尝试</dt><dd>${r.stream ? "流式" : "普通"} · ${r.attempt_count ?? 0} 次${r.fallback_used ? " · 有故障转移" : ""}</dd>
+        <dt>延迟 / Tokens</dt><dd>${r.latency_ms ? Math.round(r.latency_ms) + "ms" : "-"} ·
+          入 ${num(r.input_tokens)} / 出 ${num(r.output_tokens)} / 共 ${num(r.total_tokens)}</dd>
+        <dt>等价成本</dt><dd>${fmtCost(r.cost_usd)}<span class="muted small"> · 按牌价折算，免费渠道即省下的费用</span></dd>
+        <dt>客户端</dt><dd class="small">${esc(r.client_ip || "-")} · ${esc((r.user_agent || "").slice(0, 70))}</dd>
+        <dt>时间</dt><dd>${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</dd>
+      </dl>
+      ${r.routing_reason ? `<details class="raw"><summary>路由决策</summary><pre>${esc(r.routing_reason)}</pre></details>` : ""}
+      <h4 class="sec">尝试明细（${(d.attempts || []).length}）</h4>
+      <div class="tablewrap"><table>
+        <thead><tr><th>#</th><th>供应商</th><th>凭据</th><th>结果</th><th>HTTP</th><th>错误</th><th>详情</th><th>延迟</th><th>Tokens</th></tr></thead>
+        <tbody>${attempts || '<tr><td colspan="9" class="muted">无尝试记录（可能是修复前的流式请求）</td></tr>'}</tbody>
+      </table></div>`;
+    $("#drawer").classList.add("open");
+    $("#dr-close").onclick = () => $("#drawer").classList.remove("open");
+  } catch (err) { toast(err.message, "err"); }
+}
+
+/* ================= 用量统计 ================= */
+async function loadUsage() {
+  const stats = await api(`/admin/stats?days=${state.usageDays}&recent=0`);
+  const u = stats.usage || {};
+  const kpi = (label, value, sub) => `<div class="card"><h3>${esc(label)}</h3>
+    <div class="kpi-value">${value}</div><div class="kpi-sub">${esc(sub || "")}</div></div>`;
+  const maxDay = Math.max(1, ...(stats.daily || []).map(x => x.tokens));
+  const daily = (stats.daily || []).map(x => `<tr>
+      <td>${esc(x.day)}</td><td>${num(x.requests)}</td>
+      <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, x.tokens / maxDay * 100)}px"><i></i></div>
+      <span class="muted small">${fmtK(x.tokens)}</span></div></td></tr>`).join("");
+  const rows = (arr, first) => arr.map(x => `<tr><td>${esc(x[first]) || "—"}</td>
+      <td>${num(x.requests)}</td><td>${fmtK(x.tokens)}</td>
+      <td>${fmtCost(x.cost_usd)}</td></tr>`).join("");
+  $("#view-usage").innerHTML = `
+    <div class="toolbar">
+      <span class="muted small">时间窗口</span>
+      <select id="u-days">${[1, 7, 30].map(d => `<option value="${d}" ${d === state.usageDays ? "selected" : ""}>近 ${d} 天</option>`).join("")}</select>
+      <span class="grow"></span>
+      <button id="u-backfill" title="把历史零成本记录按当前牌价补算">🧮 回填历史成本</button>
+    </div>
+    <div class="grid kpis">
+      ${kpi("请求数", num(u.requests), `窗口 ${stats.window_days} 天`)}
+      ${kpi("输入 Tokens", fmtK(u.input_tokens), num(u.input_tokens) + " 精确值")}
+      ${kpi("输出 Tokens", fmtK(u.output_tokens), num(u.output_tokens) + " 精确值")}
+      ${kpi("等价成本", fmtCost(u.cost_usd), "按公开牌价折算；免费渠道=省下的钱，付费渠道=真实成本")}
+    </div>
+    <h4 class="sec">按天</h4>
+    <div class="tablewrap"><table><thead><tr><th>日期</th><th>请求数</th><th>Tokens</th></tr></thead>
+      <tbody>${daily || '<tr><td colspan="3" class="muted">暂无数据</td></tr>'}</tbody></table></div>
+    <h4 class="sec">按供应商</h4>
+    <div class="tablewrap"><table><thead><tr><th>供应商</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
+      <tbody>${rows(u.by_provider || [], "provider")}</tbody></table></div>
+    <h4 class="sec">按模型（Top）</h4>
+    <div class="tablewrap"><table><thead><tr><th>模型</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
+      <tbody>${rows(u.top_models || [], "model")}</tbody></table></div>
+    <h4 class="sec">按凭据（哪把 Key 在干活）</h4>
+    <div class="tablewrap"><table><thead><tr><th>凭据</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
+      <tbody>${rows(u.by_credential || [], "credential_id")}</tbody></table></div>`;
+  $("#u-days").onchange = e => { state.usageDays = Number(e.target.value); loadUsage(); };
+  $("#u-backfill").onclick = async () => {
+    const r = await api("/admin/usage/backfill-cost", { method: "POST" });
+    toast(r.updated ? `已回填 ${r.updated} 条，合计 $${r.total_cost_usd}` : "没有需要回填的记录", "ok");
+    loadUsage();
+  };
+}
+
+/* ================= 模型与别名 ================= */
+async function loadModels() {
+  const [m, al] = await Promise.all([api("/admin/models"), api("/admin/aliases")]);
+  const modelRows = (m.data || []).map(x => {
+    const deps = (x.deployments || []).map(d =>
+      `<div>${esc(d.provider_id)} → <b>${esc(d.upstream_model)}</b>
+       <span class="chip">p${d.priority}</span>
+       <span class="chip ${d.input_cost_per_mtok || d.output_cost_per_mtok ? "" : "muted"}" title="牌价 USD/百万token（输入/输出）">
+         💲${d.input_cost_per_mtok ?? 0}/${d.output_cost_per_mtok ?? 0}</span>
+       ${d.enabled ? "" : " " + pill("disabled")}</div>`).join("");
+    return `<tr><td><b>${esc(x.id)}</b>${x.description ? `<div class="small muted">${esc(x.description)}</div>` : ""}</td>
+      <td>${x.enabled ? pill("healthy") : pill("disabled")}</td>
+      <td>${fmtK(x.context_window)}</td><td>${deps || "-"}</td></tr>`;
+  }).join("");
+  const aliasRows = Object.entries(al.data || {}).map(([name, a]) => `
+    <tr><td><b>${esc(name)}</b>${a.description ? `<div class="small muted">${esc(a.description)}</div>` : ""}</td>
+    <td>${esc(a.strategy)}</td>
+    <td>${(a.targets || []).map(esc).join(" → ")}</td>
+    <td class="small muted">${esc(((al.resolved || {})[name] || []).join(", "))}</td>
+    <td>${a.enabled ? pill("healthy") : pill("disabled")}</td></tr>`).join("");
+  const warnings = (m.config_warnings || []).length
+    ? `<div class="toolbar"><span class="pill amber">⚠ 配置警告 ${m.config_warnings.length} 条</span>
+       <details class="raw grow"><summary>展开</summary><pre>${m.config_warnings.map(esc).join("\n")}</pre></details></div>` : "";
+  $("#view-models").innerHTML = `
+    ${warnings}
+    <h4 class="sec">模型（${(m.data || []).length}）</h4>
+    <div class="tablewrap"><table><thead><tr><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th></tr></thead>
+      <tbody>${modelRows}</tbody></table></div>
+    <h4 class="sec">别名（对外稳定入口）</h4>
+    <div class="tablewrap"><table><thead><tr><th>别名</th><th>策略</th><th>目标链</th><th>解析结果</th><th>状态</th></tr></thead>
+      <tbody>${aliasRows}</tbody></table></div>
+    <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
+    <div class="card"><div class="row-flex">
+      <input id="pv-model" size="16" value="zk-auto" placeholder="模型/别名">
+      <input id="pv-prompt" size="26" value="写一个快速排序并解释" placeholder="模拟 prompt">
+      <label class="small muted">tools <input id="pv-tools" type="number" value="2" min="0" max="20" style="width:56px"></label>
+      <label class="small muted"><input id="pv-json" type="checkbox"> JSON 模式</label>
+      <button class="primary" id="pv-go">预览</button>
+    </div><div id="pv-out" style="margin-top:10px"></div></div>`;
+  $("#pv-go").onclick = async () => {
+    const p = new URLSearchParams({
+      model: $("#pv-model").value.trim() || "zk-auto",
+      prompt: $("#pv-prompt").value, tools: $("#pv-tools").value,
+      json_mode: $("#pv-json").checked ? "true" : "false",
+    });
+    const r = await api("/admin/router/preview?" + p.toString());
+    if (r.error) { $("#pv-out").innerHTML = `<span class="pill red">${esc(r.error.message)}</span>`; return; }
+    const plan = (r.plan || []).map((c, i) => `
+      <tr><td>${c.order ?? i + 1}</td><td>${esc(c.deployment_id || c.id || "-")}</td>
+      <td>${esc(c.provider_id || c.provider || "-")}</td><td>${esc(c.model || "-")}</td>
+      <td>${c.eligible ? pill("healthy") : pill("disabled")}</td></tr>`).join("");
+    $("#pv-out").innerHTML = `
+      <div class="small muted" style="margin-bottom:6px">${esc(r.reason || "")}
+      ${r.alias ? ` · 别名 ${esc(r.alias)}` : ""} · 策略 ${esc(r.strategy || "-")}</div>
+      <div class="tablewrap"><table><thead><tr><th>#</th><th>部署</th><th>供应商</th><th>上游模型</th><th>入选</th></tr></thead>
+      <tbody>${plan}</tbody></table></div>
+      <details class="raw"><summary>原始数据</summary><pre>${esc(JSON.stringify(r, null, 1).slice(0, 4000))}</pre></details>`;
+  };
+}
+
+/* ================= 令牌 / 启动 ================= */
+function showAuth() { $("#auth").classList.add("show"); $("#auth-token").value = state.token; $("#auth-token").focus(); }
+$("#auth-save").onclick = () => {
+  state.token = $("#auth-token").value.trim();
+  localStorage.setItem("zkai_admin_token", state.token);
+  $("#auth").classList.remove("show"); refresh();
+};
+$("#auth-cancel").onclick = () => $("#auth").classList.remove("show");
+$("#btn-token").onclick = showAuth;
+$("#btn-refresh").onclick = () => refresh();
+$("#auto-interval").onchange = setupTimer;
+/* 主题切换：浅色（默认，对齐参考项目）/ 暗色，localStorage 持久化 */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  $("#btn-theme").textContent = t === "dark" ? "☀️" : "🌙";
+  localStorage.setItem("zkai_theme", t);
+}
+$("#btn-theme").onclick = () =>
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+applyTheme(localStorage.getItem("zkai_theme") || "light");
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => switchView(b.dataset.view));
+document.addEventListener("keydown", e => { if (e.key === "Escape") $("#drawer").classList.remove("open"); });
+
+/* URL 带 ?token=xxx 时自动保存（书签直达） */
+const urlToken = new URLSearchParams(location.search).get("token");
+if (urlToken) { state.token = urlToken; localStorage.setItem("zkai_admin_token", urlToken);
+  history.replaceState(null, "", "/ui"); }
+refresh();
+</script>
+</body>
+</html>

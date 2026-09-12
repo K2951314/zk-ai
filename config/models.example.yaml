@@ -1,0 +1,323 @@
+# ===========================================================================
+# ZK-AI —— 模型 / 部署 / 别名配置（示例文件）
+#
+# 四层概念（务必分清，配错就路由不到）：
+#   模型 Model        —— 客户端使用的公开名字（如 gpt-5-mini）
+#   部署 Deployment   —— 「哪个 provider 上的哪个上游模型」+ 优先级/权重/价格，
+#                        是故障转移的最小单位
+#   别名 Alias        —— 如 zk-coding → 一串有序模型；后端换来换去，客户端不用改
+#   能力 Capability   —— 每个维度 0-10 分，能力路由据此打分排序
+#
+# 部署的 priority 决定同策略候选的顺序；capability 策略则由能力打分决定。
+# 价格字段只用于统计展示，不参与路由决策。
+#
+# 参数支持：supported_params 限定该部署接受哪些参数；客户端传了、而上游无法
+# 映射的参数会被「记录下来」，绝不静默丢弃（详见 README「参数映射」一节）。
+# ===========================================================================
+
+models:
+  # -------------------------------------------------------------------------
+  # OpenAI
+  # -------------------------------------------------------------------------
+  - id: gpt-5
+    # 展示名，出现在 /v1/models 与管理界面
+    display_name: GPT-5
+    # 归属方，用于 /v1/models 的 owned_by 字段
+    owned_by: openai
+    # 上下文窗口（token 数），能力路由判断长上下文时会用到
+    context_window: 400000
+    capabilities:
+      # 代码编写能力
+      coding: 9.5
+      # 推理能力
+      reasoning: 9.5
+      # 工具/函数调用能力
+      tool_use: 9.0
+      # 图像理解能力（0 = 不支持视觉）
+      vision: 8.5
+      # 长上下文表现
+      long_context: 9.0
+      # 结构化输出（JSON）可靠性
+      structured_output: 9.5
+      # 速度（越大越快）
+      speed: 6.0
+      # 成本（越大越便宜）
+      cost: 4.0
+    deployments:
+      - id: gpt-5-openai
+        # 指向 providers.yaml 里的 provider.id
+        provider_id: openai
+        # 发给上游的真实模型名
+        model: gpt-5
+        # 同类部署中越大越优先
+        priority: 120
+        # 该部署允许的最大输出 token
+        max_output_tokens: 8192
+        # 输入价格（美元 / 百万 token），仅用于统计
+        input_cost_per_mtok: 1.25
+        output_cost_per_mtok: 10.0
+        options:
+          # 推理模型必须使用较新的参数名（max_tokens 会被上游拒绝）
+          max_tokens_param: max_completion_tokens
+      - id: gpt-5-openrouter
+        provider_id: openrouter
+        model: openai/gpt-5
+        priority: 80
+        max_output_tokens: 8192
+        input_cost_per_mtok: 1.25
+        output_cost_per_mtok: 10.0
+        options:
+          max_tokens_param: max_completion_tokens
+
+  - id: gpt-5-mini
+    display_name: GPT-5 mini
+    owned_by: openai
+    context_window: 400000
+    capabilities:
+      coding: 8.0
+      reasoning: 7.5
+      tool_use: 8.5
+      vision: 8.0
+      long_context: 8.5
+      structured_output: 9.0
+      speed: 8.5
+      cost: 8.0
+    deployments:
+      - id: gpt-5-mini-openai
+        provider_id: openai
+        model: gpt-5-mini
+        priority: 110
+        max_output_tokens: 8192
+        input_cost_per_mtok: 0.25
+        output_cost_per_mtok: 2.0
+        options:
+          max_tokens_param: max_completion_tokens
+
+  - id: gpt-4.1-mini
+    display_name: GPT-4.1 mini
+    owned_by: openai
+    context_window: 1000000
+    capabilities:
+      coding: 7.5
+      reasoning: 6.5
+      tool_use: 8.0
+      vision: 7.5
+      long_context: 9.5
+      structured_output: 8.5
+      speed: 8.0
+      cost: 8.5
+    deployments:
+      - id: gpt-4.1-mini-openai
+        provider_id: openai
+        model: gpt-4.1-mini
+        priority: 100
+        input_cost_per_mtok: 0.4
+        output_cost_per_mtok: 1.6
+
+  # -------------------------------------------------------------------------
+  # Anthropic
+  # -------------------------------------------------------------------------
+  - id: claude-sonnet
+    display_name: Claude Sonnet
+    owned_by: anthropic
+    context_window: 200000
+    capabilities:
+      coding: 9.5
+      reasoning: 9.0
+      tool_use: 9.5
+      vision: 8.5
+      long_context: 8.0
+      structured_output: 7.5
+      speed: 7.0
+      cost: 5.0
+    deployments:
+      - id: claude-sonnet-anthropic
+        provider_id: anthropic
+        model: claude-sonnet-4-5
+        priority: 115
+        max_output_tokens: 8192
+        input_cost_per_mtok: 3.0
+        output_cost_per_mtok: 15.0
+      - id: claude-sonnet-openrouter
+        provider_id: openrouter
+        model: anthropic/claude-sonnet-4.5
+        priority: 70
+        max_output_tokens: 8192
+
+  - id: claude-haiku
+    display_name: Claude Haiku
+    owned_by: anthropic
+    context_window: 200000
+    capabilities:
+      coding: 7.0
+      reasoning: 6.5
+      tool_use: 8.0
+      vision: 7.0
+      long_context: 7.5
+      structured_output: 7.0
+      speed: 9.5
+      cost: 8.0
+    deployments:
+      - id: claude-haiku-anthropic
+        provider_id: anthropic
+        model: claude-haiku-4-5
+        priority: 100
+        max_output_tokens: 4096
+        input_cost_per_mtok: 1.0
+        output_cost_per_mtok: 5.0
+
+  # -------------------------------------------------------------------------
+  # Google Gemini
+  # -------------------------------------------------------------------------
+  - id: gemini-pro
+    display_name: Gemini Pro
+    owned_by: google
+    context_window: 1000000
+    capabilities:
+      coding: 8.5
+      reasoning: 8.5
+      tool_use: 8.5
+      vision: 9.0
+      long_context: 9.5
+      structured_output: 9.0
+      speed: 7.0
+      cost: 6.0
+    deployments:
+      - id: gemini-pro-google
+        provider_id: gemini
+        model: gemini-2.5-pro
+        priority: 105
+        max_output_tokens: 8192
+        input_cost_per_mtok: 1.25
+        output_cost_per_mtok: 10.0
+
+  - id: gemini-flash
+    display_name: Gemini Flash
+    owned_by: google
+    context_window: 1000000
+    capabilities:
+      coding: 7.5
+      reasoning: 7.0
+      tool_use: 8.0
+      vision: 8.0
+      long_context: 9.5
+      structured_output: 8.5
+      speed: 9.5
+      cost: 9.0
+    deployments:
+      - id: gemini-flash-google
+        provider_id: gemini
+        model: gemini-2.5-flash
+        priority: 95
+        max_output_tokens: 8192
+        input_cost_per_mtok: 0.3
+        output_cost_per_mtok: 2.5
+
+  # -------------------------------------------------------------------------
+  # 本地模型（Ollama）。在 provider 启用之前不会参与路由，但先把模型配好，
+  # Ollama 一跑起来 `zk-local` 以及本地兜底链就能立刻生效。
+  # -------------------------------------------------------------------------
+  - id: qwen3-local
+    display_name: Qwen3 (本地)
+    owned_by: ollama
+    context_window: 32768
+    capabilities:
+      coding: 6.5
+      reasoning: 6.0
+      tool_use: 5.5
+      vision: 0.0
+      long_context: 4.0
+      structured_output: 6.0
+      speed: 7.0
+      # 本地推理不产生费用，成本项给满分
+      cost: 10.0
+    deployments:
+      - id: qwen3-local-ollama
+        provider_id: ollama
+        model: qwen3:8b
+        priority: 40
+        context_window: 32768
+        input_cost_per_mtok: 0.0
+        output_cost_per_mtok: 0.0
+
+  - id: llama3-local
+    display_name: Llama 3.2 (本地)
+    owned_by: ollama
+    context_window: 131072
+    capabilities:
+      coding: 6.0
+      reasoning: 5.5
+      tool_use: 5.0
+      vision: 0.0
+      long_context: 6.0
+      structured_output: 5.5
+      speed: 7.5
+      cost: 10.0
+    deployments:
+      - id: llama3-local-ollama
+        provider_id: ollama
+        model: llama3.2:3b
+        priority: 35
+        context_window: 131072
+
+# ===========================================================================
+# 别名 —— 客户端实际使用的模型名。改这里的目标（或运行时调
+# POST /admin/aliases）就能切换后端，客户端一行代码都不用动。
+#
+# strategy: capability | priority | cost | speed | round_robin | weighted
+#           （能力评分 / 优先级 / 便宜优先 / 快优先 / 轮询 / 加权）
+# requires: 硬门槛，如 {vision: 1} 表示「必须能看图」，不满足的模型直接淘汰
+# weights : 该别名专属的打分权重（覆盖系统按请求推断出的权重）
+# ===========================================================================
+aliases:
+  - name: zk-auto
+    description: 默认入口：均衡型，由能力路由按每次请求的内容选模型
+    strategy: capability
+    targets: [claude-sonnet, gpt-5, gemini-pro, gpt-5-mini, gemini-flash]
+
+  - name: zk-coding
+    description: 代码生成、重构与代码审查
+    strategy: capability
+    weights: {coding: 6.0, tool_use: 3.0, reasoning: 2.0, structured_output: 2.0}
+    targets: [claude-sonnet, gpt-5, gpt-5-mini, gemini-pro, gpt-4.1-mini, qwen3-local]
+
+  - name: zk-reasoning
+    description: 深度推理、数学与架构取舍分析
+    strategy: capability
+    weights: {reasoning: 7.0, long_context: 2.0, coding: 1.0}
+    targets: [gpt-5, claude-sonnet, gemini-pro, gpt-5-mini]
+
+  - name: zk-fast
+    description: 延迟最低优先
+    strategy: speed
+    targets: [gemini-flash, claude-haiku, gpt-5-mini, gpt-4.1-mini]
+
+  - name: zk-cheap
+    description: 在够用的前提下最便宜优先
+    strategy: cost
+    targets: [gemini-flash, gpt-4.1-mini, claude-haiku, gpt-5-mini, llama3-local]
+
+  - name: zk-long
+    description: 超长文档与超大上下文场景
+    strategy: capability
+    weights: {long_context: 8.0, structured_output: 2.0}
+    targets: [gemini-pro, gemini-flash, gpt-4.1-mini, gpt-5, llama3-local]
+
+  - name: zk-vision
+    description: 图片与截图理解
+    strategy: capability
+    # 硬门槛：没有视觉能力的模型（vision=0）一律出局
+    requires: {vision: 1}
+    weights: {vision: 8.0, reasoning: 1.0}
+    targets: [gemini-pro, gpt-5, claude-sonnet, gpt-5-mini, gemini-flash]
+
+  - name: zk-local
+    description: 仅使用本地 Ollama 模型，不产生任何云端出网调用
+    strategy: priority
+    targets: [qwen3-local, llama3-local]
+
+  - name: zk-erpnext
+    description: ERP 集成场景：工具调用 + 结构化输出，兜底落到本地模型
+    strategy: capability
+    weights: {tool_use: 6.0, structured_output: 6.0, coding: 2.0}
+    targets: [claude-sonnet, gpt-5-mini, gpt-5, gemini-flash, qwen3-local]
