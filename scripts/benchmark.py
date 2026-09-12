@@ -3,7 +3,7 @@
 Usage::
 
     # start the gateway first
-    uv run uvicorn app.main:app --port 8000
+    uv run uvicorn app.main:app --port 8317
 
     uv run python scripts/benchmark.py --model zk-coding --runs 5
     uv run python scripts/benchmark.py --model zk-fast --prompt "写一个快排" --runs 3
@@ -102,7 +102,7 @@ async def run_once(
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark ZK-AI through its API")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8317")
     parser.add_argument("--model", default="zk-auto", help="model id or alias")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--prompt", default=None)

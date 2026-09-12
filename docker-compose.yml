@@ -3,7 +3,7 @@
 #
 #   cp .env.example .env      # then fill in the keys you have
 #   docker compose up -d --build
-#   curl http://127.0.0.1:8000/health
+#   curl http://127.0.0.1:8317/health
 #
 # Data (SQLite + WAL) persists in ./data, configuration is mounted read-only.
 # ===========================================================================
@@ -16,12 +16,12 @@ services:
     container_name: zk-ai
     restart: unless-stopped
     ports:
-      - "${ZKAI_PORT:-8000}:8000"
+      - "${ZKAI_PORT:-8317}:8317"
     env_file:
       - .env
     environment:
       ZKAI_HOST: 0.0.0.0
-      ZKAI_PORT: 8000
+      ZKAI_PORT: 8317
       ZKAI_DATA_DIR: /app/data
       ZKAI_CONFIG_DIR: /app/config
       ZKAI_DATABASE_URL: sqlite+aiosqlite:////app/data/zkai.db
@@ -35,7 +35,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8317/health', timeout=4).status == 200 else 1)"
       interval: 30s
       timeout: 5s
       retries: 3

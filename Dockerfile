@@ -29,7 +29,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
     ZKAI_HOST=0.0.0.0 \
-    ZKAI_PORT=8000 \
+    ZKAI_PORT=8317 \
     ZKAI_DATA_DIR=/app/data \
     ZKAI_CONFIG_DIR=/app/config
 
@@ -42,10 +42,10 @@ COPY --from=builder --chown=zkai:zkai /app /app
 RUN mkdir -p /app/data && chown -R zkai:zkai /app/data
 
 USER zkai
-EXPOSE 8000
+EXPOSE 8317
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8317/health', timeout=4).status == 200 else 1)"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8317"]

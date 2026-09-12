@@ -7,7 +7,7 @@ Run the stack first::
     python scripts/mock_upstream.py --port 8099
     MOCK_KEY_01=... MOCK_KEY_02=... MOCK_KEY_03=... \
         NO_PROXY=127.0.0.1,localhost \
-        python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+        python -m uvicorn app.main:app --host 127.0.0.1 --port 8317
 
 then::
 
@@ -20,7 +20,7 @@ import sys
 
 import httpx
 
-BASE = "http://127.0.0.1:8000"
+BASE = "http://127.0.0.1:8317"
 #: Throwaway token for the local mock run (see config/config.yaml); not a secret.
 ADMIN_TOKEN = "local-admin-token"  # noqa: S105
 ADMIN = {"X-Admin-Token": ADMIN_TOKEN}

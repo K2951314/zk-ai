@@ -9,9 +9,9 @@ Usage::
 
     # point the openai provider at it, then run the gateway
     OPENAI_BASE_URL=http://127.0.0.1:8099/v1 OPENAI_KEY_01=mock-key \\
-        uv run uvicorn app.main:app --port 8000
+        uv run uvicorn app.main:app --port 8317
 
-    curl -s http://127.0.0.1:8000/v1/chat/completions \\
+    curl -s http://127.0.0.1:8317/v1/chat/completions \\
         -H 'content-type: application/json' \\
         -d '{"model":"zk-coding","messages":[{"role":"user","content":"hi"}]}'
 

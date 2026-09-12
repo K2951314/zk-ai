@@ -1,4 +1,4 @@
-"""启动前检查 8000 端口：本程序的旧实例则结束它，其他程序则提示并退出。
+"""启动前检查 8317 端口：本程序的旧实例则结束它，其他程序则提示并退出。
 
 被 ``start_gateway.cmd`` 调用。退出码约定：
 
@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PORT = int(os.environ.get("ZKAI_PORT", "8000"))
+PORT = int(os.environ.get("ZKAI_PORT", "8317"))
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -221,7 +221,8 @@ def main() -> int:
         print()
         print("  为安全起见不会结束它。请任选一种处理方式：")
         print("    1) 换一个端口启动本网关：")
-        print("         修改 .env 里的 ZKAI_PORT=8001（或直接设环境变量）")
+        print("         命令行执行 scripts/start_gateway.cmd 9000，")
+        print("         或修改 .env 里的 ZKAI_PORT（双击启动时也读它）")
         print("    2) 确认上面那个程序可以关闭后，手动结束它再重试")
         print()
         return 1

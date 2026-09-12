@@ -5,7 +5,7 @@ Usage::
     uv run python scripts/health_check.py                  # all enabled providers
     uv run python scripts/health_check.py -p openai        # one provider
     uv run python scripts/health_check.py --json           # machine readable
-    uv run python scripts/health_check.py --remote http://127.0.0.1:8000
+    uv run python scripts/health_check.py --remote http://127.0.0.1:8317
 
 Local mode builds the object graph directly (no HTTP server needed) and probes
 ``GET /models`` on each provider - it never consumes inference quota.

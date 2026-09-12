@@ -76,7 +76,7 @@
 | **四层抽象** | Provider → Deployment → Model → Credential。一个模型可以有多个 Deployment（多供应商/多区域），失败自动切换。 |
 | **Key Pool** | 显式状态机 `HEALTHY / COOLDOWN / UNHEALTHY / DISABLED`，5 种轮换策略，`threading.RLock` 保证选择原子性。 |
 | **错误分类驱动** | 26 种错误原因 → `retryable / switch_credential / switch_provider / cooldown`。400/413 **绝不**轮换 Key；401 → UNHEALTHY；429 → 分钟限流指数冷却 / 额度耗尽长休；529 → deployment 冷却 + 故障转移。 |
-| **Web 控制台** | 浏览器打开 `http://127.0.0.1:8000/ui`：总览 / 凭据池（冷却倒计时+一键解禁）/ 请求日志筛选+attempt 明细 / 用量统计 / 路由预览。单文件零依赖，数据仍走鉴权的 `/admin/*`。 |
+| **Web 控制台** | 浏览器打开 `http://127.0.0.1:8317/ui`：总览 / 凭据池（冷却倒计时+一键解禁）/ 请求日志筛选+attempt 明细 / 用量统计 / 路由预览。单文件零依赖，数据仍走鉴权的 `/admin/*`。 |
 | **有界重试** | 指数退避 + 抖动，`max_total_attempts` 是硬顶，结构上不可能死循环。 |
 | **可解释路由** | 8 个能力维度加权打分 + 硬门槛，每个响应都带 `zk_ai.routing_reason` 与逐维度得分。 |
 | **别名热更新** | `POST /admin/aliases` 运行时改线，客户端零感知。 |
@@ -107,7 +107,8 @@ cp .env.example .env          # 填入真实 Key（.env 已被 .gitignore 忽略
 python scripts/init_db.py
 
 # 启动
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8317
+scripts\start_gateway.cmd 9000   # 或用启动脚本，端口作参数传入
 ```
 
 > `config.yaml` / `providers.yaml` / `models.yaml` 缺省时会自动回退到同目录的
@@ -116,7 +117,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 调用：
 
 ```bash
-curl -s http://127.0.0.1:8000/v1/chat/completions \
+curl -s http://127.0.0.1:8317/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
         "model": "zk-coding",
@@ -135,7 +136,7 @@ Python / OpenAI SDK 直接指向本网关即可，**不需要任何改动**：
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://127.0.0.1:8317/v1", api_key="unused")
 
 resp = client.chat.completions.create(
     model="zk-coding",                       # 稳定的别名，不是真实模型名
@@ -157,7 +158,7 @@ python scripts/mock_upstream.py --port 8099
 
 # 终端 2：网关（config/providers.yaml 已指向 mock，3 个 Key）
 MOCK_KEY_01=mock-key-1 MOCK_KEY_02=mock-key-2 MOCK_KEY_03=mock-key-3 \
-  python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8317
 
 # 终端 3：17 项端到端断言
 python scripts/smoke_test.py
@@ -199,8 +200,8 @@ python scripts/smoke_test.py
 
 | 客户端 | 填什么 |
 |---|---|
-| OpenAI SDK / LangChain | `base_url="http://127.0.0.1:8000/v1"`，`api_key="任意非空"` |
-| curl | `http://127.0.0.1:8000/v1/chat/completions` |
+| OpenAI SDK / LangChain | `base_url="http://127.0.0.1:8317/v1"`，`api_key="任意非空"` |
+| curl | `http://127.0.0.1:8317/v1/chat/completions` |
 | ZCode（`D:\ZCode\ZCode.exe`） | 见下方一键脚本；`kind: openai-compatible` |
 | Claude Code | ⚠ 见下方「关于 Anthropic 协议」 |
 
@@ -368,7 +369,7 @@ models:
 ```bash
 # 填好 .env 后
 uv run python scripts/init_db.py
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8317 --log-level info
 ```
 
 启动日志会打印 provider / model / alias / credential 数量和**配置告警**，先看这里：
@@ -380,9 +381,9 @@ zkai.container: ZK-AI ready: 3 provider(s), 5 model(s), 7 alias(es)
 然后：
 
 ```bash
-curl.exe -s http://127.0.0.1:8000/health                     # 看 credentials.usable 是否 > 0
-curl.exe -s "http://127.0.0.1:8000/admin/credentials" -H "X-Admin-Token: $ZKAI_ADMIN_TOKEN"
-curl.exe -s "http://127.0.0.1:8000/admin/router/preview?model=zk-coding&prompt=write%20a%20function"
+curl.exe -s http://127.0.0.1:8317/health                     # 看 credentials.usable 是否 > 0
+curl.exe -s "http://127.0.0.1:8317/admin/credentials" -H "X-Admin-Token: $ZKAI_ADMIN_TOKEN"
+curl.exe -s "http://127.0.0.1:8317/admin/router/preview?model=zk-coding&prompt=write%20a%20function"
 ```
 
 `/health` 的 `credentials.usable` 为 0 基本只有两个原因：变量名写错（看启动告警），
@@ -391,7 +392,7 @@ curl.exe -s "http://127.0.0.1:8000/admin/router/preview?model=zk-coding&prompt=w
 调用 Kimi K3（用别名，客户端不用知道后端是谁）：
 
 ```bash
-curl.exe -s -X POST http://127.0.0.1:8000/v1/chat/completions \
+curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"zk-coding","messages":[{"role":"user","content":"写一个快速排序"}]}'
 ```
@@ -516,7 +517,7 @@ ZK-AI/
 ```yaml
 app:
   host: 0.0.0.0
-  port: 8000
+  port: 8317
 logging:
   level: INFO
   json: false                  # true = 每行一个 JSON 对象
@@ -710,7 +711,7 @@ models:
 运行时改线：
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/admin/aliases \
+curl -s -X POST http://127.0.0.1:8317/admin/aliases \
   -H 'X-Admin-Token: <token>' -H 'content-type: application/json' \
   -d '{"name":"zk-coding","targets":["claude-sonnet","gpt-5"],"strategy":"capability"}'
 ```
@@ -946,7 +947,7 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 
 ### 13.2 运维面 `/admin/*` 与 Web 控制台
 
-**浏览器打开 `http://127.0.0.1:8000/ui`** 即可使用内置 Web 控制台（单文件、零依赖、
+**浏览器打开 `http://127.0.0.1:8317/ui`** 即可使用内置 Web 控制台（单文件、零依赖、
 无需构建）：五个视图——总览（供应商可用性 + 池成功率 + 一键健康检查/热重载/清冷却）、
 凭据池（状态徽章 + 冷却倒计时 + 逐把启用/禁用）、请求记录（多条件筛选 + 分页 +
 点击行看每次 attempt 的上游错误原文）、用量统计（按天/供应商/模型/凭据）、
@@ -978,7 +979,7 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 `/admin/router/preview` 支持模拟各种请求形态，用来回答「为什么走了这个模型」：
 
 ```bash
-curl -s "http://127.0.0.1:8000/admin/router/preview?model=zk-coding&prompt=write%20a%20python%20function&tools=2&json_mode=true" \
+curl -s "http://127.0.0.1:8317/admin/router/preview?model=zk-coding&prompt=write%20a%20python%20function&tools=2&json_mode=true" \
   -H 'X-Admin-Token: <token>'
 ```
 
@@ -1179,9 +1180,9 @@ uv run mypy app scripts               # Success: no issues found in 57 source fi
 ## 19. Docker
 
 ```bash
-docker compose up --build          # 网关 :8000
+docker compose up --build          # 网关 :8317
 docker build -t zk-ai .
-docker run --rm -p 8000:8000 \
+docker run --rm -p 8317:8317 \
   -e OPENAI_KEY_01=sk-... \
   -e ZKAI_ADMIN_TOKEN=change-me \
   -v "$PWD/data:/app/data" \

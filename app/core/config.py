@@ -68,7 +68,7 @@ def interpolate_env(value: Any) -> Any:
     Two behaviours are deliberate and load-bearing:
 
     * a value that is *exactly* a reference is expanded and then coerced, so
-      ``port: ${ZKAI_PORT:-8000}`` lands as ``int`` and ``enabled: ${X:-true}``
+      ``port: ${ZKAI_PORT:-8317}`` lands as ``int`` and ``enabled: ${X:-true}``
       as ``bool`` - otherwise every number in the YAML would need quoting;
     * a reference with no environment variable and **no default expands to
       ``None``**, never to an empty string. ``None`` makes the field *absent*,
@@ -134,7 +134,7 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8317
     root_path: str = ""
 
     log_level: str = "INFO"

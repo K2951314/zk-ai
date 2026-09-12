@@ -15,7 +15,7 @@
     print(ask("分析这批报价……", task="complex", session_id="erp-2026-09"))
 
 环境变量（都有默认值，本机直接用即可）：
-  ZKAI_BASE_URL   默认 http://127.0.0.1:8000
+  ZKAI_BASE_URL   默认 http://127.0.0.1:8317
   ZKAI_API_TOKEN  仅当网关设了 api_token 时才需要（默认不设）
 """
 
@@ -26,7 +26,9 @@ import os
 import urllib.error
 import urllib.request
 
-BASE_URL = os.environ.get("ZKAI_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+BASE_URL = os.environ.get(
+    "ZKAI_BASE_URL", f"http://127.0.0.1:{os.environ.get('ZKAI_PORT', '8317')}"
+).rstrip("/")
 API_TOKEN = os.environ.get("ZKAI_API_TOKEN", "")
 
 #: 任务档位 → 网关别名。简单任务要的是快+省；复杂任务走能力路由的全家桶。

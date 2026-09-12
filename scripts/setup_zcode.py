@@ -11,7 +11,7 @@ like::
         "source": "custom",
         "options": {
           "apiKey": "any",
-          "baseURL": "http://127.0.0.1:8000/v1",
+          "baseURL": "http://127.0.0.1:8317/v1",
           "apiKeyRequired": true
         },
         "models": {
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -48,7 +49,9 @@ PROVIDER_ID = "zk-ai-gateway"
 PROVIDER_NAME = "ZK-AI Gateway"
 
 #: Address of the local gateway. ZCode runs on the same machine, so loopback.
-BASE_URL = "http://127.0.0.1:8000/v1"
+BASE_URL = os.environ.get(
+    "ZKAI_BASE_URL", f"http://127.0.0.1:{os.environ.get('ZKAI_PORT', '8317')}/v1"
+)
 #: The gateway authenticates *providers*, not clients - any non-empty string works.
 API_KEY = "zk-ai-local"
 
@@ -147,7 +150,7 @@ def cmd_apply(path: Path) -> int:
     print(f"新增/更新 provider: {PROVIDER_ID} ({PROVIDER_NAME})，{len(MODELS)} 个模型")
     print()
     print("下一步：重启 ZCode，在模型选择器里应能看到 ZK-AI Gateway 下的 zk-* 模型。")
-    print("前提：ZK-AI 网关正在 127.0.0.1:8000 上运行。")
+    print(f"前提：ZK-AI 网关正在 {BASE_URL} 上运行。")
     return 0
 
 
