@@ -1,0 +1,20 @@
+# Build context hygiene: keep secrets, caches and local runtime data out of
+# `docker build` (the Dockerfile only COPYs app/config/scripts, but the whole
+# context is still shipped to the daemon).
+.git
+.venv
+data
+tests
+docs
+**/__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.log
+.env
+.env.*
+# Live configs stay out of the image; compose mounts them at runtime and the
+# app falls back to config/*.example.yaml when a live file is absent.
+config/config.yaml
+config/providers.yaml
+config/models.yaml
