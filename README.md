@@ -103,6 +103,9 @@ cp config/providers.example.yaml config/providers.yaml
 cp config/models.example.yaml   config/models.yaml
 cp .env.example .env          # 填入真实 Key（.env 已被 .gitignore 忽略）
 
+# 安装依赖（uv 会自动下载 Python 3.12+，无需单独装 Python）
+uv sync
+
 # 建表
 python scripts/init_db.py
 

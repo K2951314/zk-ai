@@ -8,12 +8,17 @@ REM  ZK-AI gateway launcher (Windows)
 REM
 REM  This file is intentionally pure ASCII. Batch files containing non-ASCII
 REM  text can be misparsed by cmd.exe (byte-offset desync around labels and
-REM  multi-byte characters), which once created junk files in the startup
-REM  directory and silently skipped lines. Chinese user-facing messages live
-REM  in scripts/port_guard.py, which handles UTF-8 correctly on its own.
+REM  multi-byte characters), which once created junk files and skipped lines.
+REM  Chinese user-facing messages live in scripts/port_guard.py.
 REM
 REM  Port precedence: 1) CLI arg  2) .env ZKAI_PORT  3) built-in default 8317
-REM  Example:  start_gateway.cmd 9000
+REM
+REM  Environment: if .venv is missing or broken (e.g. a .venv copied from
+REM  another machine - uv trampolines point at the original machine's Python,
+REM  so they never survive a copy), the launcher rebuilds it automatically
+REM  via "uv sync". One-time prerequisite on a new machine, in PowerShell:
+REM      irm https://astral.sh/uv/install.ps1 | iex
+REM  No separate Python install is needed; uv downloads Python 3.12+ itself.
 REM ===========================================================================
 
 REM Localhost must bypass HTTP_PROXY or the gateway becomes unreachable
@@ -23,6 +28,7 @@ set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 
 set "FINDSTR=%SystemRoot%\System32\findstr.exe"
+set "WHERE=%SystemRoot%\System32\where.exe"
 
 REM ---- Resolve port: CLI arg, then .env, then default 8317 ----
 set "ZKAI_PORT="
@@ -39,14 +45,55 @@ if exist ".env" (
 )
 if not defined ZKAI_HOST set "ZKAI_HOST=127.0.0.1"
 
-if not exist ".venv\Scripts\python.exe" (
+if not exist ".env" (
   echo.
-  echo   [ERROR] .venv not found. Run "uv sync" in the project root first.
+  echo   [WARN ] .env not found - the gateway will start with no credentials.
+  echo           Copy your .env from the old machine, or create it from
+  echo           .env.example and fill in the API keys, then restart.
+)
+
+REM ---- Ensure a WORKING .venv (missing or copied-and-broken triggers rebuild) ----
+set "VENV_OK="
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" -c "pass" >nul 2>&1
+  if not errorlevel 1 set "VENV_OK=1"
+)
+if defined VENV_OK goto :envready
+
+echo.
+echo   [INFO ] Python environment .venv is missing or broken.
+echo           A .venv copied from another machine never works; it will be
+echo           rebuilt here. Python 3.12+ is downloaded automatically.
+echo.
+%WHERE% uv >nul 2>&1
+if errorlevel 1 goto :nouv
+
+echo   Rebuilding with "uv sync" - downloads Python and packages, please wait...
+echo.
+call uv sync
+if errorlevel 1 (
+  echo.
+  echo   [ERROR] uv sync failed - see the messages above.
   echo.
   pause
   goto :end
 )
+echo.
+echo   .venv rebuilt.
+goto :envready
 
+:nouv
+echo   [ERROR] uv is not installed. Install it once, in PowerShell:
+echo.
+echo       irm https://astral.sh/uv/install.ps1 ^| iex
+echo.
+echo   Then close this window, reopen it (so PATH refreshes) and start again.
+echo   No separate Python installation is needed.
+echo.
+pause
+goto :end
+
+:envready
 REM ---- Port guard: kills OUR stale instance, refuses on foreign process ----
 .venv\Scripts\python.exe scripts\port_guard.py
 set GUARD=%ERRORLEVEL%
