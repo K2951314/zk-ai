@@ -34,8 +34,11 @@ os.environ.setdefault("PYTHONUTF8", "1")
 from app.core.config import Settings, load_app_config
 
 
-def build_price_map(config) -> dict[tuple[str, str], tuple[float, float]]:
-    """(model_id, provider_id) -> (input_cost_per_mtok, output_cost_per_mtok)."""
+def build_price_map(config) -> tuple[
+    dict[tuple[str, str], tuple[float, float]],
+    dict[str, tuple[float, float]],
+]:
+    """返回 (精确表 (model_id, provider_id) -> 价格, 兜底表 model_id -> 价格)。"""
     prices: dict[tuple[str, str], tuple[float, float]] = {}
     fallback: dict[str, tuple[float, float]] = {}
     for model in config.models.values():
@@ -44,7 +47,7 @@ def build_price_map(config) -> dict[tuple[str, str], tuple[float, float]]:
             prices[(model.id, dep.provider_id)] = pair
             if model.id not in fallback and (pair[0] or pair[1]):
                 fallback[model.id] = pair
-    return prices, fallback  # type: ignore[return-value]
+    return prices, fallback
 
 
 def main() -> int:
