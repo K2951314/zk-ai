@@ -83,6 +83,7 @@
 | **流式** | 纯 `data:` + `data: [DONE]`，OpenAI SDK 直接可用；路由元数据走 SSE **注释行**，不污染 chunk 流。 |
 | **零秘密泄漏** | Key 只从环境变量解析；日志、数据库、admin API 一律脱敏。 |
 | **可审计** | SQLite/SQLAlchemy 2.x 落库：requests、request_attempts、usage_records、health_checks。 |
+| **积分消耗器** | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。见使用手册「后台烧 flash-lite 积分」。 |
 
 ---
 
@@ -442,11 +443,11 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 > 网关对此的处理是**逐把独立冷却**：某把 Key 429 只冷却它自己，调度器立刻
 > 换下一把。因此跨账号的额度会**自动叠加**，不需要额外配置。
 > 唯一要确认的是 `config.yaml` 的 `retry.max_credentials_per_deployment`
-> 不小于实际账号数（否则试到一半就停了）——本仓库配的是 `6`。
+> 不小于实际账号数（否则试到一半就停了）——本仓库已配成 `8`（覆盖全部商汤账号）。
 >
-> 本项目的商汤 6 把 Key 分属 **5 个账号**（01+02 同一账号，03/04/05/06 各一个），
-> 所以实际有 5 份独立额度。`config/providers.yaml` 里用 `tags: ["account-x"]`
-> 标出归属（**只是给人看的标签，不参与调度**）。
+> 本项目的商汤 9 把 Key 分属**最多 8 个账号**（01+02 同一账号，03~06 各一个，
+> 07~09 归属待核对），所以实际有最多 8 份独立额度。`config/providers.yaml` 里
+> 用 `tags: ["account-x"]` 标出归属（**只是给人看的标签，不参与调度**）。
 >
 > 实测效果：`zk-k3` 在 try 到第 4 把（跨 4 个账号）时才拿到额度并成功返回。
 
@@ -492,7 +493,9 @@ ZK-AI/
 ├── config/               # *.example.yaml（可提交）+ *.yaml（本地，已忽略）
 │                         # 另有 providers.real.example.yaml / models.real.example.yaml
 │                         # —— 商汤日日新 + NVIDIA + Kimi 的可复制模板，见 §3.5
-├── scripts/              # init_db, health_check, benchmark, mock_upstream, smoke_test, setup_zcode, port_guard
+├── scripts/              # init_db, health_check, benchmark, mock_upstream, smoke_test,
+│                         # setup_zcode, port_guard, zkai_client, backfill_cost,
+│                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 ├── tests/                # conftest + 8 个测试模块，228 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile

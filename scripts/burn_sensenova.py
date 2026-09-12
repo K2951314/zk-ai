@@ -1,0 +1,800 @@
+#!/usr/bin/env python3
+"""商汤 sensenova-6.8-flash-lite 积分消耗器（后台常驻，积分池感知 + 自适应并发）。
+
+商汤 Token Plan 的积分池规则（为什么只敢烧到「专属池窗口上限」为止）：
+
+  Flash-lite 模型扣减顺序：
+    1. Flash-lite 专属池 · 周期积分      ← 只有烧这里才有 1:1 折算回充
+    2. 不足时消耗 通用池 · 周期积分      ← 这是 kimi-k3 的口粮，烧了纯亏
+    3. 仍不足时消耗 通用池 · 活动固定积分 ← 同上
+  其他模型（kimi-k3 等）只扣通用池。池切到下一步时请求照常成功、完全无感，
+  API 不返回任何「当前扣的哪个池」的信号（已实测：响应头/body 无池信息，
+  兼容层也没有余额查询端点），所以唯一安全的做法是**按积分记账、预算熔断**：
+  每个账号只烧「专属池 5h 窗口上限 × 安全系数」以内的量，烧到线就停靠，
+  等滚动窗口吐回余量再继续。宁可少烧（少转换），绝不溢出（烧 K3 口粮）。
+
+速度模型（2026-09-12 实测）：
+  - 单流生成速度固定 ~70 tok/s，总速率 = 70 × 在飞请求数 → 唯一杠杆是并发
+  - 12 并发时 429 极少（47 分钟仅 4 次），离供应商上限很远 → 用 AIMD 自适应：
+    每账号从 --per-account-start 起步，每成功 5 条升 1 档，撞 429 目标减半，
+    上限 --per-account-max。自动找到每个账号的可持续并发点
+  - 在飞请求的成本先记账（dispatch 时按预估扣，完成时按实扣修正），
+    高并发下也不会超订阅 5h 窗口
+
+费率（2026-09-12 按控制台实扣校准过一次）：
+  默认 入500 / 出1500 积分/百万token。用户实测一轮：估 12538（旧默认 3000/9000）
+  → 实扣 <1000，反推实际费率 ≈ 入120~240 / 出360~720。新默认保留 ~2 倍保守
+  边际（宁可多估：预算按估算熔断，估算偏高=更安全）。要贴上限烧就把估算校准到
+  实扣：跑一段后看控制台「积分消耗明细」实扣 Z、日志汇总的 入X/出Y，
+  r_out ≈ Z×1e6/(Y + X/3)，r_in ≈ r_out/3，然后 --rate-in/--rate-out 传入。
+
+用法：
+    .venv\\Scripts\\python.exe scripts\\burn_sensenova.py              # 常驻烧
+    .venv\\Scripts\\python.exe scripts\\burn_sensenova.py --once       # 每把 Key 各烧一次（自检）
+    .venv\\Scripts\\python.exe scripts\\burn_sensenova.py --help      # 全部参数
+    scripts\\start_burner.cmd                                          # 双击：最小化后台窗口
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import json
+import os
+import sys
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import httpx
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_LOG = ROOT / "data" / "burn_sensenova.log"
+STATE_FILE = ROOT / "data" / "burn_state.json"
+
+FILLER = "下面是一段用于接口压测的填充材料，请直接忽略它的内容，不要评论它。"
+
+# 额度耗尽的强特征词；命中且不带「频率/限流」字样才长停靠，避免把普通 429 判成额度用尽
+QUOTA_STRONG = ("quota", "余额", "欠费", "arrears", "insufficient", "exhaust",
+                "用尽", "已用完", "余额不足")
+FREQ_HINTS = ("rate limit", "限流", "频率", "too many", "并发", "requests per",
+              "rpm", "tps", "throttl")
+
+WIN_5H = 5 * 3600
+WIN_WEEK = 7 * 86400
+
+
+# ---------------------------------------------------------------------------
+# 数据结构
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AccountState:
+    """积分预算与并发按账号记账（同账号的多把 Key 共享一份池与限流）。"""
+
+    name: str
+    events: deque = field(default_factory=deque)  # (timestamp, credits) 每次成功扣减
+    parked_until: float = 0.0
+    park_reason: str = ""
+    credits_total: float = 0.0
+    # AIMD 自适应并发：429 减半；静默（无 429）每分钟 +1，自动贴住供应商上限
+    inflight: int = 0
+    target: float = 8.0
+    last_429: float = 0.0
+    inflight_cost: float = 0.0  # 在飞请求的预估积分（完成时用实扣修正）
+
+    def burned(self, now: float, window: float) -> float:
+        return sum(c for ts, c in self.events if ts > now - window)
+
+    def available(self, now: float, cap5h: float, capweek: float) -> float:
+        """窗口余量（已扣掉在飞请求的预估成本）。"""
+        avail = min(cap5h - self.burned(now, WIN_5H),
+                    capweek - self.burned(now, WIN_WEEK))
+        return avail - self.inflight_cost
+
+    def resume_time(self, now: float, cap5h: float, capweek: float, need: float) -> float:
+        """最早什么时候两个窗口都能腾出 need 积分。每个窗口各自算出
+        「能装下 need」的最早时刻，最终答案取 max（两个约束必须同时满足）。"""
+        ans = now + 60.0
+        for window, cap in ((WIN_5H, cap5h), (WIN_WEEK, capweek)):
+            evs = sorted((ts, c) for ts, c in self.events if ts > now - window)
+            total = sum(c for _, c in evs)
+            if cap < need:
+                # 熔断线比单条请求还小：滚出也装不下，一天后再试（配置问题）
+                ans = max(ans, now + 86400.0)
+                continue
+            need_release = total - (cap - need)
+            if need_release <= 0:
+                continue  # 该窗口已满足，不拖后腿
+            acc = 0.0
+            for ts, c in evs:  # 从最老开始滚出，直到窗口内腾出 need
+                acc += c
+                if acc >= need_release:
+                    ans = max(ans, ts + window + 30)
+                    break
+            else:
+                # 事件全部滚出仍不够 → 该窗口近期装不下，一天后再试
+                ans = max(ans, now + 86400.0)
+        return ans
+
+
+@dataclass
+class KeyState:
+    name: str
+    key: str
+    account: AccountState
+    inflight: int = 0
+    cooldown_until: float = 0.0
+    streak: int = 0            # 连续 429 次数，决定本次冷却时长
+    parked_until: float = 0.0  # Key 级停靠（仅用于 Key 失效等永久性问题）
+    park_reason: str = ""
+    attempts: int = 0
+    ok: int = 0
+    fail: int = 0
+    rate_limited: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    last_err: str = ""
+
+    def available(self, now: float) -> bool:
+        return now >= self.cooldown_until and now >= self.parked_until
+
+
+@dataclass
+class Totals:
+    tokens_in: int = 0
+    tokens_out: int = 0
+    credits: float = 0.0
+    ok: int = 0
+    fail: int = 0
+    rate_limited: int = 0
+    recent: deque = field(default_factory=lambda: deque(maxlen=16))
+    global_pause_until: float = 0.0
+    global_backoff_n: int = 0
+
+
+# ---------------------------------------------------------------------------
+# 小工具
+# ---------------------------------------------------------------------------
+
+
+def htokens(n: float) -> str:
+    if n >= 1e8:
+        return f"{n / 1e8:.2f}亿"
+    if n >= 1e4:
+        return f"{n / 1e4:.1f}万"
+    return f"{n:.0f}"
+
+
+def estimate_tokens(text: str) -> int:
+    """粗估 token：CJK 按 1 字 1 token，其余按 3.5 字符 1 token。"""
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return max(1, int(cjk + (len(text) - cjk) / 3.5))
+
+
+def build_messages(args: argparse.Namespace) -> list[dict]:
+    # 每条请求的盐前缀都不同 → 服务端提示词缓存永远打不中，输入 token 全价计费
+    salt = uuid.uuid4().hex
+    filler = FILLER * max(1, args.filler_chars // len(FILLER))
+    task = (
+        "读完上面的材料后，请从 1 开始逐个报数，一直数到 999999，"
+        "每行只写一个数字，不要省略、不要解释、不要总结、不要停止，"
+        "直到写满你的全部输出额度为止。"
+    )
+    text = f"[压测编号 {salt}]\n{filler}\n\n{task}"
+    return [{"role": "user", "content": text}]
+
+
+def load_keys() -> list[KeyState]:
+    names = sorted(
+        name for name, val in os.environ.items()
+        if name.startswith("SENSENOVA_API_KEY") and val.strip()
+    )
+    return [KeyState(name=n, key=os.environ[n].strip(), account=AccountState(name=n))
+            for n in names]
+
+
+def group_accounts(keys: list[KeyState], groups_spec: str) -> None:
+    """把同账号的 Key 归到同一份预算。groups_spec 形如
+    "SENSENOVA_API_KEY,SENSENOVA_API_KEY_02;SENSENOVA_API_KEY_03,SENSENOVA_API_KEY_04"
+    （分号分组，逗号分 Key）；不在任何组里的 Key 各自独立记账。"""
+    for group in filter(None, (g.strip() for g in groups_spec.split(";"))):
+        members = [k for k in keys if k.name in {x.strip() for x in group.split(",")}]
+        if len(members) > 1:
+            shared = AccountState(name="+".join(m.name.replace("SENSENOVA_API_KEY", "K")
+                                                for m in members))
+            for m in members:
+                m.account = shared
+
+
+# ---------------------------------------------------------------------------
+# 消耗器主体
+# ---------------------------------------------------------------------------
+
+
+class Burner:
+    def __init__(self, args: argparse.Namespace, keys: list[KeyState]):
+        self.args = args
+        self.keys = keys
+        self.accounts = list({id(k.account): k.account for k in keys}.values())
+        self.acct_keys: list[tuple[AccountState, list[KeyState]]] = []
+        for acct in self.accounts:
+            self.acct_keys.append((acct, [k for k in keys if k.account is acct]))
+        for acct in self.accounts:
+            acct.target = float(args.per_account_start)
+        self.cap5h = args.window_credits * args.safety_margin
+        self.capweek = args.weekly_credits * args.safety_margin
+        self.total = Totals()
+        self.stop = asyncio.Event()
+        self.started = time.time()
+        self.use_stream_options = True
+        self.url = args.base_url.rstrip("/") + "/chat/completions"
+        self.log_path = Path(args.log_file)
+        self.state_file = Path(args.state_file)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        # 本段运行的基线（恢复账本后「速率」只算本次运行新增的量）
+        self.base_in = 0
+        self.base_out = 0
+
+    # ---- 预算 --------------------------------------------------------------
+    def request_cost(self, messages: list[dict]) -> float:
+        """单条请求的预估积分消耗（按估算输入 + max_tokens 输出算上限）。"""
+        prompt_chars = sum(len(m["content"]) for m in messages)
+        return (self.args.rate_in * estimate_tokens("字" * prompt_chars) / 1e6
+                + self.args.rate_out * self.args.max_tokens / 1e6)
+
+    def budget_allow(self, acct: AccountState, cost: float) -> bool:
+        """预算够且没有停靠 → True。不够则把账号停靠到能腾出 cost 的时刻。
+        在飞请求的预估成本已计入 available()，高并发下不会超订阅窗口。"""
+        now = time.time()
+        if now < acct.parked_until:
+            return False
+        if self.cap5h <= 0 and self.capweek <= 0:
+            return True  # 预算显式关闭（危险，启动时已大声警告）
+        avail = acct.available(now, self.cap5h, self.capweek)
+        if avail >= cost:
+            return True
+        # 能走到这里说明账号此前未在停靠 → 这是一次新的停靠，记一条日志
+        acct.parked_until = acct.resume_time(now, self.cap5h, self.capweek, cost)
+        acct.park_reason = f"预算触顶（窗口余 {avail:.0f} < 需 {cost:.0f} 积分）"
+        self.log(f"[账号 {acct.name}] {acct.park_reason}，停靠至 "
+                 f"{time.strftime('%m-%d %H:%M', time.localtime(acct.parked_until))} 后继续",
+                 "WARN")
+        return False
+
+    # ---- 账本持久化：重启不清零，和控制台的记账口径保持连续 ----------------
+    def save_state(self) -> None:
+        import json
+
+        data = {
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "accounts": {a.name: {"events": [[ts, c] for ts, c in a.events],
+                                  "credits_total": a.credits_total,
+                                  "target": a.target}
+                         for a in self.accounts},
+            "keys": {k.name: {"ok": k.ok, "fail": k.fail, "rate_limited": k.rate_limited,
+                              "tokens_in": k.tokens_in, "tokens_out": k.tokens_out}
+                     for k in self.keys},
+        }
+        with contextlib.suppress(OSError):
+            tmp = self.state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.state_file)
+
+    def load_state(self) -> bool:
+        """恢复上次（或上几次）的账本。返回是否加载到了历史数据。"""
+        import json
+
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        loaded = False
+        by_name = {a.name: a for a in self.accounts}
+        cutoff = time.time() - WIN_WEEK
+        for name, blob in data.get("accounts", {}).items():
+            acct = by_name.get(name)
+            if acct is None:
+                continue
+            acct.events = deque((ts, c) for ts, c in blob.get("events", []) if ts > cutoff)
+            acct.credits_total = float(blob.get("credits_total") or 0.0)
+            # 恢复学到的并发目标（夹在 [起点, 本次数值上限] 内，避免跨配置残留）
+            acct.target = min(max(float(blob.get("target") or self.args.per_account_start), 1.0),
+                              float(self.args.per_account_max))
+            loaded = True
+        by_key = {k.name: k for k in self.keys}
+        for name, blob in data.get("keys", {}).items():
+            ks = by_key.get(name)
+            if ks is None:
+                continue
+            ks.ok = int(blob.get("ok") or 0)
+            ks.fail = int(blob.get("fail") or 0)
+            ks.rate_limited = int(blob.get("rate_limited") or 0)
+            ks.tokens_in = int(blob.get("tokens_in") or 0)
+            ks.tokens_out = int(blob.get("tokens_out") or 0)
+        # 全局总量 = 各 Key 之和（credits 从账号账本取）
+        self.total.tokens_in = sum(k.tokens_in for k in self.keys)
+        self.total.tokens_out = sum(k.tokens_out for k in self.keys)
+        self.total.credits = sum(a.credits_total for a in self.accounts)
+        self.total.ok = sum(k.ok for k in self.keys)
+        self.total.fail = sum(k.fail for k in self.keys)
+        self.total.rate_limited = sum(k.rate_limited for k in self.keys)
+        return loaded
+
+    # ---- 校准：把控制台实扣数换算成精确费率 --------------------------------
+    def suggest_rates(self, actual_credits: float) -> tuple[float, float]:
+        """按持久化账本里的全部 token 量反推费率（假设 r_in = r_out/3，
+        该比例来自商汤参考价，即使偏差一倍对输出主导的烧法影响也很小）。"""
+        tin = sum(k.tokens_in for k in self.keys)
+        tout = sum(k.tokens_out for k in self.keys)
+        denom = tout + tin / 3
+        r_out = actual_credits * 1e6 / denom if denom else 0.0
+        return r_out / 3, r_out
+
+    # ---- 日志：控制台 + 文件双写 -----------------------------------------
+    def log(self, msg: str, level: str = "INFO") -> None:
+        line = f"{time.strftime('%H:%M:%S')} {level:<5} {msg}"
+        print(line, flush=True)
+        with contextlib.suppress(OSError), open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d ") + line + "\n")
+
+    # ---- 选 Key：有容量的账号里挑在飞最少的，再挑该账号在飞最少的 Key ------
+    def pick_key(self) -> KeyState | None:
+        now = time.time()
+        best: tuple[AccountState, KeyState] | None = None
+        for acct, ks_list in self.acct_keys:
+            if acct.inflight >= min(acct.target, self.args.per_account_max):
+                continue
+            if now < acct.parked_until:
+                continue
+            usable = [ks for ks in ks_list if ks.available(now)
+                      and not (self.args.once and ks.attempts > 0)]
+            if not usable:
+                continue
+            ks = min(usable, key=lambda k: k.inflight)
+            if best is None or acct.inflight < best[0].inflight:
+                best = (acct, ks)
+        return best[1] if best else None
+
+    def all_keys_dead(self) -> bool:
+        """所有 Key 都永久失效（401 等）→ 没有任何恢复可能，任务结束。"""
+        return all(ks.parked_until == float("inf") for ks in self.keys)
+
+    # ---- 单次请求 ----------------------------------------------------------
+    async def burn_once(self, client: httpx.AsyncClient, ks: KeyState) -> None:
+        acct = ks.account
+        ks.attempts += 1
+        messages = build_messages(self.args)
+        payload = {
+            "model": self.args.model,
+            "messages": messages,
+            "max_tokens": self.args.max_tokens,
+            "temperature": 0.6,
+            "stream": True,
+        }
+        if self.use_stream_options:
+            payload["stream_options"] = {"include_usage": True}
+        headers = {"Authorization": f"Bearer {ks.key}"}
+
+        text_parts: list[str] = []
+        usage: dict | None = None
+        try:
+            async with client.stream("POST", self.url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode("utf-8", "replace")[:400]
+                    self.on_error(ks, resp.status_code, body)
+                    return
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj.get("usage"), dict):
+                        usage = obj["usage"]
+                    for ch in obj.get("choices", []):
+                        delta = ch.get("delta") or {}
+                        piece = delta.get("content") or delta.get("reasoning_content") or ""
+                        if piece:
+                            text_parts.append(piece)
+        except httpx.HTTPError as exc:
+            ks.fail += 1
+            self.total.fail += 1
+            ks.last_err = f"network: {exc!r:.120}"
+            ks.cooldown_until = time.time() + 15
+            self.log(f"[{ks.name}] 网络异常，冷却 15s：{exc!r:.160}", "WARN")
+            return
+
+        text = "".join(text_parts)
+        if usage:
+            tin = int(usage.get("prompt_tokens") or 0)
+            tout = int(usage.get("completion_tokens") or 0)
+        else:
+            # 上游没回 usage 时按文本粗估（估的只影响显示，不影响烧的量）
+            tin, tout = 0, estimate_tokens(text)
+        credits = (self.args.rate_in * tin + self.args.rate_out * tout) / 1e6
+        ks.ok += 1
+        ks.streak = 0
+        ks.tokens_in += tin
+        ks.tokens_out += tout
+        self.total.ok += 1
+        self.total.tokens_in += tin
+        self.total.tokens_out += tout
+        self.total.credits += credits
+        self.total.recent.append("ok")
+        self.total.global_backoff_n = 0
+        self.total.global_pause_until = 0.0
+        # 记账：成功扣减的积分进账号窗口（只有成功响应才真的扣了积分）
+        now = time.time()
+        acct.events.append((now, credits))
+        while acct.events and acct.events[0][0] <= now - WIN_WEEK:
+            acct.events.popleft()  # 裁剪：7 天外的记账点已对任何窗口无影响
+        acct.credits_total += credits
+        rate = (self.total.tokens_out - self.base_out) / max(1e-9, time.time() - self.started)
+        self.log(
+            f"[{ks.name}] +{htokens(tin)}入 +{htokens(tout)}出 ≈{credits:.1f}积分"
+            f" | 累计 {htokens(self.total.tokens_in)}入 {htokens(self.total.tokens_out)}出"
+            f" ≈{self.total.credits:.0f}积分 | 出均速 {htokens(rate)}/s"
+            f" | 账号并发目标 {acct.target:.0f}"
+        )
+
+    # ---- 错误分类：限流 > Key 失效 > 额度耗尽 ------------------------------
+    def on_error(self, ks: KeyState, status: int, body: str) -> None:
+        low = body.lower()
+        acct = ks.account
+        self.total.recent.append("err")
+        is_freq = any(h in low or h in body for h in FREQ_HINTS)
+
+        if status == 429 or is_freq:
+            ks.rate_limited += 1
+            self.total.rate_limited += 1
+            # AIMD 乘性减：撞 429 说明该账号并发顶到供应商上限，目标减半
+            old_target = acct.target
+            acct.target = max(1.0, acct.target * 0.5)
+            acct.last_429 = time.time()
+            if acct.target <= 1.0:
+                # 并发已到底还 429：多为 RPM 窗口未清，短冷却试探即可，不再指数升级
+                ks.streak = min(ks.streak + 1, 2)
+                cd = self.args.cooldown_base
+            else:
+                ks.streak += 1
+                cd = min(self.args.cooldown_base * 2 ** (ks.streak - 1), self.args.cooldown_max)
+            ks.cooldown_until = time.time() + cd
+            ks.last_err = f"429 x{ks.streak}"
+            self.log(f"[{ks.name}] 429 限流，冷却 {cd:.0f}s，账号并发目标 {old_target:.0f}→{acct.target:.0f}")
+            self.maybe_global_backoff()
+            return
+
+        if status in (401, 403):
+            ks.parked_until = float("inf")
+            ks.park_reason = f"HTTP {status} Key 无效/无权限"
+            ks.fail += 1
+            self.total.fail += 1
+            ks.last_err = f"HTTP {status}"
+            self.log(f"[{ks.name}] HTTP {status}，永久停靠：{body[:200]}", "ERROR")
+            return
+
+        # 额度/积分耗尽：说明专属池和通用池都空了（扣减顺序走到底才会报错），
+        # 此时再打只会空转，长停靠等周期发放。任何状态码都可能带这种文案。
+        if any(h in low or h in body for h in QUOTA_STRONG) and status in (402, 403, 429):
+            acct.parked_until = time.time() + self.args.quota_park_hours * 3600
+            acct.park_reason = "疑似额度/积分耗尽"
+            ks.rate_limited += 1
+            self.total.rate_limited += 1
+            self.log(f"[{ks.name}] 疑似积分耗尽，账号停靠 {self.args.quota_park_hours:.0f}h"
+                     f"（{body[:160]}）", "WARN")
+            return
+
+        # 5xx / 其他：短冷却换个 Key 顶上
+        ks.fail += 1
+        self.total.fail += 1
+        ks.last_err = f"HTTP {status}"
+        ks.cooldown_until = time.time() + 20
+        self.log(f"[{ks.name}] HTTP {status}，冷却 20s：{body[:200]}", "WARN")
+
+    def maybe_global_backoff(self) -> None:
+        r = self.total.recent
+        # 最近 16 次请求全是失败且没有在飞请求 → 疑似所有账号都不在免费窗口，
+        # 全局退避，避免空转刷 429
+        if r.maxlen is None or len(r) < r.maxlen or any(x == "ok" for x in r):
+            return
+        if self.total.global_pause_until > time.time():
+            return
+        if any(acct.inflight > 0 for acct in self.accounts):
+            return
+        self.total.global_backoff_n += 1
+        pause = min(600, 30 * 2 ** (self.total.global_backoff_n - 1))
+        self.total.global_pause_until = time.time() + pause
+        self.total.recent.clear()
+        self.log(f"所有 Key 都在限流且暂无在飞请求，全局退避 {pause:.0f}s", "WARN")
+
+    # ---- 周期汇总 ----------------------------------------------------------
+    async def periodic_summary(self) -> None:
+        while not self.stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.stop.wait(), timeout=self.args.summary_interval)
+            if self.stop.is_set():
+                break
+            # AIMD 加性增：账号静默（60s 无 429）就 +1 并发，自动贴回供应商上限
+            for acct in self.accounts:
+                if acct.target < self.args.per_account_max \
+                        and time.time() - acct.last_429 > 60:
+                    acct.target += 1
+            self.save_state()
+            elapsed = time.time() - self.started
+            rate_in = (self.total.tokens_in - self.base_in) / max(1e-9, elapsed)
+            rate_out = (self.total.tokens_out - self.base_out) / max(1e-9, elapsed)
+            now = time.time()
+            parked = sum(1 for a in self.accounts if now < a.parked_until)
+            inflight = sum(a.inflight for a in self.accounts)
+            self.log(
+                f"汇总 {elapsed / 3600:.2f}h | 累计 {htokens(self.total.tokens_in)}入"
+                f" {htokens(self.total.tokens_out)}出 ≈{self.total.credits:.0f}积分"
+                f" | 本段速率 {htokens(rate_in)}/{htokens(rate_out)} tok/s"
+                f" | 在飞 {inflight} | 成功 {self.total.ok} 失败 {self.total.fail}"
+                f" 429 {self.total.rate_limited} | 账号停靠 {parked}/{len(self.accounts)}"
+            )
+
+    # ---- 工作协程 ----------------------------------------------------------
+    async def _worker(self, client: httpx.AsyncClient) -> None:
+        while not self.stop.is_set():
+            if self.all_keys_dead():
+                self.log("所有 Key 都已永久失效，任务结束", "ERROR")
+                return
+            ks = self.pick_key()
+            if ks is None:
+                # 账号停靠（预算/积分耗尽）或 Key 冷却中：等窗口滚动恢复后继续。
+                # 常驻模式绝不因为全部停靠而退出，停靠只是暂时休眠。
+                if self.args.once and all(k.attempts > 0 for k in self.keys) \
+                        and all(k.inflight == 0 for k in self.keys):
+                    return
+                await asyncio.sleep(0.5)
+                continue
+            if time.time() < self.total.global_pause_until:
+                await asyncio.sleep(1)
+                continue
+            est_cost = self._est_cost
+            if not self.budget_allow(ks.account, est_cost):
+                await asyncio.sleep(1)
+                continue
+            # 在飞成本先记账（完成时在 finally 里冲销，成功时已按实扣入账）
+            ks.account.inflight += 1
+            ks.account.inflight_cost += est_cost
+            ks.inflight += 1
+            try:
+                await self.burn_once(client, ks)
+            except Exception as exc:  # 兜底：不让单次异常打死 worker
+                ks.fail += 1
+                self.total.fail += 1
+                ks.last_err = repr(exc)[:120]
+                ks.cooldown_until = time.time() + 15
+                self.log(f"[{ks.name}] 未预期异常，冷却 15s：{exc!r:.160}", "ERROR")
+            finally:
+                ks.inflight -= 1
+                ks.account.inflight -= 1
+                ks.account.inflight_cost -= est_cost
+
+    # run() 里算一次，避免每条请求重复构建 messages
+    _est_cost: float = 0.0
+
+    async def run(self) -> None:
+        timeout = httpx.Timeout(connect=self.args.connect_timeout,
+                                read=self.args.read_timeout, write=60, pool=60)
+        limits = httpx.Limits(max_connections=self.args.concurrency * 2 + 8)
+        # trust_env=False：商汤是国内服务，直连即可；不走系统代理（Windows 注册表
+        # 里的 127.0.0.1:10808），避免代理进程没开时整个消耗器跟着瘫痪
+        async with httpx.AsyncClient(timeout=timeout, limits=limits,
+                                     trust_env=False) as client:
+            self._est_cost = self.request_cost(build_messages(self.args))
+            workers = [asyncio.create_task(self._worker(client))
+                       for _ in range(self.args.concurrency)]
+            summary = asyncio.create_task(self.periodic_summary())
+            timer = None
+            if self.args.max_seconds > 0:
+                async def _timer() -> None:
+                    await asyncio.sleep(self.args.max_seconds)
+                    self.log(f"已达 --max-seconds={self.args.max_seconds:.0f}，收尾中")
+                    self.stop.set()
+                timer = asyncio.create_task(_timer())
+
+            # 等待任意结束条件：worker 自然结束（--once / 全部失效）/ 定时器
+            stop_waiter = asyncio.create_task(self.stop.wait())
+            all_tasks = workers + [summary] + ([timer] if timer else [])
+            await asyncio.wait([*all_tasks, stop_waiter],
+                               return_when=asyncio.FIRST_COMPLETED)
+            self.stop.set()
+            for t in [*all_tasks, stop_waiter]:
+                t.cancel()
+            await asyncio.gather(*all_tasks, stop_waiter, return_exceptions=True)
+        self.final_summary()
+
+    def final_summary(self) -> None:
+        self.save_state()
+        elapsed = time.time() - self.started
+        self.log("=" * 72)
+        self.log(
+            f"结束。运行 {elapsed / 3600:.2f}h，"
+            f"本段烧掉 输入 {htokens(self.total.tokens_in - self.base_in)}"
+            f" + 输出 {htokens(self.total.tokens_out - self.base_out)}"
+            f" = {htokens(self.total.tokens_in - self.base_in + self.total.tokens_out - self.base_out)} token"
+        )
+        self.log(
+            f"历史累计（含之前的运行）：输入 {htokens(self.total.tokens_in)}"
+            f" + 输出 {htokens(self.total.tokens_out)}"
+            f" = {htokens(self.total.tokens_in + self.total.tokens_out)} token"
+            f" ≈{self.total.credits:.0f}积分（按当前费率估算，偏保守）"
+        )
+        if elapsed > 0:
+            total_rate = (self.total.tokens_in - self.base_in
+                          + self.total.tokens_out - self.base_out) / elapsed
+            self.log(f"本段平均速率 {htokens(total_rate)} tok/s（含限流/停靠等待）")
+        now = time.time()
+        for acct in self.accounts:
+            tag = ""
+            if now < acct.parked_until:
+                tag = f"停靠至 {time.strftime('%m-%d %H:%M', time.localtime(acct.parked_until))}"
+                if acct.park_reason:
+                    tag += f"（{acct.park_reason}）"
+            self.log(
+                f"  账号 {acct.name:<28} 5h窗口≈{acct.burned(now, WIN_5H):.0f}积分"
+                f" 周≈{acct.burned(now, WIN_WEEK):.0f}积分 累计≈{acct.credits_total:.0f}积分"
+                f" 并发目标 {acct.target:.0f} {tag}"
+            )
+        for ks in self.keys:
+            status = "Key失效" if time.time() < ks.parked_until else "正常"
+            self.log(
+                f"  {ks.name:<22} ok={ks.ok:<4} 429={ks.rate_limited:<4} 失败={ks.fail:<3}"
+                f" 入={htokens(ks.tokens_in):<10} 出={htokens(ks.tokens_out):<10} {status}"
+            )
+        self.log(f"明细日志：{self.log_path}；账本：{self.state_file}（重启不清零）")
+        self.log("校准：控制台「积分消耗明细」选与账本同时段，把实扣积分填进 "
+                 "--calibrate-actual 即可自动算出精确费率。")
+
+
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="持续、多账号并行消耗商汤 sensenova-6.8-flash-lite 的专属池积分"
+                    "（只烧专属池，预算熔断防止溢出扣到 kimi-k3 要用的通用池）",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--model", default="sensenova-6.8-flash-lite", help="上游模型 ID")
+    p.add_argument("--base-url",
+                   default=os.environ.get("SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1"),
+                   help="商汤 OpenAI 兼容接口地址")
+    p.add_argument("--concurrency", type=int, default=128,
+                   help="全局 worker 数（并发上限；实际并发由每账号 AIMD 自适应决定）")
+    p.add_argument("--per-account-max", type=int, default=24,
+                   help="单账号最大并发（AIMD 的天花板；429 频繁就调小，从不 429 可调大）")
+    p.add_argument("--per-account-start", type=int, default=8,
+                   help="单账号自适应并发起点（起步高、靠 429 减半回落，收敛快）")
+    p.add_argument("--max-tokens", type=int, default=16384,
+                   help="单次请求输出上限（越大烧得越狠）")
+    p.add_argument("--filler-chars", type=int, default=6000,
+                   help="输入填充材料的字符数（烧输入 token，对耗时影响很小）")
+    # ---- 积分池预算（防溢出烧到通用池） ----
+    p.add_argument("--window-credits", type=float, default=60000,
+                   help="每账号 Flash-lite 专属池 5h 窗口积分上限（官方 6 万）")
+    p.add_argument("--weekly-credits", type=float, default=600000,
+                   help="每账号 Flash-lite 专属池每周积分上限（官方 60 万）")
+    p.add_argument("--safety-margin", type=float, default=0.9,
+                   help="预算安全系数（实际熔断线 = 上限 × 该系数）")
+    p.add_argument("--rate-in", type=float, default=120,
+                   help="输入 token 积分费率（积分/百万token）。2026-09-12 两次控制台"
+                        "实测交叉验证：实际 ≈111（区间 111~240），取 120 贴实测值，"
+                        "显示与控制台实扣基本一致；可用 --calibrate-actual 精校准")
+    p.add_argument("--rate-out", type=float, default=360,
+                   help="输出 token 积分费率（积分/百万token）。同上，实际 ≈333（区间"
+                        " 333~720）。注：预算熔断在物理可达的烧速下永远触不到，显示"
+                        "准确性优先于保守边际")
+    p.add_argument("--quota-park-hours", type=float, default=12,
+                   help="判定积分耗尽后账号停靠时长（小时）")
+    p.add_argument("--account-groups", default="SENSENOVA_API_KEY,SENSENOVA_API_KEY_02",
+                   help="同账号 Key 分组（分号分组、逗号分 Key）；组内共享一份预算与并发")
+    # ---- 冷却/超时 ----
+    p.add_argument("--cooldown-base", type=float, default=60, help="429 首次冷却秒数（指数退避）")
+    p.add_argument("--cooldown-max", type=float, default=900, help="429 冷却上限秒数")
+    p.add_argument("--connect-timeout", type=float, default=15)
+    p.add_argument("--read-timeout", type=float, default=180,
+                   help="流式读超时（相邻 chunk 间隔上限）")
+    p.add_argument("--summary-interval", type=float, default=60, help="汇总打印间隔秒数")
+    p.add_argument("--max-seconds", type=float, default=0, help="最长运行秒数，0 = 一直跑")
+    p.add_argument("--once", action="store_true", help="每把 Key 只发一次请求就汇总退出（自检用）")
+    p.add_argument("--only", default="",
+                   help="只用指定的 Key（逗号分隔 env 变量名），如 SENSENOVA_API_KEY_03")
+    p.add_argument("--log-file", default=str(DEFAULT_LOG), help="日志文件路径")
+    p.add_argument("--state-file", default=str(STATE_FILE),
+                   help="账本持久化文件（重启不清零，累计口径与控制台连续）")
+    p.add_argument("--calibrate-actual", type=float, default=0,
+                   help="校准模式：传入控制台「积分消耗明细」里与账本同时段的实扣积分"
+                        "（如 --calibrate-actual 7000），算出精确费率后退出，不烧积分")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+    load_dotenv(ROOT / ".env")
+    args = parse_args(argv)
+
+    keys = load_keys()
+    if args.only:
+        wanted = {x.strip() for x in args.only.split(",") if x.strip()}
+        keys = [k for k in keys if k.name in wanted]
+    if not keys:
+        print("ERROR: .env 里没有找到任何 SENSENOVA_API_KEY*，无法运行。", file=sys.stderr)
+        return 2
+    group_accounts(keys, args.account_groups)
+
+    burner = Burner(args, keys)
+    if burner.load_state():
+        burner.base_in, burner.base_out = burner.total.tokens_in, burner.total.tokens_out
+        burner.log(f"已恢复历史账本：{htokens(burner.total.tokens_in)}入"
+                   f" {htokens(burner.total.tokens_out)}出 ≈{burner.total.credits:.0f}积分"
+                   f"（累计口径连续，可与控制台直接对比）")
+    if args.calibrate_actual > 0:
+        r_in, r_out = burner.suggest_rates(args.calibrate_actual)
+        tin = sum(k.tokens_in for k in burner.keys)
+        tout = sum(k.tokens_out for k in burner.keys)
+        print(f"账本累计：入 {tin:,} + 出 {tout:,} token")
+        print(f"你给的实扣：{args.calibrate_actual:,.0f} 积分")
+        print(f"建议费率：--rate-in {r_in:.0f} --rate-out {r_out:.0f}")
+        print("注意：实扣数必须与账本覆盖同一时段（控制台明细的时间范围要包住日志"
+              "第一次启动的时间），且期间网关没烧过 flash-lite（那也计同一池）。")
+        return 0
+    if burner.cap5h <= 0 or burner.capweek <= 0:
+        burner.log("危险：积分预算已关闭（--window-credits/--weekly-credits ≤ 0），"
+                   "专属池烧完后会静默扣通用池（kimi-k3 的积分）！", "ERROR")
+    burner.log(
+        f"启动：model={args.model} 全局并发≤{args.concurrency}"
+        f" 单账号自适应并发 {args.per_account_start}→{args.per_account_max}"
+        f"（429 减半、静默每分钟 +1，学到的目标重启不丢） max_tokens={args.max_tokens}"
+        f" 填充={args.filler_chars}字"
+        f" | 共 {len(keys)} 把 Key、{len(burner.accounts)} 个账号预算："
+        f"{', '.join(a.name for a in burner.accounts)}"
+    )
+    burner.log(
+        f"预算熔断线（每账号）：5h 窗口 {burner.cap5h:.0f} 积分"
+        f"（官方 6 万 × {args.safety_margin}），每周 {burner.capweek:.0f} 积分"
+        f"（官方 60 万 × {args.safety_margin}）；费率估算 入{args.rate_in:.0f}/出{args.rate_out:.0f}"
+        f" 积分/百万token → 单条请求 ≈{burner.request_cost(build_messages(args)):.0f} 积分"
+    )
+    burner.log(f"接口：{burner.url}")
+
+    # Windows 关闭控制台窗口会发 SIGBREAK（约 5s 宽限）：保存账本并留痕
+    def _on_close(signum, frame) -> None:
+        burner.log(f"收到关闭信号 {signum}，保存账本后退出", "WARN")
+        burner.save_state()
+        sys.exit(0)
+
+    with contextlib.suppress(ValueError, OSError, AttributeError):
+        import signal
+
+        signal.signal(signal.SIGBREAK, _on_close)
+
+    try:
+        asyncio.run(burner.run())
+    except KeyboardInterrupt:
+        print("^C", flush=True)
+        burner.final_summary()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
