@@ -33,6 +33,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   （`scripts/burn_sensenova.py` 已这样做），网关不能一刀切关（NVIDIA 需要代理）
 - 商汤积分池：flash-lite 扣完专属池会**静默**溢出扣通用池（kimi-k3 的积分），
   API 无任何池信号；消耗器靠按积分记账 + 预算熔断防溢出，勿轻易关预算
+- 商汤窗口刷新模型默认按滚动记账；控制台显示的每账号「重置时间」可能是固定锚点
+  （判定方法见使用手册），确认后用 `--anchors "1=HH:MM;..."` 切固定窗口爆发模式
 - 商汤额度按**账号**算：01+02 同账号，07~09 归属待核对；额度上限见 providers.yaml 注释
 
 ## 当前状态（2026-09-12）
@@ -44,6 +46,9 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   不烤密钥（.dockerignore 已补）。**遗留决策**：`ZKAI_HOST=0.0.0.0` 且未设
   `ZKAI_API_TOKEN` → /v1/* 对局域网开放（启动时会警告）；要收紧就在 .env 设
   `ZKAI_API_TOKEN` 并同步所有客户端配置
+- 2026-09-13：`ZKAI_STRIP_REASONING=true` 折叠思考已生效（含回填进正文的思考，
+  README §18 缺陷 11）；`.env.example` 补了 `ZKAI_API_TOKEN` 可发现行；
+  双窗口模型（`--anchors`）就绪，待用户从控制台判定滚动/锚点后填值
 - 门禁 ruff / mypy / pytest 全绿（263 passed）；2026-09-12 已提交推送
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`

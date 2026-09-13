@@ -28,6 +28,17 @@
   实扣：跑一段后看控制台「积分消耗明细」实扣 Z、日志汇总的 入X/出Y，
   r_out ≈ Z×1e6/(Y + X/3)，r_in ≈ r_out/3，然后 --rate-in/--rate-out 传入。
 
+窗口刷新模型（2026-09-13 与 zk-k3 讨论定稿）：
+  - 控制台显示每池的「重置时间」且每账号不同。两种可能：a) 固定锚点窗口
+    （边界对齐某时刻，重置时刻相对固定）；b) 滚动窗口（控制台的「重置时间」
+    = 当前窗口烧量全部过期的时刻 ≈ 我们烧干它的时间 + 5h，随烧随变）。
+  - API 对此零信号，「扣专属池成功」与「扣通用池成功」观测不可区分，
+    纯自动识别在信息论上不可行。两种模型安全性不对称：锚点误判为滚动 =
+    少烧（安全）；滚动误判为锚点 = 烧穿（亏 K3 口粮）。故默认滚动模型。
+  - 确认是固定锚点后：--anchors "1=03:30;3=07:15"（数字=Key 序号，1 即
+    SENSENOVA_API_KEY）切换为固定窗口爆发模式（边界后满血烧干再停靠），
+    锚点持久化进 burn_state.json，CLI 传入优先于持久化值。
+
 用法：
     .venv\\Scripts\\python.exe scripts\\burn_sensenova.py              # 常驻烧
     .venv\\Scripts\\python.exe scripts\\burn_sensenova.py --once       # 每把 Key 各烧一次（自检）
@@ -42,6 +53,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -87,40 +99,87 @@ class AccountState:
     target: float = 8.0
     last_429: float = 0.0
     inflight_cost: float = 0.0  # 在飞请求的预估积分（完成时用实扣修正）
+    # 固定锚点窗口（可选）：anchor_ts 是控制台「重置时间」对应的 epoch，
+    # 边界 = anchor_ts + k*5h。=0 表示未配置，走滚动窗口模型（保守、安全）。
+    anchor_ts: float = 0.0
+
+    def window_start(self, now: float) -> float:
+        """当前 5h 窗口的起点（仅锚点模式有意义）。"""
+        if not self.anchor_ts:
+            return 0.0
+        k = int((now - self.anchor_ts) // WIN_5H)
+        return self.anchor_ts + k * WIN_5H
+
+    def next_boundary(self, now: float) -> float:
+        return self.window_start(now) + WIN_5H if self.anchor_ts else 0.0
 
     def burned(self, now: float, window: float) -> float:
         return sum(c for ts, c in self.events if ts > now - window)
 
     def available(self, now: float, cap5h: float, capweek: float) -> float:
-        """窗口余量（已扣掉在飞请求的预估成本）。"""
-        avail = min(cap5h - self.burned(now, WIN_5H),
-                    capweek - self.burned(now, WIN_WEEK))
-        return avail - self.inflight_cost
+        """窗口余量（已扣掉在飞请求的预估成本）。
+        锚点模式：5h 约束按「当前固定窗口内烧量」算（窗口刚重置 = 满血爆发）；
+        滚动模式：按「最近 5h 烧量」算。周约束两种模式都按滚动 7 天（保守方向）。"""
+        if self.anchor_ts:
+            ws = self.window_start(now)
+            avail5h = cap5h - sum(c for ts, c in self.events if ts >= ws)
+        else:
+            avail5h = cap5h - self.burned(now, WIN_5H)
+        avail_week = capweek - self.burned(now, WIN_WEEK)
+        return min(avail5h, avail_week) - self.inflight_cost
 
     def resume_time(self, now: float, cap5h: float, capweek: float, need: float) -> float:
-        """最早什么时候两个窗口都能腾出 need 积分。每个窗口各自算出
-        「能装下 need」的最早时刻，最终答案取 max（两个约束必须同时满足）。"""
-        ans = now + 60.0
-        for window, cap in ((WIN_5H, cap5h), (WIN_WEEK, capweek)):
-            evs = sorted((ts, c) for ts, c in self.events if ts > now - window)
-            total = sum(c for _, c in evs)
-            if cap < need:
-                # 熔断线比单条请求还小：滚出也装不下，一天后再试（配置问题）
-                ans = max(ans, now + 86400.0)
-                continue
-            need_release = total - (cap - need)
-            if need_release <= 0:
-                continue  # 该窗口已满足，不拖后腿
-            acc = 0.0
-            for ts, c in evs:  # 从最老开始滚出，直到窗口内腾出 need
-                acc += c
-                if acc >= need_release:
-                    ans = max(ans, ts + window + 30)
-                    break
+        """最早什么时候两个约束都能腾出 need 积分（取各约束要求时刻的最大值）。"""
+        cands: list[float] = []
+        if self.anchor_ts:
+            ws = self.window_start(now)
+            burned5 = sum(c for ts, c in self.events if ts >= ws)
+            if cap5h >= need:
+                if burned5 <= cap5h - need:
+                    cands.append(now + 60)
+                else:
+                    # 窗口烧干：等到下一个边界（重置瞬间回满）
+                    cands.append(ws + WIN_5H + 30)
             else:
-                # 事件全部滚出仍不够 → 该窗口近期装不下，一天后再试
-                ans = max(ans, now + 86400.0)
-        return ans
+                cands.append(now + 86400.0)
+        else:
+            # 滚动模型：把最老的事件滚出窗口来算
+            evs5 = sorted((ts, c) for ts, c in self.events if ts > now - WIN_5H)
+            total5 = sum(c for _, c in evs5)
+            if cap5h < need:
+                cands.append(now + 86400.0)
+            else:
+                need_release = total5 - (cap5h - need)
+                if need_release <= 0:
+                    cands.append(now + 60)
+                else:
+                    acc = 0.0
+                    for ts, c in evs5:
+                        acc += c
+                        if acc >= need_release:
+                            cands.append(ts + WIN_5H + 30)
+                            break
+                    else:
+                        cands.append(now + 86400.0)
+        # 周约束（两种模式都按滚动 7 天，只会更保守、不会烧穿）
+        evs_w = sorted((ts, c) for ts, c in self.events if ts > now - WIN_WEEK)
+        total_w = sum(c for _, c in evs_w)
+        if capweek < need:
+            cands.append(now + 86400.0)
+        else:
+            need_release = total_w - (capweek - need)
+            if need_release > 0:
+                acc = 0.0
+                for ts, c in evs_w:
+                    acc += c
+                    if acc >= need_release:
+                        cands.append(ts + WIN_WEEK + 30)
+                        break
+                else:
+                    cands.append(now + 86400.0)
+        if not cands:
+            cands.append(now + 60)
+        return max(cands)
 
 
 @dataclass
@@ -212,6 +271,41 @@ def group_accounts(keys: list[KeyState], groups_spec: str) -> None:
                 m.account = shared
 
 
+def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
+    """把 "1=03:30;3=07:15" 形式的窗口重置时刻应用到对应账号。
+
+    数字 = Key 序号（1 即不带后缀的 SENSENOVA_API_KEY，与 02 同账号）；
+    同账号多把 Key 共用一个锚点，冲突时取先出现的并告警。
+    时刻取今天该 HH:MM 作为一次真实边界（此后按 +5h 递推）。
+    返回生效的账号数。"""
+    seen: set[int] = set()
+    for item in filter(None, (s.strip() for s in spec.split(";"))):
+        num_s, sep, hm = item.partition("=")
+        num_s, hm = num_s.strip(), hm.strip()
+        if not sep or not num_s.isdigit() or not re.fullmatch(r"\d{1,2}:\d{2}", hm):
+            log(f"锚点项 {item!r} 无法解析（应为 数字=HH:MM），已跳过", "WARN")
+            continue
+        idx = int(num_s)
+        names = ["SENSENOVA_API_KEY"] if idx == 1 else [f"SENSENOVA_API_KEY_{idx:02d}"]
+        target = next((k.account for k in keys if k.name in names), None)
+        if target is None:
+            log(f"锚点项 {item!r} 没有匹配到已加载的 Key，已跳过", "WARN")
+            continue
+        hh, mm = (int(x) for x in hm.split(":"))
+        lt = time.localtime()
+        try:
+            ts = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+        except (OverflowError, ValueError):
+            log(f"锚点项 {item!r} 时刻非法，已跳过", "WARN")
+            continue
+        if target.anchor_ts and target.anchor_ts != ts:
+            log(f"账号 {target.name} 收到多个不同锚点，保留先出现的", "WARN")
+            continue
+        target.anchor_ts = ts
+        seen.add(id(target))
+    return len(seen)
+
+
 # ---------------------------------------------------------------------------
 # 消耗器主体
 # ---------------------------------------------------------------------------
@@ -275,7 +369,8 @@ class Burner:
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "accounts": {a.name: {"events": [[ts, c] for ts, c in a.events],
                                   "credits_total": a.credits_total,
-                                  "target": a.target}
+                                  "target": a.target,
+                                  "anchor_ts": a.anchor_ts}
                          for a in self.accounts},
             "keys": {k.name: {"ok": k.ok, "fail": k.fail, "rate_limited": k.rate_limited,
                               "tokens_in": k.tokens_in, "tokens_out": k.tokens_out}
@@ -306,6 +401,9 @@ class Burner:
             # 恢复学到的并发目标（夹在 [起点, 本次数值上限] 内，避免跨配置残留）
             acct.target = min(max(float(blob.get("target") or self.args.per_account_start), 1.0),
                               float(self.args.per_account_max))
+            # 锚点：CLI 传入的优先；未传时恢复上次持久化的
+            if acct.anchor_ts == 0:
+                acct.anchor_ts = float(blob.get("anchor_ts") or 0)
             loaded = True
         by_key = {k.name: k for k in self.keys}
         for name, blob in data.get("keys", {}).items():
@@ -644,6 +742,8 @@ class Burner:
                 tag = f"停靠至 {time.strftime('%m-%d %H:%M', time.localtime(acct.parked_until))}"
                 if acct.park_reason:
                     tag += f"（{acct.park_reason}）"
+            if acct.anchor_ts:
+                tag += f" 锚点下边界 {time.strftime('%m-%d %H:%M', time.localtime(acct.next_boundary(now)))}"
             self.log(
                 f"  账号 {acct.name:<28} 5h窗口≈{acct.burned(now, WIN_5H):.0f}积分"
                 f" 周≈{acct.burned(now, WIN_WEEK):.0f}积分 累计≈{acct.credits_total:.0f}积分"
@@ -704,6 +804,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="判定积分耗尽后账号停靠时长（小时）")
     p.add_argument("--account-groups", default="SENSENOVA_API_KEY,SENSENOVA_API_KEY_02",
                    help="同账号 Key 分组（分号分组、逗号分 Key）；组内共享一份预算与并发")
+    p.add_argument("--anchors", default="",
+                   help="每账号的专属池窗口重置时刻（控制台显示的「重置时间」，本地 HH:MM）。"
+                        "格式：--anchors \"1=03:30;3=07:15;5=22:05\"（数字=Key 序号，"
+                        "1 即 SENSENOVA_API_KEY，与 02 同账号共用）。不填=滚动窗口模型"
+                        "（保守安全）；填了=固定窗口爆发（边界后满血烧干再停靠）")
     # ---- 冷却/超时 ----
     p.add_argument("--cooldown-base", type=float, default=60, help="429 首次冷却秒数（指数退避）")
     p.add_argument("--cooldown-max", type=float, default=900, help="429 冷却上限秒数")
@@ -743,6 +848,10 @@ def main(argv: list[str] | None = None) -> int:
     group_accounts(keys, args.account_groups)
 
     burner = Burner(args, keys)
+    if args.anchors:
+        n = apply_anchors(args.anchors, keys, burner.log)
+        if n == 0:
+            print("WARN: --anchors 没有生效到任何账号，将退回滚动窗口模型", file=sys.stderr)
     if burner.load_state():
         burner.base_in, burner.base_out = burner.total.tokens_in, burner.total.tokens_out
         burner.log(f"已恢复历史账本：{htokens(burner.total.tokens_in)}入"
@@ -776,6 +885,13 @@ def main(argv: list[str] | None = None) -> int:
         f" 积分/百万token → 单条请求 ≈{burner.request_cost(build_messages(args)):.0f} 积分"
     )
     burner.log(f"接口：{burner.url}")
+    anchored = [a for a in burner.accounts if a.anchor_ts]
+    if anchored:
+        burner.log("锚点模式（固定窗口，边界后满血爆发）：" + ", ".join(
+            f"{a.name}→下边界 {time.strftime('%m-%d %H:%M', time.localtime(a.next_boundary(time.time())))}"
+            for a in anchored))
+    else:
+        burner.log("窗口模型：滚动（未配置 --anchors；按最近5h烧量记账，保守安全）")
 
     # Windows 关闭控制台窗口会发 SIGBREAK（约 5s 宽限）：保存账本并留痕
     def _on_close(signum, frame) -> None:
