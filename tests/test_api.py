@@ -662,7 +662,7 @@ def test_error_response_carries_retry_after_header() -> None:
 # --------------------------------------------------------------------------- #
 # Strip-reasoning toggle (hide thinking bubbles, keep promoted answers)
 # --------------------------------------------------------------------------- #
-def test_strip_reasoning_fields_only_when_content_present() -> None:
+def test_strip_reasoning_fields_unconditional() -> None:
     from app.api.chat import _strip_reasoning_fields
 
     payload = {
@@ -671,7 +671,6 @@ def test_strip_reasoning_fields_only_when_content_present() -> None:
                 "delta": {
                     "content": "答案",
                     "reasoning_content": "英文思考",
-                    "content_recovered_from_reasoning": True,
                 }
             }
         ]
@@ -679,15 +678,84 @@ def test_strip_reasoning_fields_only_when_content_present() -> None:
     _strip_reasoning_fields(payload)
     assert payload["choices"][0]["delta"] == {"content": "答案"}
 
-    # 正文为空（截断后被提升的场景）：保留思考，防止空白
+    # 开关语义是「不想看到思考」：正文为空时 reasoning 键也要剥（允许空白回复，
+    # 截断信号由 finish_reason=length 承担）
     empty = {"choices": [{"delta": {"content": "", "reasoning_content": "英文思考"}}]}
     _strip_reasoning_fields(empty)
-    assert empty["choices"][0]["delta"]["reasoning_content"] == "英文思考"
+    assert empty["choices"][0]["delta"] == {"content": ""}
 
     # 非流式的 message 节同样要剥
     msg = {"choices": [{"message": {"role": "assistant", "content": "答案", "reasoning": "思考"}}]}
     _strip_reasoning_fields(msg)
     assert "reasoning" not in msg["choices"][0]["message"]
+
+
+def test_strip_reasoning_blanks_backfilled_thinking() -> None:
+    """回填场景（缺陷 8）：上游 content 为空、思考被提升进 content 并打标。
+    剥离开启后这段思考也必须折叠——否则用户看到的还是英文思考。"""
+    from app.api.chat import _strip_reasoning_fields
+
+    promoted = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Thinking Process:\n\n1. **Analyze**...",
+                    "content_recovered_from_reasoning": True,
+                }
+            }
+        ]
+    }
+    _strip_reasoning_fields(promoted)
+    msg = promoted["choices"][0]["message"]
+    assert msg["content"] == ""
+    assert "content_recovered_from_reasoning" not in msg
+
+
+def test_strip_reasoning_blanks_backfilled_delta() -> None:
+    """流式回填路径同样要折叠：delta 节被打标时正文置空。"""
+    from app.api.chat import _strip_reasoning_fields
+
+    payload = {
+        "choices": [
+            {
+                "delta": {
+                    "content": "Thinking Process: ...",
+                    "content_recovered_from_reasoning": True,
+                }
+            }
+        ]
+    }
+    _strip_reasoning_fields(payload)
+    delta = payload["choices"][0]["delta"]
+    assert delta == {"content": ""}
+
+
+def test_strip_reasoning_multi_choice_mixed() -> None:
+    """多 choice 混合：带回填标记的清空，正常答案不受影响。"""
+    from app.api.chat import _strip_reasoning_fields
+
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Thinking Process: ...",
+                    "content_recovered_from_reasoning": True,
+                }
+            },
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "正常答案",
+                    "reasoning_content": "英文思考",
+                }
+            },
+        ]
+    }
+    _strip_reasoning_fields(payload)
+    assert payload["choices"][0]["message"]["content"] == ""
+    assert payload["choices"][1]["message"] == {"role": "assistant", "content": "正常答案"}
 
 
 async def test_strip_reasoning_hides_thinking_in_stream(provider_config, fake_adapter) -> None:

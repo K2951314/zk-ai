@@ -1110,7 +1110,7 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
 
 所有测试都用 `FakeAdapter`，**不会**发出任何真实请求。
 
-### 开发过程中被测试/冒烟测出来的 10 个真实缺陷
+### 开发过程中被测试/冒烟测出来的 11 个真实缺陷
 
 1. **Scheduler 控制流错误**：`break` 只跳出退避循环，未能正确推进到下一个 Key/部署，
    导致 429/超时的轮换与故障转移不可靠，取消记录也会丢。→ 引入 `_Next` 枚举，
@@ -1166,6 +1166,13 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
    才清零计数。短冷却（60s→立刻再撞→120s）的指数退避语义保持不变；
    只有「躺满整个最长冷却周期」才视为重新开始计。加 2 个回归测试
    （短歇保梯子 / 满歇清零）。
+11. **`strip_reasoning` 盖不住回填进 `content` 的思考**：开关本意是「隐藏思考气泡」，
+   但上游 content 为空时缺陷 8/9 的回填会先把思考提升进 `content` 并打标
+   `content_recovered_from_reasoning`——字段级剥离只删 reasoning 键，正文里的
+   思考文本原样漏出，用户照样看到英文思考（2026-09-13 冒烟实测）。
+   → `_strip_reasoning_fields()` 见到打标即把正文置空并除标；截断信号仍由
+   `finish_reason=length` 承担。**教训**：显式开关的语义要穿透「回填」这类
+   跨层变换；开关与防空白守卫冲突时，要在交互点显式裁决。
 
 另外修掉了 `"stop" if saw_content else "stop"` 这类死分支、`Repository` 里跨类型复用
 `row` 变量等 40+ 个静态检查问题。

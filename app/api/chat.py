@@ -42,16 +42,25 @@ _REASONING_KEYS = ("reasoning_content", "reasoning", "content_recovered_from_rea
 
 
 def _strip_reasoning_fields(payload: dict[str, Any]) -> None:
-    """Drop thinking fields from a serialized response/chunk *when a real answer
-    exists*. If content is empty the thinking has already been promoted into it
-    (never a blank reply), so we only strip when text is present.
+    """Drop thinking fields from a serialized response/chunk.
+
+    The switch means "I never want to see the thinking", so reasoning keys are
+    stripped unconditionally; when the answer was cut off and thinking was
+    promoted into ``content`` (the never-blank guard, marked
+    ``content_recovered_from_reasoning``), the promoted text is blanked too —
+    a blank reply under an explicit hide-thinking switch is the honest result.
+    （截断信号：非流式由回填路径补 ``finish_reason=length``；流式回填路径目前
+    不补 finish_reason，这是已知的轻微不一致，见 README §18 缺陷 11。）
     """
     for choice in payload.get("choices") or []:
         for section in ("delta", "message"):
             body = choice.get(section)
-            if isinstance(body, dict) and body.get("content"):
-                for key in _REASONING_KEYS:
-                    body.pop(key, None)
+            if not isinstance(body, dict):
+                continue
+            if body.get("content_recovered_from_reasoning"):
+                body["content"] = ""
+            for key in _REASONING_KEYS:
+                body.pop(key, None)
 
 
 def _chunk_payload(
