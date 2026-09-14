@@ -173,6 +173,12 @@ class Settings(BaseSettings):
     #: reply): the strip only applies when content is present.
     strip_reasoning: bool = False
 
+    #: Fallback model id for the Anthropic ``/v1/messages`` surface. Clients
+    #: such as Claude Code send ``claude-*`` model ids regardless of provider
+    #: mapping; those resolve to this alias instead of 404-ing. Bare ``zk-*``
+    #: ids pass through unchanged.
+    anthropic_default_model: str = "zk-auto"
+
     @property
     def resolved_config_dir(self) -> Path:
         """Absolute config directory (relative paths resolve against the project root)."""

@@ -13,7 +13,8 @@
 ```
                   ┌──────────────────────────────────────────────┐
   OpenAI SDK ──▶  │  /v1/chat/completions   /v1/responses        │
-  LangChain  ──▶  │  /v1/models             /health              │
+  Claude Code──▶  │  /v1/messages (Anthropic)  /v1/models        │
+  LangChain  ──▶  │  /health                                     │
   curl       ──▶  │  /admin/*   (运维面)                          │
                   └───────────────────┬──────────────────────────┘
                                       │  Model Alias 解析
@@ -73,6 +74,7 @@
 | 能力 | 说明 |
 |---|---|
 | **OpenAI 兼容** | `/v1/chat/completions`、`/v1/responses`、`/v1/models`、`/health`。请求体接受任意 OpenAI SDK 会发送的参数，未知参数**记录而非静默丢弃**。 |
+| **Anthropic 兼容** | `/v1/messages`（+ `count_tokens`）：Claude Code 等 `ANTHROPIC_BASE_URL` 型客户端直连，流式块必闭合（见 §3.6.2）。 |
 | **四层抽象** | Provider → Deployment → Model → Credential。一个模型可以有多个 Deployment（多供应商/多区域），失败自动切换。 |
 | **Key Pool** | 显式状态机 `HEALTHY / COOLDOWN / UNHEALTHY / DISABLED`，5 种轮换策略，`threading.RLock` 保证选择原子性。 |
 | **错误分类驱动** | 26 种错误原因 → `retryable / switch_credential / switch_provider / cooldown`。400/413 **绝不**轮换 Key；401 → UNHEALTHY；429 → 分钟限流指数冷却 / 额度耗尽长休；529 → deployment 冷却 + 故障转移。 |
@@ -233,23 +235,27 @@ python scripts/setup_zcode.py --remove
 这样做的好处：ZCode 里切模型只改别名，背后是商汤 / NVIDIA / 魔搭哪一家、
 哪把 Key，ZCode 完全不用知道；某家挂了网关自动转移。
 
-### 3.6.2 关于 Anthropic 协议（Claude Code / Cline 等）
+### 3.6.2 Anthropic 协议（Claude Code / Cline 等）
 
-ZK-AI 目前**只暴露 OpenAI 协议**（`/v1/chat/completions`、`/v1/responses`），
-**没有** `/v1/messages`。而 Claude Code（以及任何 `ANTHROPIC_BASE_URL` 型客户端）
-走的是 Anthropic Messages 协议，因此**不能直接**把
-`ANTHROPIC_BASE_URL` 指向 ZK-AI——会得到 `404`。
+ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
+（以及 `POST /v1/messages/count_tokens` 估算版）。`ANTHROPIC_BASE_URL`
+可以直接指向 ZK-AI（或经 CC Switch 的 anthropic 直通模式），请求会被翻译成
+内部 OpenAI 形态走同一条路由/密钥池/记账链路。
 
-可选做法：
+行为要点：
 
-1. **直接用原生的 `openai-compatible` 客户端**（ZCode / OpenAI SDK / Cherry Studio 等），
-   不需要 Anthropic 协议；
-2. 如果一定要给 Claude Code 用，需要一个 Anthropic→OpenAI 的转换层。
-   最稳的是用 `claude-code-router` 这类成熟项目，把它的后端指向 ZK-AI；
-3. 或者在 ZK-AI 里实现 `/v1/messages`（当前未实现，见 §21 后续计划）。
-
-> 注：`~/.claude/settings.json` 里若已设 `ANTHROPIC_BASE_URL` 指向别的本地代理，
-> 那个代理必须先起起来，否则 Claude Code 会直接连不上。
+* 流式严格遵循 Anthropic 事件语法——每个 `content_block_start` 必有配对的
+  `content_block_stop`，最后 `message_delta` + `message_stop`。（背景：CC Switch
+  的 `openai_chat` 翻译层曾因缺失 `content_block_stop` 导致 Claude Code
+  收到空回复，2026-09-13 定位；因此网关原生实现时把"块必闭合"作为不变式。）
+* 模型名兜底：客户端发来的 `claude-*` 模型 id（含 `[1M]` 后缀）统一路由到
+  `ZKAI_ANTHROPIC_DEFAULT_MODEL`（默认 `zk-auto`）；`zk-*` 别名与真实模型名
+  原样透传。
+* `reasoning_content` 增量映射为 `thinking` 块（`ZKAI_STRIP_REASONING=true`
+  时按 §18 同一开关隐藏）；错误返回 Anthropic 包络
+  `{"type":"error","error":{...}}`。
+* 鉴权与 `/v1/chat/completions` 一致（`ZKAI_API_TOKEN`），额外接受
+  Anthropic 风格的 `x-api-key` 头。
 
 ---
 
@@ -913,6 +919,13 @@ SSE `error` 事件形式下发。
 | `GET` | `/health` | 存活与池状态 |
 | `GET` | `/docs` | Swagger UI |
 
+### 13.2 Anthropic 兼容面
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/v1/messages` | Anthropic Messages 协议（Claude Code 直连），支持 `stream` |
+| `POST` | `/v1/messages/count_tokens` | 启发式输入 token 估算 |
+
 **响应头**（每次请求都带）：
 
 ```
@@ -1240,12 +1253,8 @@ uv run pytest
   付费渠道这里即真实成本。按**实际命中的部署**计价（`meta.deployment_id` 贯穿 usage/requests）。
   不区分缓存命中/阶梯定价；牌价改动只影响**之后**的记录，历史可用
   `python scripts/backfill_cost.py --apply` 幂等回填。控制台同时显示 ≈¥（`CNY_RATE`）。
-- **只有 OpenAI 协议，没有 `/v1/messages`**：Claude Code、Cline 等走 Anthropic
-  Messages 协议的客户端**不能**直接把 `ANTHROPIC_BASE_URL` 指过来（会 404）。
-  对接它们需要外挂一层协议转换（如 `claude-code-router`），或在网关内实现
-  `/v1/messages` + 流式事件映射——后者工作量不小（`message_start` /
-  `content_block_delta` / `message_delta` 一整套事件模型）。
-  眼下用 `openai-compatible` 型客户端（ZCode / OpenAI SDK / Cherry Studio）最省事。
+- **`/v1/responses` 只覆盖常用子集**：`input` → `messages`、文本输出、usage。
+  函数调用、`previous_response_id` 等尚未实现。
 - **推理模型的空回复**：`max_tokens` 过小时，推理模型会把预算全花在思考上。
   网关已回填 `reasoning` 并打标（见 §18 缺陷 8），但**治本办法是给够 `max_tokens`**
   （建议 ≥ 800，或让网关按模型自动加预算）。

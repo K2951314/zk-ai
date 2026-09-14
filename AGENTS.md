@@ -49,6 +49,13 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - 2026-09-13：`ZKAI_STRIP_REASONING=true` 折叠思考已生效（含回填进正文的思考，
   README §18 缺陷 11）；`.env.example` 补了 `ZKAI_API_TOKEN` 可发现行；
   双窗口模型（`--anchors`）就绪，待用户从控制台判定滚动/锚点后填值
+- 2026-09-13（晚）：新增原生 **`/v1/messages`（Anthropic 协议）端点**
+  （`app/api/messages.py` + `app/models/anthropic.py`，`ZKAI_ANTHROPIC_DEFAULT_MODEL`
+  兜底 claude-* 模型名）。起因：CC Switch 的 openai_chat 翻译层缺
+  `content_block_stop` → Claude Code 收到空回复（对照实验实锤）；CC Switch 里
+  zk-ai 供应商已切 `anthropic` 直通（BASE_URL 去掉 `/v1`），`claude -p` 与
+  工具调用端到端验证通过。次要问题待观察：商汤 K3 对 2.5 万 token+ 请求会
+  TPM 429（重试风暴）、moonshot 部署无可用 Key、nvidia 偶发流式连接超时
 - 门禁 ruff / mypy / pytest 全绿（263 passed）；2026-09-12 已提交推送
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
