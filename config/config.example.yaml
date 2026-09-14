@@ -101,6 +101,9 @@ cooldown:
   rate_limit_base: ${ZKAI_RATE_LIMIT_BASE:-60}
   rate_limit_multiplier: 2.0
   rate_limit_max: ${ZKAI_RATE_LIMIT_MAX:-900}
+  # 限流阶梯衰减窗口（秒）：距上次 429 超过此时长视为新一波，阶梯从头算起。
+  # 冷却到期恢复时阶梯也会清零——刑满释放即无罪，持续限流仍会在窗口内重新爬梯。
+  rate_limit_decay: ${ZKAI_RATE_LIMIT_DECAY:-1800}
   # 额度耗尽类 429 的平铺冷却（不参与指数放大）
   quota_cooldown: ${ZKAI_QUOTA_COOLDOWN:-1800}
   quota_cooldown_max: ${ZKAI_QUOTA_COOLDOWN_MAX:-14400}

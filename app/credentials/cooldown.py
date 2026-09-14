@@ -17,6 +17,10 @@ class CooldownPolicy:
     rate_limit_base: float = 60.0
     rate_limit_max: float = 900.0
     rate_limit_multiplier: float = 2.0
+    #: Decay window: a 429 arriving longer than this after the previous one is
+    #: a *new* burst, not a continuation, so the ladder restarts at the base.
+    #: Set ~ 2x rate_limit_max: anything quieter has effectively recovered.
+    rate_limit_decay: float = 1800.0
     #: "Quota exhausted" 429s reset on an hours/week cycle, not a per-minute one.
     #: Parking the key for a fixed, long stretch stops every request from
     #: re-sweeping the sibling keys and escalating their counters for nothing.

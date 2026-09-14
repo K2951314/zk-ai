@@ -63,6 +63,9 @@ class CredentialRuntime:
     last_error_type: str | None = None
     last_error_detail: str | None = None
     disabled_reason: str | None = None
+    #: Timestamp of the most recent *served* 429. Drives the decay window:
+    #: a 429 that arrives long after the previous one starts a fresh ladder.
+    last_rate_limit_at: float | None = None
 
     in_flight: int = 0
     latency_ema_ms: float = 0.0

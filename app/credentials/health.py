@@ -165,6 +165,16 @@ class CredentialHealthTracker:
 
         if info.error_type in THROTTLE_ERRORS:
             credential.rate_limit_count += 1
+            # Decay: a 429 that arrives long after the previous one is a new
+            # burst, not a continuation - restart the ladder at the base so a
+            # stale history cannot pin the key at the ceiling forever.
+            last_rl = credential.last_rate_limit_at
+            if (
+                last_rl is not None
+                and moment - last_rl >= self.policy.rate_limit_decay
+            ):
+                credential.consecutive_rate_limits = 0
+            credential.last_rate_limit_at = moment
             credential.consecutive_rate_limits += 1
             credential.consecutive_failures += 1
             # The cooldown policy owns the duration so that repeated throttling
@@ -359,18 +369,15 @@ class CredentialHealthTracker:
         credential.cooldown_until = None
         credential.consecutive_failures = 0
         credential.disabled_reason = "auto-recovered"
-        # The rate-limit ladder must survive a *short* rest (cooldown 60s ->
-        # immediately throttled again -> 120s), otherwise the exponential
-        # backoff never engages. But once the key has quietly rested through a
-        # full *max* cooldown, the history is stale: without this reset a
-        # burst of throttling permanently pins every key at the 900s ceiling
-        # and the user's wait buys no recovery (observed live: zk-k3 503
-        # storms for 15+ minutes on SenseNova's rolling 5h quota windows).
-        if (
-            credential.last_error_at is not None
-            and moment - credential.last_error_at >= self.policy.rate_limit_max
-        ):
-            credential.consecutive_rate_limits = 0
+        # 刑满释放即无罪: the cooldown was the punishment, and once served the
+        # key re-enters at the *base* of the ladder. Carrying the ladder across
+        # a served cooldown pinned every key at the 900s ceiling after one busy
+        # burst - each expiry re-throttled into an even longer cooldown, so the
+        # only way back to 60s was the manual /admin/cooldowns/clear. Decay in
+        # ``on_failure`` already restarts genuinely *sustained* throttling at
+        # the next ladder rung within one fresh cooldown cycle, so no backoff
+        # protection is lost.
+        credential.consecutive_rate_limits = 0
         logger.info("credential %s cooldown expired -> HEALTHY", credential.id)
         return Transition(
             credential_id=credential.id,

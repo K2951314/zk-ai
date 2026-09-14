@@ -185,35 +185,58 @@ def test_repeated_rate_limits_grow_the_cooldown() -> None:
     assert (second.cooldown_until - first.cooldown_until) == pytest.approx(60, abs=1)
 
 
-def test_short_rest_keeps_the_rate_limit_ladder() -> None:
-    """A quick cooldown expiry must NOT reset the ladder - exponential backoff
-    would otherwise never engage (60s -> throttle -> 60s -> ... forever)."""
-    policy = CooldownPolicy(rate_limit_base=60, rate_limit_max=600, jitter=0)
+def test_served_cooldown_resets_the_rate_limit_ladder() -> None:
+    """Cooldown expiry always restarts the ladder at the base rung.
+
+    Regression: the ladder used to survive short rests, so one busy burst
+    pinned every key at the 900s ceiling - each expiry re-throttled into an
+    even longer cooldown and only /admin/cooldowns/clear brought the key back.
+    The punishment is the cooldown itself; once served, history is wiped.
+    Sustained throttling still backs off: the re-throttle happens *inside* the
+    decay window, so the very next failure climbs the ladder again.
+    """
+    policy = CooldownPolicy(rate_limit_base=60, rate_limit_max=600, rate_limit_decay=1200, jitter=0)
     tracker = CredentialHealthTracker(policy)
     pool, _ = build_pool()
     credential = pool.get("k1")
     tracker.on_failure(credential, failure(429), now=1000.0)
     tracker.on_failure(credential, failure(429), now=1001.0)
     assert credential.consecutive_rate_limits == 2
-    # Second cooldown (120s) elapsed at 1121s; quiet time since the last 429
-    # is exactly 120s - far below rate_limit_max (600s).
+    # Second cooldown (120s) elapses; the key has served its sentence.
     tracker.refresh(credential, now=1121.0)
     assert credential.status is CredentialStatus.HEALTHY
-    assert credential.consecutive_rate_limits == 2  # ladder preserved
-    # Next 429 continues the ladder instead of restarting it.
+    assert credential.consecutive_rate_limits == 0  # fresh ladder
+    # Sustained throttling: the next 429 is within the decay window of the
+    # last one, so the ladder climbs again from rung 1 -> 2 -> ...
     tracker.on_failure(credential, failure(429), now=1121.0)
-    assert credential.consecutive_rate_limits == 3
+    assert credential.consecutive_rate_limits == 1
+    tracker.on_failure(credential, failure(429), now=1122.0)
+    assert credential.consecutive_rate_limits == 2
+
+
+def test_stale_rate_limit_history_decays_away() -> None:
+    """A 429 arriving long after the previous one is a new burst, not a
+    continuation - the ladder must not accumulate across quiet hours."""
+    policy = CooldownPolicy(rate_limit_base=60, rate_limit_max=600, rate_limit_decay=1200, jitter=0)
+    tracker = CredentialHealthTracker(policy)
+    pool, _ = build_pool()
+    credential = pool.get("k1")
+    for i in range(4):
+        tracker.on_failure(credential, failure(429), now=1000.0 + i)
+    assert credential.consecutive_rate_limits == 4
+    # Hours later (beyond the decay window) a single 429 hits. The old burst
+    # is stale history; the ladder restarts at the base instead of the ceiling.
+    tracker.on_failure(credential, failure(429), now=1000.0 + 5000.0)
+    assert credential.consecutive_rate_limits == 1
+    assert credential.cooldown_until is not None
+    assert credential.cooldown_until - 6000.0 == pytest.approx(60, abs=1)
 
 
 def test_full_max_cooldown_rest_resets_the_rate_limit_ladder() -> None:
     """Once a key has quietly rested through a full max cooldown, the history
     is stale: the user's wait must buy a fresh ladder, not a higher one.
-
-    Regression: without the reset, a burst of throttling permanently pinned
-    every SenseNova key at the 900s ceiling and zk-k3 returned 503 for 15+
-    minutes even after the quota window had partially recovered.
     """
-    policy = CooldownPolicy(rate_limit_base=60, rate_limit_max=600, jitter=0)
+    policy = CooldownPolicy(rate_limit_base=60, rate_limit_max=600, rate_limit_decay=1200, jitter=0)
     tracker = CredentialHealthTracker(policy)
     pool, _ = build_pool()
     credential = pool.get("k1")
