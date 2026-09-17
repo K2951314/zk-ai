@@ -299,8 +299,56 @@ def sync_provider_rate_limits(path: Path, provider_id: str, rules: list[dict]) -
     atomic_write(path, doc)
 
 
+def append_credential_to_provider(
+    path: Path,
+    provider_id: str,
+    credential: dict[str, Any],
+) -> None:
+    """Append a credential to one provider's ``credentials:`` list in providers.yaml.
+
+    The credential must already have an ``id``; ``env``/``env_var`` is the *name* of
+    an env var that holds the key (never the key itself). New entries go at the end
+    of the provider's list with a comment header.
+    """
+    doc = load_document(path)
+    providers = _list_of(doc, "providers")
+    index = _find(providers, "id", provider_id)
+    if index < 0:
+        raise KeyError(f"provider '{provider_id}' not found in {path.name}")
+    entry = providers[index]
+    credentials = entry.get("credentials")
+    if not isinstance(credentials, CommentedSeq):
+        credentials = CommentedSeq()
+        entry["credentials"] = credentials
+    # Build a plain dict first, then wrap it; ruamel needs CommentedMap for list items.
+    plain = _plain({k: v for k, v in credential.items() if v is not None})
+    credentials.append(plain)
+    atomic_write(path, doc)
+
+
+def delete_credential_from_provider(path: Path, provider_id: str, credential_id: str) -> None:
+    """Remove one credential by id from a provider's ``credentials:`` list."""
+    doc = load_document(path)
+    providers = _list_of(doc, "providers")
+    index = _find(providers, "id", provider_id)
+    if index < 0:
+        raise KeyError(f"provider '{provider_id}' not found in {path.name}")
+    entry = providers[index]
+    credentials = entry.get("credentials")
+    if not isinstance(credentials, CommentedSeq):
+        raise KeyError(f"provider '{provider_id}' has no credentials")
+    for i, cred in enumerate(credentials):
+        if isinstance(cred, CommentedMap) and cred.get("id") == credential_id:
+            del credentials[i]
+            atomic_write(path, doc)
+            return
+    raise KeyError(f"credential '{credential_id}' not found in provider '{provider_id}'")
+
+
 __all__ = [
+    "append_credential_to_provider",
     "atomic_write",
+    "delete_credential_from_provider",
     "delete_list_entry",
     "load_document",
     "sync_provider_rate_limits",

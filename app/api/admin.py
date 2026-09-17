@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 from app.api.deps import ContainerDep, require_admin
 from app.core.config import apply_db_overrides, load_app_config
 from app.core.config_writer import (
+    append_credential_to_provider,
+    delete_credential_from_provider,
     delete_list_entry,
     sync_provider_rate_limits,
     upsert_list_entry,
@@ -355,6 +357,96 @@ async def set_provider_limits(
         "rules": cleaned,
         "synced": synced,
     }
+
+
+class AddCredentialRequest(BaseModel):
+    """Body for adding a credential to a provider at runtime."""
+
+    id: str
+    env_var: str | None = None  # Name of the env var that holds the key (never the key)
+    value: str | None = None  # Inline key, development only; env_var preferred
+    priority: int = 100
+    enabled: bool = True
+
+
+@router.post("/providers/{provider_id}/credentials", summary="Add a credential to a provider")
+async def add_credential(
+    provider_id: str, payload: AddCredentialRequest, container: ContainerDep
+) -> dict[str, Any]:
+    """Append a credential to a provider's pool at runtime; persists across restarts.
+
+    Writes to ``providers.yaml`` so the new key survives reloads. If the same id
+    already exists this is an update (idempotent).
+    """
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    if payload.env_var is None and payload.value is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": "either env_var or value must be set (env_var preferred - "
+                    "store the key in .env and reference its name here)",
+                    "type": "invalid_credential",
+                }
+            },
+        )
+    credential = {
+        "id": payload.id,
+        "env_var": payload.env_var,
+        "value": payload.value,
+        "priority": payload.priority,
+        "enabled": payload.enabled,
+    }
+    synced = None
+    path = _source_file(container, "providers")
+    if path is not None:
+        append_credential_to_provider(path, provider_id, credential)
+        synced = path.name
+    # Update in-memory config + credential pool
+    from app.models.provider import CredentialConfig
+
+    cred = CredentialConfig(
+        id=payload.id,
+        env_var=payload.env_var,
+        value=payload.value,
+        enabled=payload.enabled,
+        priority=payload.priority,
+    )
+    # replace if the id already exists
+    provider.credentials = [c for c in provider.credentials if c.id != payload.id] + [cred]
+    container.pool.register_provider(provider)
+    return {"object": "credential", "provider_id": provider_id, "credential_id": payload.id, "synced": synced}
+
+
+@router.delete("/providers/{provider_id}/credentials/{credential_id}", summary="Remove a credential")
+async def delete_credential(
+    provider_id: str, credential_id: str, container: ContainerDep
+) -> dict[str, Any]:
+    """Remove a credential from a provider's pool at runtime; persists across restarts."""
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    if not any(c.id == credential_id for c in provider.credentials):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"credential '{credential_id}' not found"}},
+        )
+    synced = None
+    path = _source_file(container, "providers")
+    if path is not None:
+        delete_credential_from_provider(path, provider_id, credential_id)
+        synced = path.name
+    provider.credentials = [c for c in provider.credentials if c.id != credential_id]
+    container.pool.register_provider(provider)
+    return {"deleted": credential_id, "provider_id": provider_id, "synced": synced}
 
 
 @router.delete("/providers/{provider_id}/limits", summary="Reset quota rules to YAML")

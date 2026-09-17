@@ -167,6 +167,7 @@
 <div class="modal-mask" id="alias-modal"></div>
 <div class="modal-mask" id="limits-modal"></div>
 <div class="modal-mask" id="market-modal"></div>
+<div class="modal-mask" id="addkey-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
   <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
@@ -541,6 +542,7 @@ async function loadPool() {
       <span class="pill red">失败 ${s.failure}</span>
       <span class="pill amber">限流 ${s.rate_limits}</span>
       <span class="grow"></span>
+      <button id="pool-add-key">➕ 加 Key</button>
       <button id="pool-limits">⚙ 限额</button>
       <button id="pool-clear-all">🧹 全部清冷却</button>
     </div>
@@ -553,6 +555,7 @@ async function loadPool() {
     （命中供应商侧前缀缓存，历史不重算）；该 Key 冷却/故障时自动换下一把并在成功瞬间把锚点带过去。
     冷却规则：分钟限流指数退避（60→900 秒），额度耗尽（token plan exhausted）平铺休 30 分钟。</p>`;
   tickCountdowns();
+  $("#pool-add-key").onclick = openAddKeyModal;
   $("#pool-limits").onclick = openLimitsModal;
   $("#pool-clear-all").onclick = async () => {
     const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
@@ -676,6 +679,53 @@ function renderLimitsModal() {
     openLimitsModal();
   });
 }
+/* ---------- 凭据池：加 Key ---------- */
+async function openAddKeyModal() {
+  const resp = await api("/admin/providers");
+  const providers = (resp.data || []).filter(p => p.requires_credential);
+  if (!providers.length) { toast("没有可加 Key 的供应商（都要凭据）", "err"); return; }
+  const modal = $("#addkey-modal");
+  modal.innerHTML = `<div class="card">
+    <h3>➕ 给供应商加 Key</h3>
+    <div class="small muted" style="margin:-6px 0 12px">Key 本身存到 <code>.env</code> 里，这里只记它的「变量名」——这样换机器、重建环境时不用重新配。</div>
+    <div class="formgrid">
+      <label>供应商
+        <select id="ak-provider">${providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join("")}</select>
+      </label>
+      <label>Key 的 ID（唯一，自己起）
+        <input type="text" id="ak-id" placeholder="如 sensenova-10"></label>
+      <label>环境变量名（.env 里的那个）
+        <input type="text" id="ak-env" placeholder="如 SENSENOVA_API_KEY_10"></label>
+      <label>优先级（越小越优先，默认 100）
+        <input type="number" id="ak-priority" value="100"></label>
+    </div>
+    <div class="row-flex" style="margin-top:14px">
+      <button class="primary" id="ak-save">💾 保存</button>
+      <button id="ak-cancel">取消</button>
+    </div>
+  </div>`;
+  modal.classList.add("show");
+  $("#ak-cancel").onclick = () => modal.classList.remove("show");
+  $("#ak-save").onclick = async () => {
+    const payload = {
+      id: $("#ak-id").value.trim(),
+      env_var: $("#ak-env").value.trim() || null,
+      priority: Number($("#ak-priority").value || 100),
+    };
+    if (!payload.id) { toast("Key 的 ID 不能为空", "err"); return; }
+    if (!payload.env_var) { toast("环境变量名不能为空（Key 存 .env，这里只记名字）", "err"); return; }
+    try {
+      const pid = $("#ak-provider").value;
+      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/credentials`,
+        { method: "POST", json: payload });
+      if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
+      toast(`已加 ${payload.id} 到 ${pid}${syncedNote(r)}`, "ok");
+      modal.classList.remove("show");
+      loadPool();
+    } catch (err) { toast(err.message, "err"); }
+  };
+}
+
 async function openLimitsModal() {
   const resp = await api("/admin/providers");
   state.limitsProviders = resp.data || [];
@@ -1095,11 +1145,9 @@ async function openMarketModal() {
     $("#mk-list").innerHTML = '<span class="muted">探测中…</span>';
     try {
       const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models`);
-      const items = r.data || [];
+      let items = r.data || [];
       if (!items.length) { $("#mk-list").innerHTML = '<span class="muted">这个供应商没有可列的模型</span>'; return; }
-      const known = items.filter(x => x.preset.family !== x.upstream_model.split("/").pop());  // 有预设的
-      const fresh = items.filter(x => x.preset.family === x.upstream_model.split("/").pop());   // 未收录的
-      const renderItem = (x, idx) => `
+      const render = (arr) => arr.map((x, idx) => `
         <tr class="${x.already_added ? "muted" : ""}">
           <td><b>${esc(x.suggested_model_id)}</b><div class="small muted">${esc(x.upstream_model)}</div></td>
           <td class="small">${fmtK(x.preset.context_window)}</td>
@@ -1108,39 +1156,62 @@ async function openMarketModal() {
           <td>${x.already_added
             ? '<span class="pill gray">已收录</span>'
             : `<button class="mini primary" data-add-model="${idx}">＋ 添加</button>`}</td>
-        </tr>`;
-      const rows = items.map(renderItem).join("");
+        </tr>`).join("");
+      const renderList = (q) => {
+        const filtered = q
+          ? items.filter(x =>
+              (x.suggested_model_id + " " + x.upstream_model + " " + (x.preset.description || ""))
+                .toLowerCase().includes(q.toLowerCase()))
+          : items;
+        $("#mk-rows").innerHTML = render(filtered) ||
+          `<tr><td colspan="5" class="muted">没有匹配「${esc(q)}」的模型</td></tr>`;
+        document.querySelectorAll("[data-add-model]").forEach(b => b.onclick = () => {
+          const x = filtered[Number(b.dataset.addModel)];
+          const p = x.preset;
+          const providerId = $("#mk-provider").value;
+          openModelModal(null, {
+            id: x.suggested_model_id,
+            display_name: p.display_name,
+            owned_by: providerId,
+            description: p.description,
+            enabled: true,
+            context_window: p.context_window,
+            capabilities: p.capabilities,
+            deployments: [{
+              id: `${x.suggested_model_id}-${providerId}`,
+              provider_id: providerId,
+              model: x.upstream_model,
+              priority: 100,
+              context_window: p.context_window,
+              max_output_tokens: 32768,
+              input_cost_per_mtok: p.input_price,
+              output_cost_per_mtok: p.output_price,
+            }],
+            presetDescription: p.description,
+          });
+        });
+      };
       $("#mk-list").innerHTML = `
-        <div class="small muted" style="margin-bottom:8px">${items.length} 个可用 · ${items.filter(x => x.already_added).length} 个已收录</div>
+        <div class="row-flex" style="margin-bottom:8px">
+          <input id="mk-q" size="22" placeholder="搜索模型名 / 说明…" style="flex:1">
+          <span class="small muted" id="mk-count"></span>
+        </div>
         <div class="tablewrap" style="max-height:55vh"><table>
           <thead><tr><th>模型</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th><th>操作</th></tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody id="mk-rows"></tbody>
         </table></div>`;
-      document.querySelectorAll("[data-add-model]").forEach(b => b.onclick = () => {
-        const x = items[Number(b.dataset.addModel)];
-        const p = x.preset;
-        const providerId = $("#mk-provider").value;
-        openModelModal(null, {
-          id: x.suggested_model_id,
-          display_name: p.display_name,
-          owned_by: providerId,
-          description: p.description,
-          enabled: true,
-          context_window: p.context_window,
-          capabilities: p.capabilities,
-          deployments: [{
-            id: `${x.suggested_model_id}-${providerId}`,
-            provider_id: providerId,
-            model: x.upstream_model,
-            priority: 100,
-            context_window: p.context_window,
-            max_output_tokens: 32768,
-            input_cost_per_mtok: p.input_price,
-            output_cost_per_mtok: p.output_price,
-          }],
-          presetDescription: p.description,
-        });
-      });
+      const updateCount = () => {
+        const q = $("#mk-q").value.trim();
+        const filtered = q
+          ? items.filter(x =>
+              (x.suggested_model_id + " " + x.upstream_model + " " + (x.preset.description || ""))
+                .toLowerCase().includes(q.toLowerCase()))
+          : items;
+        $("#mk-count").textContent = `${filtered.length} / ${items.length} 个 · ${items.filter(x => x.already_added).length} 已收录`;
+        renderList(q);
+      };
+      $("#mk-q").oninput = updateCount;
+      updateCount();
     } catch (err) { $("#mk-list").innerHTML = `<span class="pill red">${esc(err.message)}</span>`; }
   };
 }
