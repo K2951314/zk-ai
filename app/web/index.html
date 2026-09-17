@@ -166,6 +166,7 @@
 <div class="modal-mask" id="model-modal"></div>
 <div class="modal-mask" id="alias-modal"></div>
 <div class="modal-mask" id="limits-modal"></div>
+<div class="modal-mask" id="market-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
   <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
@@ -898,7 +899,8 @@ async function loadModels() {
   $("#view-models").innerHTML = `
     ${warnings}
     <div class="toolbar"><h4 class="sec grow" style="margin:0">模型（${(m.data || []).length}）</h4>
-      <button class="primary" id="md-new">➕ 新建模型</button></div>
+      <button class="primary" id="md-market">🧺 模型市场（从供应商导入）</button>
+      <button id="md-new">➕ 手动新建</button></div>
     <div class="tablewrap"><table><thead><tr><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th><th>操作</th></tr></thead>
       <tbody>${modelRows}</tbody></table></div>
     <div class="toolbar" style="margin-top:22px"><h4 class="sec grow" style="margin:0">别名（对外稳定入口）</h4>
@@ -933,6 +935,7 @@ async function loadModels() {
       <details class="raw"><summary>原始数据</summary><pre>${esc(JSON.stringify(r, null, 1).slice(0, 4000))}</pre></details>`;
   };
   $("#md-new").onclick = () => openModelModal(null);
+  $("#md-market").onclick = openMarketModal;
   $("#al-new").onclick = () => openAliasModal(null);
   document.querySelectorAll("[data-edit-model]").forEach(b =>
     b.onclick = () => openModelModal(b.dataset.editModel));
@@ -971,15 +974,17 @@ function depCardHtml(d, idx) {
     </div>
   </div>`;
 }
-function openModelModal(modelId) {
+function openModelModal(modelId, prefill) {
   const src = modelId ? (state.modelsCache || []).find(x => x.id === modelId) : null;
-  const m = src || {id: "", enabled: true, context_window: 128000, capabilities: {}, deployments: []};
+  // prefill: 来自模型市场的预设（modelId 为 null 时）——直接填好表单，用户只微调
+  const m = src || prefill || {id: "", enabled: true, context_window: 128000, capabilities: {}, deployments: []};
   const caps = Object.fromEntries(CAP_DIMS.map(k => [k, (m.capabilities || {})[k] ?? 5]));
   let deps = (m.deployments || []).map(d => Object.assign({}, d));
   if (!deps.length && !modelId) deps = [{}];
   const modal = $("#model-modal");
   modal.innerHTML = `<div class="card">
-    <h3>${modelId ? "编辑模型" : "新建模型"}</h3>
+    <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建" : "新建模型")}</h3>
+    ${prefill && prefill.presetDescription ? `<div class="small muted" style="margin:-6px 0 10px">${esc(prefill.presetDescription)}（预设已填好，可直接保存或微调）</div>` : ""}
     <div class="formgrid">
       <label>模型 ID（对外名）<input type="text" id="mm-id" value="${esc(m.id)}" ${modelId ? "disabled" : ""} placeholder="如 glm-5.3"></label>
       <label>显示名<input type="text" id="mm-name" value="${esc(m.display_name || "")}" placeholder="可空"></label>
@@ -1063,6 +1068,81 @@ async function deleteModel(modelId) {
     toast(`模型 ${modelId} 已删除${syncedNote(r)}`, "ok");
     loadModels();
   } catch (err) { toast(err.message, "err"); }
+}
+
+/* ---------- 模型市场：从供应商导入 ---------- */
+async function openMarketModal() {
+  const modal = $("#market-modal");
+  // 供应商下拉（有可用凭据的才显示，否则 list_models 会 401）
+  const providers = (state.providers || []).filter(p => p.requires_credential);
+  if (!providers.length) { toast("没有可用供应商（先配好凭据）", "err"); return; }
+  modal.innerHTML = `<div class="card">
+    <h3>🧺 模型市场</h3>
+    <div class="row-flex" style="margin-bottom:10px">
+      <label class="small muted">供应商
+        <select id="mk-provider">${providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join("")}</select>
+      </label>
+      <button class="primary" id="mk-load">🔍 探测可用模型</button>
+      <span class="grow"></span>
+      <button id="mk-close">关闭</button>
+    </div>
+    <div id="mk-list" class="small muted">选供应商后点「探测」列出它能调的所有模型，已收录的会预填上下文/能力/价格。</div>
+  </div>`;
+  modal.classList.add("show");
+  $("#mk-close").onclick = () => modal.classList.remove("show");
+  $("#mk-load").onclick = async () => {
+    const pid = $("#mk-provider").value;
+    $("#mk-list").innerHTML = '<span class="muted">探测中…</span>';
+    try {
+      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models`);
+      const items = r.data || [];
+      if (!items.length) { $("#mk-list").innerHTML = '<span class="muted">这个供应商没有可列的模型</span>'; return; }
+      const known = items.filter(x => x.preset.family !== x.upstream_model.split("/").pop());  // 有预设的
+      const fresh = items.filter(x => x.preset.family === x.upstream_model.split("/").pop());   // 未收录的
+      const renderItem = (x, idx) => `
+        <tr class="${x.already_added ? "muted" : ""}">
+          <td><b>${esc(x.suggested_model_id)}</b><div class="small muted">${esc(x.upstream_model)}</div></td>
+          <td class="small">${fmtK(x.preset.context_window)}</td>
+          <td class="small muted">${esc(x.preset.description)}</td>
+          <td class="small">${x.preset.input_price ? "$" + x.preset.input_price + "/" + x.preset.output_price : "-"}</td>
+          <td>${x.already_added
+            ? '<span class="pill gray">已收录</span>'
+            : `<button class="mini primary" data-add-model="${idx}">＋ 添加</button>`}</td>
+        </tr>`;
+      const rows = items.map(renderItem).join("");
+      $("#mk-list").innerHTML = `
+        <div class="small muted" style="margin-bottom:8px">${items.length} 个可用 · ${items.filter(x => x.already_added).length} 个已收录</div>
+        <div class="tablewrap" style="max-height:55vh"><table>
+          <thead><tr><th>模型</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th><th>操作</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+      document.querySelectorAll("[data-add-model]").forEach(b => b.onclick = () => {
+        const x = items[Number(b.dataset.addModel)];
+        const p = x.preset;
+        const providerId = $("#mk-provider").value;
+        openModelModal(null, {
+          id: x.suggested_model_id,
+          display_name: p.display_name,
+          owned_by: providerId,
+          description: p.description,
+          enabled: true,
+          context_window: p.context_window,
+          capabilities: p.capabilities,
+          deployments: [{
+            id: `${x.suggested_model_id}-${providerId}`,
+            provider_id: providerId,
+            model: x.upstream_model,
+            priority: 100,
+            context_window: p.context_window,
+            max_output_tokens: 32768,
+            input_cost_per_mtok: p.input_price,
+            output_cost_per_mtok: p.output_price,
+          }],
+          presetDescription: p.description,
+        });
+      });
+    } catch (err) { $("#mk-list").innerHTML = `<span class="pill red">${esc(err.message)}</span>`; }
+  };
 }
 
 /* ---------- 别名编辑弹窗 ---------- */

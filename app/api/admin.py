@@ -161,6 +161,60 @@ async def list_providers(container: ContainerDep) -> dict[str, Any]:
     return {"object": "list", "data": providers}
 
 
+@router.get("/providers/{provider_id}/models", summary="List a provider's upstream models")
+async def provider_models(provider_id: str, container: ContainerDep) -> dict[str, Any]:
+    """Probe a provider's native model list and match each id against the curated presets.
+
+    Feeds the model marketplace: the console can show "which models this provider
+    actually has" with pre-filled context/capability/price, so adding a model is a
+    pick-and-save instead of filling a form from scratch. Providers without a
+    credential (moonshot with no key) return an empty list with an explanatory note.
+    """
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    adapter = container.router.adapter(provider_id)
+    credential = next(iter(container.pool.for_provider(provider_id)), None)
+    upstream_ids = await adapter.list_models(credential)
+    known_models = set(container.config.models)
+    known_upstream = {
+        deployment.model
+        for model in container.config.models.values()
+        for deployment in model.deployments
+    }
+    from app.models.presets import preset_for
+
+    data = []
+    for upstream in sorted(upstream_ids):
+        preset = preset_for(upstream)
+        data.append(
+            {
+                "upstream_model": upstream,
+                "suggested_model_id": _suggest_model_id(upstream),
+                "already_added": preset.family in known_models
+                or upstream in known_upstream,
+                "preset": {
+                    "family": preset.family,
+                    "display_name": preset.display_name,
+                    "context_window": preset.context_window,
+                    "capabilities": preset.capabilities,
+                    "input_price": preset.input_price,
+                    "output_price": preset.output_price,
+                    "description": preset.description,
+                },
+            }
+        )
+    return {"object": "list", "provider_id": provider_id, "data": data}
+
+
+def _suggest_model_id(upstream: str) -> str:
+    """A gateway-facing id from an upstream name: ``z-ai/glm-5.3`` -> ``glm-5.3``."""
+    return upstream.split("/")[-1].strip()
+
+
 @router.get("/models", summary="List models with capabilities")
 async def list_models(container: ContainerDep) -> dict[str, Any]:
     """Models plus their deployments, capabilities and aliases."""
