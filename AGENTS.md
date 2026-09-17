@@ -56,17 +56,28 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   工具调用端到端验证通过。次要问题待观察：商汤 K3 对 2.5 万 token+ 请求会
   TPM 429（重试风暴）、moonshot 部署无可用 Key、nvidia 偶发流式连接超时
 - 2026-09-17：①新增 **NVIDIA glm-5.3 / glm-5.3-flash** 模型，且 `/ui` 控制台支持
-  运行时**新建/编辑/删除模型与别名**（`POST/DELETE /admin/models`；改动存 DB 镜像，
-  reload/重启时经 `apply_db_overrides` 回叠 YAML）。②新增**主动配额限速**
+  运行时**新建/编辑/删除模型与别名**。②新增**主动配额限速**
   `app/routing/limits.py`：滑动窗口，支持按请求数（`max_requests`）与 token 数
   （`max_tokens`）双口径、credential/account/provider 三作用域；NVIDIA 单账号
   40rpm、商汤按账号 5h+周 token 预算（约 300M/3G，积分折算的保守值，控制台可校准）。
   scheduler 选中即记账、成功后回喂 token；到线的 Key 直接跳过。③限额可在控制台
-  「凭据池 → ⚙ 限额」运行时改（`PUT/DELETE /admin/providers/{id}/limits`，存 DB 优先
-  于 YAML，「恢复 YAML」可退回）。**坑**：真实模型响应常 >60s，串行测 rpm 限额会因
-  窗口滑走而全过——验证要用并发 burst。计数持久化 `data/rate_limits.json`（脏才写，
-  测试不污染）
-- 门禁 ruff / mypy / pytest 全绿（298 passed）；2026-09-17 已提交推送
+  「凭据池 → ⚙ 限额」运行时改（`PUT/DELETE /admin/providers/{id}/limits`）。
+  **坑**：真实模型响应常 >60s，串行测 rpm 限额会因窗口滑走而全过——验证要用并发 burst。
+  计数持久化 `data/rate_limits.json`（脏才写，测试不污染）
+- 2026-09-18：①**控制台写操作改为直接回写 YAML**（`app/core/config_writer.py`，
+  ruamel 保注释往回编辑；删除走文本行拼接，因为 ruamel 重排会乱注释归属）。
+  之前只存 DB 镜像 → 删掉的模型/别名在 reload/重启后被 YAML 复活。现在
+  **文件是唯一真相**：写失败整体 500 回滚，models/aliases 不再从 DB 回叠
+  （`apply_db_overrides` 只留限额一项兜底）。每步留 `<name>.yaml.bak`。
+  ②**网关/消耗器收进系统托盘**（`scripts/tray_launcher.py`，pystray 自绘蓝绿图标；
+  绿=运行、蓝=停止/静默超时；右键查看日志/打开控制台/重启/退出）。
+  **坑**：uv 的 `.venv\Scripts\python(w).exe` 是 trampoline，会再启动一次真解释器，
+  `CREATE_NO_WINDOW|DETACHED_PROCESS` 不会跟着传递 → 最内层 python.exe 自己新建
+  控制台窗口（任务栏残留）。必须读 `pyvenv.cfg` 的 `home` 直接用 base 目录的真
+  `pythonw.exe` + `__PYVENV_LAUNCHER__` 指回 venv；port_guard 及其
+  powershell/taskkill 子进程也都要 `CREATE_NO_WINDOW`
+- 门禁 ruff / mypy / pytest 全绿（332 passed）；2026-09-18 提交在本地
+  （6 个提交待推送，需要时 `git push origin main`，推送走本机代理）
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
   （重启不清零），`--calibrate-actual 实扣数` 可随时精校准；并发 AIMD 自适应
