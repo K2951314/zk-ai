@@ -656,12 +656,15 @@ def apply_db_overrides(
     config: AppConfig,
     model_rows: list[dict[str, Any]],
     alias_rows: list[dict[str, Any]],
+    provider_limit_rows: dict[str, list[dict[str, Any]]] | None = None,
 ) -> AppConfig:
     """Re-apply web-console edits (persisted in the DB mirror) over freshly loaded YAML.
 
     The YAML files stay the baseline, but models/aliases created or edited through
     ``/admin`` must survive ``POST /admin/config/reload`` and restarts: any model or
-    alias present in the DB replaces (or adds to) the YAML version.
+    alias present in the DB replaces (or adds to) the YAML version. ``provider_limit_rows``
+    carries per-provider quota rules the operator set from the console; they shadow the
+    YAML ``options.rate_limits`` (and an empty list means "operator cleared them").
     """
     for row in model_rows:
         try:
@@ -673,6 +676,11 @@ def apply_db_overrides(
             config.aliases[row["name"]] = ModelAliasConfig(**row)
         except ValidationError as exc:
             config.warnings.append(f"DB alias override '{row.get('name')}' invalid: {exc}")
+    for provider_id, rules in (provider_limit_rows or {}).items():
+        provider = config.providers.get(provider_id)
+        if provider is None:
+            continue
+        provider.options = {**provider.options, "rate_limits": list(rules)}
     return config
 
 

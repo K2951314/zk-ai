@@ -25,6 +25,7 @@ from app.models.provider import (
 )
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.routing.aliases import AliasRegistry
+from app.routing.limits import RateLimitRule
 
 logger = get_logger("api.admin")
 
@@ -38,6 +39,7 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(requir
 async def list_providers(container: ContainerDep) -> dict[str, Any]:
     """Configured providers, their credentials and live availability."""
     availability = container.pool.provider_availability()
+    console_limits = await container.config_repository.provider_rate_limit_overrides()
     providers: list[dict[str, Any]] = []
     for provider in container.config.providers.values():
         credentials = container.pool.for_provider(provider.id)
@@ -51,6 +53,8 @@ async def list_providers(container: ContainerDep) -> dict[str, Any]:
                 "timeout": provider.timeout,
                 "max_retries": provider.max_retries,
                 "available": availability.get(provider.id, False),
+                "rate_limits": list(provider.options.get("rate_limits") or []),
+                "rate_limits_source": "console" if provider.id in console_limits else "yaml",
                 "credentials": [c.snapshot() for c in credentials],
                 "models": sorted(
                     {
@@ -150,6 +154,68 @@ async def run_health_check(
     return await container.health_service.check_all(
         kind="manual", provider_ids=request.providers
     )
+
+
+class ProviderLimitsRequest(BaseModel):
+    """Body for setting a provider's proactive quota rules from the console."""
+
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.put("/providers/{provider_id}/limits", summary="Set a provider's quota rules")
+async def set_provider_limits(
+    provider_id: str, payload: ProviderLimitsRequest, container: ContainerDep
+) -> dict[str, Any]:
+    """Replace a provider's sliding-window quotas at runtime; persists across restarts.
+
+    Empty ``rules`` means "unlimited" and still shadows the YAML until it is reset
+    with ``DELETE``.
+    """
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    cleaned: list[dict[str, Any]] = []
+    for entry in payload.rules:
+        rule = RateLimitRule.from_mapping(entry)
+        if rule is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "message": f"invalid rule: {entry!r} (need window_seconds and "
+                        "at least one of max_requests / max_tokens; scope in "
+                        "credential|account|provider)",
+                        "type": "invalid_rate_limit",
+                    }
+                },
+            )
+        cleaned.append(rule.as_mapping())
+    provider.options = {**provider.options, "rate_limits": cleaned}
+    container.rate_limiter.register_provider(provider)
+    await container.config_repository.set_provider_rate_limits(provider_id, cleaned)
+    logger.info("provider %s quota rules set to %s", provider_id, cleaned)
+    return {"object": "rate_limits", "provider_id": provider_id, "rules": cleaned}
+
+
+@router.delete("/providers/{provider_id}/limits", summary="Reset quota rules to YAML")
+async def reset_provider_limits(provider_id: str, container: ContainerDep) -> dict[str, Any]:
+    """Drop the console override and re-read the provider's YAML-defined rules."""
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    yaml_config = load_app_config(container.settings)
+    yaml_provider = yaml_config.providers.get(provider_id)
+    yaml_rules = list((yaml_provider.options if yaml_provider else {}).get("rate_limits") or [])
+    provider.options = {**provider.options, "rate_limits": yaml_rules}
+    container.rate_limiter.register_provider(provider)
+    await container.config_repository.clear_provider_rate_limits(provider_id, yaml_rules)
+    return {"object": "rate_limits", "provider_id": provider_id, "rules": yaml_rules, "source": "yaml"}
 
 
 # --------------------------------------------------------------------------- #
@@ -414,6 +480,7 @@ async def reload_config(container: ContainerDep) -> dict[str, Any]:
         config,
         await container.config_repository.model_overrides(),
         await container.config_repository.alias_overrides(),
+        await container.config_repository.provider_rate_limit_overrides(),
     )
 
     container.router.reload(config, alias_registry=AliasRegistry(config.aliases.values()))

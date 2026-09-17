@@ -66,12 +66,15 @@ providers:
     options:
       # 该供应商的默认输出上限（客户端未指定时使用）
       default_max_tokens: 2048
-      # 主动配额（可选）：滑动窗口请求数上限，到线的凭据直接跳过不发请求。
-      # scope: credential（每把 Key 独立）| account（同 account-* 标签的 Key
-      # 共享一桶）| provider（全供应商共用）。
+      # 主动配额（可选）：滑动窗口上限，到线的凭据直接跳过不发请求。
+      # 每条规则可封顶 max_requests（请求数）和/或 max_tokens（token 数，
+      # 请求完成后按实际 usage 回喂）。scope: credential（每把 Key 独立）|
+      # account（同 account-* 标签的 Key 共享一桶）| provider（全供应商共用）。
+      # 控制台「凭据池 → ⚙ 限额」可运行时修改（存库，优先于本文件；
+      # 想改回本文件的值点「恢复 YAML」）。
       # rate_limits:
-      #   - {scope: credential, window_seconds: 60, max_requests: 40}
-      #   - {scope: account, window_seconds: 18000, max_requests: 300}
+      #   - {scope: credential, window_seconds: 60, max_requests: 40}        # 40 rpm
+      #   - {scope: account, window_seconds: 18000, max_tokens: 300000000}   # 5h token 预算
     credentials:
       - id: anthropic-01
         env: ${ANTHROPIC_KEY_01_ENV:-ANTHROPIC_KEY_01}

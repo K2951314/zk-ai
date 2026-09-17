@@ -74,8 +74,10 @@ class Container:
                 self.config,
                 await self.config_repository.model_overrides(),
                 await self.config_repository.alias_overrides(),
+                await self.config_repository.provider_rate_limit_overrides(),
             )
             self.router.aliases.replace_all(self.config.aliases.values())
+            self.rate_limiter.configure(self.config.providers)
             await self.config_repository.sync_config(self.config)
         except Exception:
             logger.exception("failed to apply DB configuration overrides")

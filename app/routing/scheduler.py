@@ -40,6 +40,7 @@ from app.core.errors import (
 from app.core.logging import attempt_var, credential_var, get_logger, model_var, provider_var
 from app.credentials.pool import CredentialPool
 from app.models.credential import CredentialRuntime
+from app.models.provider import ProviderConfig
 from app.models.request import ChatCompletionRequest
 from app.models.response import (
     AttemptOutcome,
@@ -146,18 +147,23 @@ class Scheduler:
         credentials = self.pool.candidates(provider.id, session_key=session_key)
         if not credentials and provider.requires_credential:
             return []
-        # Proactive quota accounting happens at selection time: each credential
-        # we are about to try admits one request into its window(s). A served
-        # 429 also consumed upstream quota, so failures are *not* refunded.
-        if self.pool.rate_limiter is not None and credentials:
-            admitted: list[CredentialRuntime] = []
-            for credential in credentials:
-                if self.pool.rate_limiter.admit(provider.id, credential.id, credential.tags):
-                    admitted.append(credential)
-                if len(admitted) >= self.policy.max_credentials_per_deployment:
-                    break
-            return admitted
         return credentials[: self.policy.max_credentials_per_deployment]
+
+    def _admit(self, provider: ProviderConfig, credential: CredentialRuntime) -> bool:
+        """Reserve one request in the credential's quota windows, if any are set."""
+        limiter = self.pool.rate_limiter
+        if limiter is None:
+            return True
+        return limiter.admit(provider.id, credential.id, credential.tags)
+
+    def _note_tokens(
+        self, provider: ProviderConfig, credential: CredentialRuntime, usage: Usage
+    ) -> None:
+        """Feed a completed request's token total into any token-capped windows."""
+        limiter = self.pool.rate_limiter
+        if limiter is None:
+            return
+        limiter.note_tokens(provider.id, credential.id, usage.total_tokens, credential.tags)
 
     def _session_key(self, request: ChatCompletionRequest) -> str | None:
         """Stable identity for credential affinity, without persisting any state.
@@ -339,6 +345,10 @@ class Scheduler:
                 continue
 
             for credential in credentials:
+                # Admit at the actual dispatch point (not at selection): failover
+                # keys that never get tried must not burn their quota.
+                if not self._admit(candidate.provider, credential):
+                    continue
                 retries_done = 0
                 # Which loop should we leave when this credential gives up?
                 next_step = _Next.RETRY
@@ -422,6 +432,7 @@ class Scheduler:
                     self.pool.report_success(credential.id, latency_ms=latency_ms)
                     self.pool.note_affinity(session_key, credential.id)
                     usage = response.usage or Usage()
+                    self._note_tokens(candidate.provider, credential, usage)
                     attempts.append(
                         self._attempt_outcome(
                             attempt_number=attempt_number,
@@ -532,6 +543,8 @@ class Scheduler:
                 continue
 
             for credential in credentials:
+                if not self._admit(candidate.provider, credential):
+                    continue
                 next_step = _Next.RETRY
                 while True:
                     if attempt_number >= self.policy.max_total_attempts:
@@ -659,6 +672,8 @@ class Scheduler:
                             request.estimated_input_tokens(),
                             max(0, streamed_chars // 4),
                         )
+                    if not cancelled and not stream_error:
+                        self._note_tokens(candidate.provider, credential, usage)
 
                     _record(
                         self._attempt_outcome(

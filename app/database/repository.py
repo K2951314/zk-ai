@@ -55,11 +55,22 @@ class ConfigRepository:
                 provider_row.enabled = provider.enabled
                 provider_row.timeout = provider.timeout
                 provider_row.max_retries = provider.max_retries
+                preserved_source = (provider_row.extra or {}).get("rate_limits_source")
+                if preserved_source == "console":
+                    # sync runs *before* overrides are re-applied at startup: a plain
+                    # mirror would wipe the console rules we are about to read back.
+                    prior = ((provider_row.extra or {}).get("options") or {}).get("rate_limits")
+                    merged_options = dict(provider.options)
+                    if isinstance(prior, list):
+                        merged_options["rate_limits"] = prior
+                else:
+                    merged_options = provider.options
                 provider_row.extra = {
                     "api_version": provider.api_version,
-                    "options": provider.options,
+                    "options": merged_options,
                     "referer": provider.referer,
                     "app_title": provider.app_title,
+                    "rate_limits_source": preserved_source,
                 }
                 counts["providers"] += 1
 
@@ -375,6 +386,51 @@ class ConfigRepository:
                 }
                 for row in result.scalars()
             ]
+
+    async def set_provider_rate_limits(self, provider_id: str, rules: list[dict[str, Any]]) -> bool:
+        """Persist console-edited quota rules; they shadow YAML until reset."""
+        async with self.db.session() as session:
+            row = await session.get(Provider, provider_id)
+            if row is None:
+                # Not mirrored yet (e.g. config was never synced): create the row.
+                row = Provider(id=provider_id, type="openai", base_url="", enabled=True)
+                session.add(row)
+            extra = dict(row.extra or {})
+            options = dict(extra.get("options") or {})
+            options["rate_limits"] = list(rules)
+            extra["options"] = options
+            extra["rate_limits_source"] = "console"
+            row.extra = extra
+            return True
+
+    async def clear_provider_rate_limits(
+        self, provider_id: str, yaml_rules: list[dict[str, Any]]
+    ) -> bool:
+        """Drop the console flag and store the YAML value back (reset path)."""
+        async with self.db.session() as session:
+            row = await session.get(Provider, provider_id)
+            if row is None:
+                return False
+            extra = dict(row.extra or {})
+            options = dict(extra.get("options") or {})
+            options["rate_limits"] = list(yaml_rules)
+            extra["options"] = options
+            extra.pop("rate_limits_source", None)
+            row.extra = extra
+            return True
+
+    async def provider_rate_limit_overrides(self) -> dict[str, list[dict[str, Any]]]:
+        """Providers whose quota rules were set through the console."""
+        async with self.db.session() as session:
+            result = await session.execute(select(Provider))
+            overrides: dict[str, list[dict[str, Any]]] = {}
+            for row in result.scalars():
+                extra = row.extra or {}
+                if extra.get("rate_limits_source") == "console":
+                    rules = (extra.get("options") or {}).get("rate_limits")
+                    if isinstance(rules, list):
+                        overrides[row.id] = rules
+            return overrides
 
     async def set_credential_enabled(
         self, credential_id: str, enabled: bool, reason: str | None = None

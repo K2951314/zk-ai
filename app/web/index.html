@@ -165,6 +165,7 @@
 <div id="toasts"></div>
 <div class="modal-mask" id="model-modal"></div>
 <div class="modal-mask" id="alias-modal"></div>
+<div class="modal-mask" id="limits-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
   <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
@@ -385,6 +386,8 @@ async function loadOverview() {
 function byCount(map, k) { return (map && map[k]) ?? 0; }
 function pool7(stats) { return stats.usage?.total_tokens ?? 0; }
 function fmtK(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : num(n); }
+function fmtTokens(n) { n = Number(n) || 0;
+  return n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : num(n); }
 const CNY_RATE = 7.2;   // USD→CNY 展示换算，牌价以 USD 存储，这里只是给人看的近似
 function fmtCost(v) {
   v = Number(v) || 0;
@@ -483,10 +486,20 @@ async function loadPool() {
     const quota = (c.rate_limits || []).map(q => {
       const win = q.window_seconds >= 86400 ? `${q.window_seconds / 86400}天`
         : q.window_seconds >= 3600 ? `${q.window_seconds / 3600}h`
-        : `${q.window_seconds / 60}m`;
-      const ratio = q.max_requests ? q.used / q.max_requests : 0;
+        : q.window_seconds >= 60 ? `${q.window_seconds / 60}m` : `${q.window_seconds}s`;
+      const dims = [];
+      let ratio = 0;
+      if (q.max_requests != null) {
+        dims.push(`${q.used_requests}/${q.max_requests}次`);
+        ratio = Math.max(ratio, q.max_requests ? q.used_requests / q.max_requests : 0);
+      }
+      if (q.max_tokens != null) {
+        dims.push(`${fmtTokens(q.used_tokens)}/${fmtTokens(q.max_tokens)}tok`);
+        ratio = Math.max(ratio, q.max_tokens ? q.used_tokens / q.max_tokens : 0);
+      }
       const cls = ratio >= 1 ? "red" : ratio >= 0.8 ? "amber" : "green";
-      return `<span class="pill ${cls}" title="主动配额（${esc(q.scope === "account" ? "账号" : q.scope === "provider" ? "供应商" : "Key")} ${esc(q.bucket)}）：${q.window_seconds}s 滑动窗口">${win} ${q.used}/${q.max_requests}</span>`;
+      const scopeZh = { credential: "Key", account: "账号", provider: "供应商" }[q.scope] || q.scope;
+      return `<span class="pill ${cls}" title="主动配额（${scopeZh} ${esc(q.bucket)}）：${dims.join(" · ")}">${win} ${dims.join(" · ")}</span>`;
     }).join(" ");
     const actions = [];
     if (c.status !== "disabled") actions.push(`<button class="mini" data-act="disable" data-id="${esc(c.id)}">禁用</button>`);
@@ -520,6 +533,7 @@ async function loadPool() {
       <span class="pill red">失败 ${s.failure}</span>
       <span class="pill amber">限流 ${s.rate_limits}</span>
       <span class="grow"></span>
+      <button id="pool-limits">⚙ 限额</button>
       <button id="pool-clear-all">🧹 全部清冷却</button>
     </div>
     <div class="tablewrap"><table>
@@ -531,6 +545,7 @@ async function loadPool() {
     （命中供应商侧前缀缓存，历史不重算）；该 Key 冷却/故障时自动换下一把并在成功瞬间把锚点带过去。
     冷却规则：分钟限流指数退避（60→900 秒），额度耗尽（token plan exhausted）平铺休 30 分钟。</p>`;
   tickCountdowns();
+  $("#pool-limits").onclick = openLimitsModal;
   $("#pool-clear-all").onclick = async () => {
     const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
     toast(`已解除 ${r.cleared} 把`, "ok"); loadPool();
@@ -541,6 +556,126 @@ async function loadPool() {
       toast(`${btn.dataset.id} 已${btn.dataset.act === "enable" ? "启用" : "禁用"}`, "ok");
       loadPool();
     });
+}
+
+/* ================= 限额编辑器（供应商主动配额） ================= */
+const LIMIT_WINDOWS = [
+  [60, "1 分钟"], [300, "5 分钟"], [3600, "1 小时"],
+  [18000, "5 小时"], [86400, "1 天"], [604800, "7 天"],
+];
+const LIMIT_SCOPES = [
+  ["credential", "每把 Key"], ["account", "按账号（account-* 标签共享）"], ["provider", "全供应商共享"],
+];
+function renderLimitsModal() {
+  const modal = $("#limits-modal");
+  const collect = (card) => Array.from(card.querySelectorAll("[data-rule]")).map(row => {
+    const f = name => row.querySelector(`[data-f="${name}"]`);
+    const winSel = f("window");
+    const win = winSel.value === "custom" ? Number(f("window_custom").value) : Number(winSel.value);
+    return {
+      scope: f("scope").value,
+      window_seconds: win,
+      max_requests: Number(f("max_requests").value) || 0,
+      max_tokens: Number(f("max_tokens").value) || 0,
+    };
+  });
+  const cards = (state.limitsProviders || []).map(p => {
+    const rules = state.limitsEdit[p.id] || [];
+    const rows = rules.map((r, i) => {
+      const known = LIMIT_WINDOWS.some(w => w[0] === Number(r.window_seconds));
+      const winSel = LIMIT_WINDOWS.map(([sec, label]) =>
+        `<option value="${sec}" ${Number(r.window_seconds) === sec ? "selected" : ""}>${label}</option>`).join("");
+      const scopeSel = LIMIT_SCOPES.map(([v, label]) =>
+        `<option value="${v}" ${(r.scope || "credential") === v ? "selected" : ""}>${label}</option>`).join("");
+      return `<div class="dep-card" data-rule="${i}">
+        <div class="row-flex">
+          <label class="small muted" style="display:flex;gap:4px;align-items:center">作用域<select data-f="scope">${scopeSel}</select></label>
+          <label class="small muted" style="display:flex;gap:4px;align-items:center">窗口<select data-f="window">${winSel}<option value="custom" ${known ? "" : "selected"}>自定义…</option></select></label>
+          <input type="number" data-f="window_custom" style="width:92px;display:${known ? "none" : "inline-block"}" value="${esc(r.window_seconds)}" placeholder="秒">
+          <label class="small muted" style="display:flex;gap:4px;align-items:center">次数上限<input type="number" data-f="max_requests" style="width:110px" value="${r.max_requests ?? 0}" min="0"></label>
+          <label class="small muted" style="display:flex;gap:4px;align-items:center">Token 上限<input type="number" data-f="max_tokens" style="width:130px" value="${r.max_tokens ?? 0}" min="0"></label>
+          <span class="grow"></span>
+          <button class="mini" data-rule-del="${i}">✕ 删除</button>
+        </div>
+        <div class="small muted">0 = 该项不限；两项可同设，按更紧的一项拦。Token 按请求完成后的真实用量计。</div>
+      </div>`;
+    }).join("");
+    const src = p.rate_limits_source === "console"
+      ? '<span class="pill blue" title="控制台改动优先于 YAML">控制台</span>'
+      : '<span class="pill gray">YAML</span>';
+    return `<div class="dep-card" data-pid="${esc(p.id)}">
+      <div class="row-flex">
+        <b>${esc(p.id)}</b>${src}<span class="grow"></span>
+        <button class="mini" data-rule-add="${esc(p.id)}">➕ 加规则</button>
+        ${p.rate_limits_source === "console" ? `<button class="mini" data-limit-reset="${esc(p.id)}">↺ 恢复 YAML</button>` : ""}
+        <button class="primary mini" data-limit-save="${esc(p.id)}">💾 保存生效</button>
+      </div>
+      ${rows || '<div class="small muted" style="margin-top:6px">未设限额（不限流）</div>'}
+    </div>`;
+  }).join("");
+  modal.innerHTML = `<div class="card">
+    <h3>主动配额限额（到线的 Key 直接跳过，不再发出注定 429 的请求）</h3>
+    <div class="small muted" style="margin-bottom:10px">改动保存后立即生效并写入数据库（优先于 YAML，重启不丢）；想改回 YAML 值点「恢复 YAML」。</div>
+    ${cards}
+    <div class="row-flex" style="margin-top:14px"><span class="grow"></span><button id="lm-close">关闭</button></div>
+  </div>`;
+  modal.classList.add("show");
+  $("#lm-close").onclick = () => modal.classList.remove("show");
+  modal.querySelectorAll("[data-rule-del]").forEach(b => b.onclick = () => {
+    const card = b.closest("[data-pid]");
+    const pid = card.dataset.pid;
+    state.limitsEdit[pid] = collect(card);
+    state.limitsEdit[pid].splice(Number(b.dataset.ruleDel), 1);
+    renderLimitsModal();
+  });
+  modal.querySelectorAll("[data-rule-add]").forEach(b => b.onclick = () => {
+    const card = b.closest("[data-pid]");
+    const pid = b.dataset.ruleAdd;
+    state.limitsEdit[pid] = collect(card);
+    (state.limitsEdit[pid] = state.limitsEdit[pid] || []).push(
+      { scope: "credential", window_seconds: 60, max_requests: 40, max_tokens: 0 });
+    renderLimitsModal();
+  });
+  modal.querySelectorAll("[data-f='window']").forEach(sel => sel.onchange = () => {
+    const custom = sel.value === "custom";
+    const input = sel.closest(".dep-card").querySelector("[data-f='window_custom']");
+    input.style.display = custom ? "inline-block" : "none";
+    if (custom) input.focus();
+  });
+  modal.querySelectorAll("[data-limit-save]").forEach(btn => btn.onclick = async () => {
+    const pid = btn.dataset.limitSave;
+    const card = btn.closest("[data-pid]");
+    const rules = collect(card).map(r => {
+      const out = { scope: r.scope, window_seconds: r.window_seconds };
+      if (r.max_requests > 0) out.max_requests = r.max_requests;
+      if (r.max_tokens > 0) out.max_tokens = r.max_tokens;
+      return out;
+    });
+    const bad = rules.find(r => !r.max_requests && !r.max_tokens);
+    if (bad) { toast("每条规则至少要设一个上限（次数或 Token）", "err"); return; }
+    const r = await api(`/admin/providers/${encodeURIComponent(pid)}/limits`,
+      { method: "PUT", json: { rules } });
+    if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
+    toast(`${pid} 限额已生效（重启不丢）`, "ok");
+    openLimitsModal();
+  });
+  modal.querySelectorAll("[data-limit-reset]").forEach(btn => btn.onclick = async () => {
+    const pid = btn.dataset.limitReset;
+    if (!confirm(`恢复 ${pid} 的限额为 providers.yaml 中的值？（控制台改动将被丢弃）`)) return;
+    const r = await api(`/admin/providers/${encodeURIComponent(pid)}/limits`, { method: "DELETE" });
+    if (r.error) { toast(r.error.message || "恢复失败", "err"); return; }
+    toast(`${pid} 已恢复 YAML 限额`, "ok");
+    openLimitsModal();
+  });
+}
+async function openLimitsModal() {
+  const resp = await api("/admin/providers");
+  state.limitsProviders = resp.data || [];
+  state.limitsEdit = {};
+  state.limitsProviders.forEach(p => {
+    state.limitsEdit[p.id] = (p.rate_limits || []).map(r => ({ ...r }));
+  });
+  renderLimitsModal();
 }
 
 /* ================= 请求记录 ================= */
