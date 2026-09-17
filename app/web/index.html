@@ -480,6 +480,14 @@ async function loadPool() {
       ? ` data-cd-until="${c.cooldown_until}"` : "";
     const cd = c.status === "cooldown" ? `<span${until}></span>` : "-";
     const pin = pinned[c.id] ? ` <span class="pill blue" title="钉住的会话数">📌${pinned[c.id]}</span>` : "";
+    const quota = (c.rate_limits || []).map(q => {
+      const win = q.window_seconds >= 86400 ? `${q.window_seconds / 86400}天`
+        : q.window_seconds >= 3600 ? `${q.window_seconds / 3600}h`
+        : `${q.window_seconds / 60}m`;
+      const ratio = q.max_requests ? q.used / q.max_requests : 0;
+      const cls = ratio >= 1 ? "red" : ratio >= 0.8 ? "amber" : "green";
+      return `<span class="pill ${cls}" title="主动配额（${esc(q.scope === "account" ? "账号" : q.scope === "provider" ? "供应商" : "Key")} ${esc(q.bucket)}）：${q.window_seconds}s 滑动窗口">${win} ${q.used}/${q.max_requests}</span>`;
+    }).join(" ");
     const actions = [];
     if (c.status !== "disabled") actions.push(`<button class="mini" data-act="disable" data-id="${esc(c.id)}">禁用</button>`);
     else actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">启用</button>`);
@@ -490,6 +498,7 @@ async function loadPool() {
       <td>${esc(c.provider_id)}</td>
       <td>${pill(c.status)}</td>
       <td>${c.priority}</td>
+      <td>${quota || '<span class="muted">-</span>'}</td>
       <td>${c.success_count}</td>
       <td>${c.failure_count}</td>
       <td>${c.rate_limit_count}</td>
@@ -514,9 +523,9 @@ async function loadPool() {
       <button id="pool-clear-all">🧹 全部清冷却</button>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th>凭据</th><th>供应商</th><th>状态</th><th>优先级</th><th>成功</th><th>失败</th>
+      <thead><tr><th>凭据</th><th>供应商</th><th>状态</th><th>优先级</th><th>配额用量</th><th>成功</th><th>失败</th>
       <th>限流</th><th>冷却剩余</th><th>最后错误</th><th>密钥</th><th>操作</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="11" class="muted">无凭据</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="12" class="muted">无凭据</td></tr>'}</tbody>
     </table></div>
     <p class="small muted" style="margin-top:10px">📌 = 当前钉在该 Key 上的会话数。同一通对话会优先复用上一步成功的 Key
     （命中供应商侧前缀缓存，历史不重算）；该 Key 冷却/故障时自动换下一把并在成功瞬间把锚点带过去。

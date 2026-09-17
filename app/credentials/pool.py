@@ -35,6 +35,7 @@ from app.credentials.rotation import get_rotation
 from app.models.credential import CredentialRuntime, CredentialStatus
 from app.models.provider import CredentialConfig, ProviderConfig
 from app.retry.classifier import ErrorInfo
+from app.routing.limits import RateLimiter
 
 logger = get_logger("credentials.pool")
 
@@ -51,6 +52,7 @@ class CredentialPool:
         affinity_enabled: bool = True,
         affinity_ttl: float = 1800.0,
         affinity_max_sessions: int = 4096,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self._credentials: dict[str, CredentialRuntime] = {}
@@ -71,6 +73,9 @@ class CredentialPool:
         self.affinity_ttl = max(30.0, float(affinity_ttl))
         self._affinity_max_sessions = max(16, int(affinity_max_sessions))
         self._affinity: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        #: Proactive per-window quotas (provider ``options.rate_limits``). The
+        #: limiter is attached after construction by the container.
+        self.rate_limiter = rate_limiter
 
     # ------------------------------------------------------------------ #
     # Registration
@@ -220,6 +225,14 @@ class CredentialPool:
                 self.tracker.refresh(credential, now=moment)
                 if credential.is_usable(now=moment, allow_cooldown=return_cooldown):
                     usable.append(credential)
+            limiter = self.rate_limiter
+            if limiter is not None and not return_cooldown:
+                usable = [
+                    credential
+                    for credential in usable
+                    if limiter.remaining(provider_id, credential.id, credential.tags, now=moment)
+                    > 0
+                ]
             ordered = self._rotation.order(usable)
             self._apply_affinity(ordered, provider_id, session_key, moment)
             return ordered
@@ -391,7 +404,15 @@ class CredentialPool:
         moment = time.time()
         with self._lock:
             credentials = self.all() if provider_id is None else self.for_provider(provider_id)
-            return [credential.snapshot(moment) for credential in credentials]
+            rows = [credential.snapshot(moment) for credential in credentials]
+            if self.rate_limiter is not None:
+                for credential, row in zip(credentials, rows, strict=True):
+                    usage = self.rate_limiter.usage(
+                        credential.provider_id, credential.id, credential.tags
+                    )
+                    if usage:
+                        row["rate_limits"] = usage
+            return rows
 
     def stats(self, provider_id: str | None = None) -> dict:
         """Aggregate pool health, used by ``/health`` and ``/admin/stats``."""

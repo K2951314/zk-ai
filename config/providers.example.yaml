@@ -66,6 +66,12 @@ providers:
     options:
       # 该供应商的默认输出上限（客户端未指定时使用）
       default_max_tokens: 2048
+      # 主动配额（可选）：滑动窗口请求数上限，到线的凭据直接跳过不发请求。
+      # scope: credential（每把 Key 独立）| account（同 account-* 标签的 Key
+      # 共享一桶）| provider（全供应商共用）。
+      # rate_limits:
+      #   - {scope: credential, window_seconds: 60, max_requests: 40}
+      #   - {scope: account, window_seconds: 18000, max_requests: 300}
     credentials:
       - id: anthropic-01
         env: ${ANTHROPIC_KEY_01_ENV:-ANTHROPIC_KEY_01}

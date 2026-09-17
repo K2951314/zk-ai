@@ -23,6 +23,7 @@ from app.database.repository import (
     UsageRepository,
 )
 from app.retry.policy import RetryPolicy
+from app.routing.limits import RateLimiter
 from app.routing.router import Router
 from app.routing.scheduler import Scheduler
 from app.services.health_service import HealthService
@@ -43,6 +44,7 @@ class Container:
     pool: CredentialPool
     router: Router
     scheduler: Scheduler
+    rate_limiter: RateLimiter
     request_service: RequestService
     model_service: ModelService
     usage_service: UsageService
@@ -58,6 +60,7 @@ class Container:
     async def startup(self) -> None:
         """Init DB, mirror config, probe providers (mode dependent)."""
         await self.database.init()
+        self.rate_limiter.load()
         try:
             await self.config_repository.sync_config(self.config)
         except Exception:
@@ -112,6 +115,7 @@ class Container:
     async def shutdown(self) -> None:
         """Release every external resource."""
         self.ready = False
+        self.rate_limiter.flush(force=True)
         await self.health_service.stop()
         await self.router.aclose()
         await self.database.dispose()
@@ -168,6 +172,10 @@ async def build_container(
         )
         for provider in config.providers.values():
             pool.register_provider(provider)
+    if pool.rate_limiter is None:
+        pool.rate_limiter = RateLimiter(settings.resolved_data_dir / "rate_limits.json")
+    rate_limiter = pool.rate_limiter
+    rate_limiter.configure(config.providers)
 
     router = router or Router(config)
     policy = policy or config.retry
@@ -201,6 +209,7 @@ async def build_container(
         pool=pool,
         router=router,
         scheduler=scheduler,
+        rate_limiter=rate_limiter,
         request_service=request_service,
         model_service=model_service,
         usage_service=usage_service,

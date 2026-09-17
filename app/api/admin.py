@@ -421,6 +421,7 @@ async def reload_config(container: ContainerDep) -> dict[str, Any]:
     container.model_service.config = config
     container.health_service.config = config
     container.usage_service.config = config
+    container.rate_limiter.configure(config.providers)
     for provider in config.providers.values():
         container.pool.register_provider(provider)
     # The pool is in-memory state: dropping a credential/provider from YAML and

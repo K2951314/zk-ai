@@ -146,6 +146,17 @@ class Scheduler:
         credentials = self.pool.candidates(provider.id, session_key=session_key)
         if not credentials and provider.requires_credential:
             return []
+        # Proactive quota accounting happens at selection time: each credential
+        # we are about to try admits one request into its window(s). A served
+        # 429 also consumed upstream quota, so failures are *not* refunded.
+        if self.pool.rate_limiter is not None and credentials:
+            admitted: list[CredentialRuntime] = []
+            for credential in credentials:
+                if self.pool.rate_limiter.admit(provider.id, credential.id, credential.tags):
+                    admitted.append(credential)
+                if len(admitted) >= self.policy.max_credentials_per_deployment:
+                    break
+            return admitted
         return credentials[: self.policy.max_credentials_per_deployment]
 
     def _session_key(self, request: ChatCompletionRequest) -> str | None:
