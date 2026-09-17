@@ -40,12 +40,55 @@ from pystray import Icon, Menu, MenuItem
 logger = logging.getLogger("tray_launcher")
 
 _ROOT = Path(__file__).resolve().parent.parent
-_PYW = _ROOT / ".venv" / "Scripts" / "pythonw.exe"  # no console window
-_PY = _ROOT / ".venv" / "Scripts" / "python.exe"
+_VENV_SCRIPTS = _ROOT / ".venv" / "Scripts"
+#: Belt-and-braces no-console flags. Not sufficient on their own for uv venvs:
+#: ``.venv\Scripts\python(w).exe`` is a trampoline that re-executes the base
+#: interpreter without forwarding these flags, so the innermost process would
+#: allocate a fresh console window (the "python.exe stuck in the taskbar").
+#: The real fix is launching a GUI-subsystem interpreter directly - see
+#: :func:`_child_interpreter`.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+
+
+def _venv_home() -> Path | None:
+    """The base-Python directory recorded in ``.venv/pyvenv.cfg`` (uv writes it)."""
+    try:
+        for line in (_ROOT / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "home":
+                return Path(value.strip())
+    except OSError:
+        return None
+    return None
+
+
+def _child_interpreter() -> tuple[Path, dict[str, str]]:
+    """Interpreter + extra env for spawning a child that can NEVER own a console.
+
+    A uv venv's ``Scripts\\python(w).exe`` is a *trampoline*: it re-executes the
+    base interpreter, and the creation flags we pass do not survive that hop - the
+    innermost process (a console-subsystem python.exe) then allocates its own
+    console window, which is the stray "python.exe" that shows up in the taskbar.
+    Launching the base **GUI-subsystem** ``pythonw.exe`` directly makes a console
+    window structurally impossible; ``__PYVENV_LAUNCHER__`` keeps the venv active
+    (site-packages resolution) even though the venv launcher is bypassed.
+    """
+    venv_pyw = _VENV_SCRIPTS / "pythonw.exe"
+    home = _venv_home()
+    if home is not None:
+        real_pyw = home / "pythonw.exe"
+        if real_pyw.exists():
+            return real_pyw, {"__PYVENV_LAUNCHER__": str(venv_pyw)}
+    if venv_pyw.exists():
+        # Non-uv venv: Scripts\pythonw.exe is a genuine GUI-subsystem interpreter.
+        return venv_pyw, {}
+    logger.warning("no pythonw.exe found - falling back to python.exe; "
+                   "a console window may appear in the taskbar")
+    return _VENV_SCRIPTS / "python.exe", {}
+
 
 _GREEN = (46, 160, 67, 255)   # running
 _BLUE = (58, 100, 220, 255)   # stopped / silent
-_ICON_SIZES = (16, 32, 48, 64)
 
 #: Seconds without a log write before we treat the child as silent/stalled.
 _SILENT_AFTER = 90.0
@@ -67,13 +110,24 @@ def _icon_set(color: tuple[int, int, int, int]) -> Image.Image:
 class _ChildProcess:
     """Manages one detached child process + its log file."""
 
-    def __init__(self, args: list[str], log_path: Path, mode: str) -> None:
-        self._args = args
-        self.log_path = log_path
+    def __init__(self, mode: str, extra: list[str]) -> None:
         self._mode = mode
+        self._extra = extra
+        self._interpreter, self._env_extra = _child_interpreter()
+        self._args = _launch_args(mode, extra, self._interpreter)
+        #: Log the user reads (menu) and the heartbeat's freshness signal.
+        self.view_log = _view_log(mode)
+        #: Where the child's stdout/stderr is captured (kept separate from the
+        #: burner's own log to avoid every line being written twice).
+        self.capture_file = _capture_file(mode)
         self._proc: subprocess.Popen[bytes] | None = None
         self._log_handle: IO[bytes] | None = None
         self._lock = threading.Lock()
+
+    def _child_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(self._env_extra)
+        return env
 
     def _guard_port(self) -> None:
         """Reclaim the gateway's port from our own stale instance before spawning.
@@ -84,10 +138,13 @@ class _ChildProcess:
         if self._mode != "gateway":
             return
         subprocess.run(  # noqa: S603 - fixed script, no user input
-            [str(_PY), "scripts/port_guard.py"],
+            [str(self._interpreter), "scripts/port_guard.py"],
             cwd=_ROOT,
+            env=self._child_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
             timeout=30,
             check=False,
         )
@@ -96,18 +153,16 @@ class _ChildProcess:
         with self._lock:
             self.stop()
             self._guard_port()
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._log_handle = self.log_path.open("ab", buffering=0)
+            self.capture_file.parent.mkdir(parents=True, exist_ok=True)
+            self._log_handle = self.capture_file.open("ab", buffering=0)
             self._proc = subprocess.Popen(  # noqa: S603 - args come from our own constants
                 self._args,
                 cwd=_ROOT,
+                env=self._child_env(),
                 stdout=self._log_handle,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                creationflags=(
-                    subprocess.CREATE_NO_WINDOW
-                    | subprocess.DETACHED_PROCESS
-                ),
+                creationflags=_NO_WINDOW,
             )
 
     def stop(self) -> None:
@@ -130,9 +185,14 @@ class _ChildProcess:
         return proc is not None and proc.poll() is None
 
     def log_age(self) -> float:
-        """Seconds since the log file was last written (inf when no file)."""
+        """Seconds since the *readable* log was last written (inf when no file).
+
+        For the burner this is its own ``burn_sensenova.log`` (it logs a summary
+        every minute), so silence genuinely means stalled; the gateway only logs
+        on requests, which is why it is judged by liveness alone.
+        """
         try:
-            return time.time() - self.log_path.stat().st_mtime
+            return time.time() - self.view_log.stat().st_mtime
         except OSError:
             return float("inf")
 
@@ -151,20 +211,34 @@ def _env_or_default(name: str, default: str) -> str:
     return default
 
 
-def _launch_args(mode: str, extra: list[str]) -> list[str]:
+def _launch_args(mode: str, extra: list[str], interpreter: Path) -> list[str]:
+    # The interpreter is always a GUI-subsystem ``pythonw.exe`` (see
+    # :func:`_child_interpreter`), so no console window can ever be created.
+    exe = str(interpreter)
     if mode == "gateway":
         return [
-            str(_PY), "-m", "uvicorn", "app.main:app",
+            exe, "-m", "uvicorn", "app.main:app",
             "--host", _env_or_default("ZKAI_HOST", "127.0.0.1"),
             "--port", _env_or_default("ZKAI_PORT", "8317"),
             "--log-level", "info",
             *extra,
         ]
-    return [str(_PY), "scripts/burn_sensenova.py", *extra]
+    return [exe, "scripts/burn_sensenova.py", *extra]
 
 
-def _log_file(mode: str) -> Path:
+def _view_log(mode: str) -> Path:
+    """The log a user wants to read (also the heartbeat's freshness signal)."""
     return _ROOT / "data" / ("gateway.log" if mode == "gateway" else "burn_sensenova.log")
+
+
+def _capture_file(mode: str) -> Path:
+    """Where the child's stdout/stderr goes.
+
+    The burner writes its own structured log (``burn_sensenova.log``), so its raw
+    stdout is captured separately - pointing both at the same file would duplicate
+    every line. The gateway's logs *are* stdout, so it captures into its own log.
+    """
+    return _view_log(mode) if mode == "gateway" else _ROOT / "data" / "burn_sensenova.console.log"
 
 
 def _mode_title(mode: str) -> str:
@@ -181,7 +255,7 @@ class TrayLauncher:
     def __init__(self, mode: str, extra: list[str]) -> None:
         self._mode = mode
         self._extra = extra
-        self._child = _ChildProcess(_launch_args(mode, extra), _log_file(mode), mode)
+        self._child = _ChildProcess(mode, extra)
         self._running = True
         self._color = _GREEN
         self._icon = self._build_icon()
@@ -212,7 +286,7 @@ class TrayLauncher:
 
         def view_log(icon, item) -> None:
             subprocess.Popen(  # noqa: S603 - notepad is a fixed Windows component
-                [r"C:\Windows\System32\notepad.exe", str(self._child.log_path)],
+                [r"C:\Windows\System32\notepad.exe", str(self._child.view_log)],
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
 

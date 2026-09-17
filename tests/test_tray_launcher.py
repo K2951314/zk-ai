@@ -9,24 +9,91 @@ from scripts.tray_launcher import (
     _BLUE,
     _GREEN,
     TrayLauncher,
+    _capture_file,
+    _child_interpreter,
     _env_or_default,
     _icon_set,
     _launch_args,
+    _venv_home,
+    _view_log,
 )
+
+PYW = Path(r"C:\fake\pythonw.exe")
 
 
 def test_launch_args_gateway() -> None:
-    args = _launch_args("gateway", ["--port", "9999"])
-    assert args[0].endswith("python.exe")
+    args = _launch_args("gateway", ["--port", "9999"], PYW)
+    assert args[0].endswith("pythonw.exe"), "must be GUI subsystem: no console possible"
     assert args[1:5] == ["-m", "uvicorn", "app.main:app", "--host"]
     assert ("--port" in args and "8317" in args) or "9999" in args
 
 
 def test_launch_args_burner() -> None:
-    args = _launch_args("burner", ["--concurrency", "8"])
-    assert args[0].endswith("python.exe")
+    args = _launch_args("burner", ["--concurrency", "8"], PYW)
+    assert args[0].endswith("pythonw.exe")
     assert args[1] == "scripts/burn_sensenova.py"
     assert args[2:] == ["--concurrency", "8"]
+
+
+def test_venv_home_reads_pyvenv_cfg(tmp_path: Path, monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text(
+        "implementation = CPython\nhome = C:\\base\\python\nversion_info = 3.13\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tray_launcher, "_ROOT", tmp_path)
+    assert _venv_home() == Path(r"C:\base\python")
+
+
+def test_venv_home_missing_file_is_none(tmp_path: Path, monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    monkeypatch.setattr(tray_launcher, "_ROOT", tmp_path)
+    assert _venv_home() is None
+
+
+def test_child_interpreter_prefers_real_gui_pythonw(tmp_path: Path, monkeypatch) -> None:
+    """uv venv -> base pythonw.exe + __PYVENV_LAUNCHER__ (the trampoline is bypassed)."""
+    from scripts import tray_launcher
+
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "pythonw.exe").write_bytes(b"")
+    venv_scripts = tmp_path / ".venv" / "Scripts"
+    venv_scripts.mkdir(parents=True)
+    (venv_scripts / "pythonw.exe").write_bytes(b"")
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text(f"home = {base}\n", encoding="utf-8")
+    monkeypatch.setattr(tray_launcher, "_ROOT", tmp_path)
+    monkeypatch.setattr(tray_launcher, "_VENV_SCRIPTS", venv_scripts)
+
+    exe, env = _child_interpreter()
+    assert exe == base / "pythonw.exe"
+    assert env["__PYVENV_LAUNCHER__"] == str(venv_scripts / "pythonw.exe")
+
+
+def test_child_interpreter_falls_back_to_venv_pythonw(tmp_path: Path, monkeypatch) -> None:
+    """No pyvenv.cfg -> the venv's own pythonw.exe (genuine GUI interpreter)."""
+    from scripts import tray_launcher
+
+    venv_scripts = tmp_path / ".venv" / "Scripts"
+    venv_scripts.mkdir(parents=True)
+    (venv_scripts / "pythonw.exe").write_bytes(b"")
+    monkeypatch.setattr(tray_launcher, "_ROOT", tmp_path)
+    monkeypatch.setattr(tray_launcher, "_VENV_SCRIPTS", venv_scripts)
+
+    exe, env = _child_interpreter()
+    assert exe == venv_scripts / "pythonw.exe"
+    assert env == {}
+
+
+def test_log_paths_are_split_for_burner() -> None:
+    """The burner writes its own structured log; stdout must not double-write it."""
+    assert _view_log("burner").name == "burn_sensenova.log"
+    assert _capture_file("burner").name != _view_log("burner").name
+    assert _capture_file("gateway") == _view_log("gateway")
 
 
 def test_env_or_default_prefers_env(monkeypatch) -> None:

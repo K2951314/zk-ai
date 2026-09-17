@@ -20,9 +20,15 @@ from pathlib import Path
 PORT = int(os.environ.get("ZKAI_PORT", "8317"))
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+#: CREATE_NO_WINDOW 只在 Windows 存在（本脚本的 netstat/powershell 依赖也是）。
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 def _run(args: list[str]) -> tuple[int, str]:
     # S603: 参数全部由本脚本硬编码（netstat/powershell/taskkill），无外部输入。
+    # CREATE_NO_WINDOW: 本脚本也会被托盘代理以无控制台方式调用（pythonw + 隐藏
+    # 标志），此时每个控制台子进程（powershell/taskkill/netstat）都会被分配一个
+    # 新控制台窗口，在屏幕上闪现。显式禁止，父进程有没有控制台都安全。
     try:
         proc = subprocess.run(  # noqa: S603
             args,
@@ -31,6 +37,7 @@ def _run(args: list[str]) -> tuple[int, str]:
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            creationflags=_NO_WINDOW,
         )
         return proc.returncode, proc.stdout or ""
     except (OSError, subprocess.SubprocessError) as exc:
