@@ -66,11 +66,12 @@ goto :end
 
 :envready
 echo.
-echo   Starting burner in a minimized window...
-echo   - Live log : data\burn_sensenova.log
-echo   - Stop     : close that window, or press Ctrl+C inside it
+echo   Starting burner in the system tray (no window).
+echo   - Tray : bottom-right corner, green=running / blue=stopped
+echo   - Log  : data\burn_sensenova.log
+echo   - Stop : right-click tray icon - Quit
 echo.
-start "zkai-burner" /min cmd /k ".venv\Scripts\python.exe scripts\burn_sensenova.py %*"
+start "" /min .venv\Scripts\pythonw.exe scripts\tray_launcher.py burner %*
 goto :end
 
 :end

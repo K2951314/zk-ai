@@ -103,12 +103,13 @@ goto :failed
 
 :start
 echo.
-echo   ZK-AI gateway starting...   http://127.0.0.1:%ZKAI_PORT%
+echo   ZK-AI gateway starting in the system tray (no window).
 echo   - Port : %ZKAI_PORT%   (CLI arg wins over .env ZKAI_PORT, then default 8317)
 echo   - Host : %ZKAI_HOST%   (0.0.0.0 = reachable from other machines on the LAN)
-echo   - Stop : press Ctrl+C
+echo   - Tray : bottom-right corner, green=running / blue=stopped
+echo   - Stop : right-click tray icon - Quit
 echo.
-.venv\Scripts\python.exe -m uvicorn app.main:app --host %ZKAI_HOST% --port %ZKAI_PORT% --log-level info
+start "" /min .venv\Scripts\pythonw.exe scripts\tray_launcher.py gateway
 goto :end
 
 :busy
