@@ -113,6 +113,20 @@
   h4.sec { margin: 22px 0 8px; font-size: 14px; color: var(--muted); }
   details.raw { font-size: 12px; color: var(--muted); }
   details.raw pre { white-space: pre-wrap; word-break: break-all; }
+  .modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: none;
+                align-items: flex-start; justify-content: center; z-index: 55;
+                backdrop-filter: blur(2px); overflow: auto; padding: 40px 12px; }
+  .modal-mask.show { display: flex; }
+  .modal-mask .card { width: min(760px, 94vw); }
+  .modal-mask h3 { margin: 0 0 12px; font-size: 15px; }
+  .formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
+  .formgrid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+  .formgrid input, .formgrid select { width: 100%; }
+  .capgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 12px; }
+  .capgrid label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+  .dep-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 8px;
+              background: var(--bg); }
+  .dep-card .row-flex { margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -149,6 +163,8 @@
 
 <aside id="drawer"></aside>
 <div id="toasts"></div>
+<div class="modal-mask" id="model-modal"></div>
+<div class="modal-mask" id="alias-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
   <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
@@ -693,8 +709,17 @@ async function loadUsage() {
 }
 
 /* ================= 模型与别名 ================= */
+const CAP_DIMS = ["coding","reasoning","tool_use","vision","long_context","structured_output","speed","cost"];
+const CAP_ZH = {coding:"编程", reasoning:"推理", tool_use:"工具调用", vision:"视觉",
+  long_context:"长上下文", structured_output:"结构化输出", speed:"速度", cost:"便宜度"};
+
 async function loadModels() {
+  if (!(state.providers || []).length) {
+    try { state.providers = (await api("/admin/providers")).data || []; } catch (e) {}
+  }
   const [m, al] = await Promise.all([api("/admin/models"), api("/admin/aliases")]);
+  state.modelsCache = m.data || [];
+  state.aliasesCache = al.data || {};
   const modelRows = (m.data || []).map(x => {
     const deps = (x.deployments || []).map(d =>
       `<div>${esc(d.provider_id)} → <b>${esc(d.upstream_model)}</b>
@@ -704,24 +729,30 @@ async function loadModels() {
        ${d.enabled ? "" : " " + pill("disabled")}</div>`).join("");
     return `<tr><td><b>${esc(x.id)}</b>${x.description ? `<div class="small muted">${esc(x.description)}</div>` : ""}</td>
       <td>${x.enabled ? pill("healthy") : pill("disabled")}</td>
-      <td>${fmtK(x.context_window)}</td><td>${deps || "-"}</td></tr>`;
+      <td>${fmtK(x.context_window)}</td><td>${deps || "-"}</td>
+      <td><button class="mini" data-edit-model="${esc(x.id)}">编辑</button>
+          <button class="mini" data-del-model="${esc(x.id)}">删除</button></td></tr>`;
   }).join("");
   const aliasRows = Object.entries(al.data || {}).map(([name, a]) => `
     <tr><td><b>${esc(name)}</b>${a.description ? `<div class="small muted">${esc(a.description)}</div>` : ""}</td>
     <td>${esc(a.strategy)}</td>
     <td>${(a.targets || []).map(esc).join(" → ")}</td>
     <td class="small muted">${esc(((al.resolved || {})[name] || []).join(", "))}</td>
-    <td>${a.enabled ? pill("healthy") : pill("disabled")}</td></tr>`).join("");
+    <td>${a.enabled ? pill("healthy") : pill("disabled")}</td>
+    <td><button class="mini" data-edit-alias="${esc(name)}">编辑</button>
+        <button class="mini" data-del-alias="${esc(name)}">删除</button></td></tr>`).join("");
   const warnings = (m.config_warnings || []).length
     ? `<div class="toolbar"><span class="pill amber">⚠ 配置警告 ${m.config_warnings.length} 条</span>
        <details class="raw grow"><summary>展开</summary><pre>${m.config_warnings.map(esc).join("\n")}</pre></details></div>` : "";
   $("#view-models").innerHTML = `
     ${warnings}
-    <h4 class="sec">模型（${(m.data || []).length}）</h4>
-    <div class="tablewrap"><table><thead><tr><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th></tr></thead>
+    <div class="toolbar"><h4 class="sec grow" style="margin:0">模型（${(m.data || []).length}）</h4>
+      <button class="primary" id="md-new">➕ 新建模型</button></div>
+    <div class="tablewrap"><table><thead><tr><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th><th>操作</th></tr></thead>
       <tbody>${modelRows}</tbody></table></div>
-    <h4 class="sec">别名（对外稳定入口）</h4>
-    <div class="tablewrap"><table><thead><tr><th>别名</th><th>策略</th><th>目标链</th><th>解析结果</th><th>状态</th></tr></thead>
+    <div class="toolbar" style="margin-top:22px"><h4 class="sec grow" style="margin:0">别名（对外稳定入口）</h4>
+      <button class="primary" id="al-new">➕ 新建别名</button></div>
+    <div class="tablewrap"><table><thead><tr><th>别名</th><th>策略</th><th>目标链</th><th>解析结果</th><th>状态</th><th>操作</th></tr></thead>
       <tbody>${aliasRows}</tbody></table></div>
     <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
     <div class="card"><div class="row-flex">
@@ -750,6 +781,205 @@ async function loadModels() {
       <tbody>${plan}</tbody></table></div>
       <details class="raw"><summary>原始数据</summary><pre>${esc(JSON.stringify(r, null, 1).slice(0, 4000))}</pre></details>`;
   };
+  $("#md-new").onclick = () => openModelModal(null);
+  $("#al-new").onclick = () => openAliasModal(null);
+  document.querySelectorAll("[data-edit-model]").forEach(b =>
+    b.onclick = () => openModelModal(b.dataset.editModel));
+  document.querySelectorAll("[data-del-model]").forEach(b =>
+    b.onclick = () => deleteModel(b.dataset.delModel));
+  document.querySelectorAll("[data-edit-alias]").forEach(b =>
+    b.onclick = () => openAliasModal(b.dataset.editAlias));
+  document.querySelectorAll("[data-del-alias]").forEach(b =>
+    b.onclick = () => deleteAlias(b.dataset.delAlias));
+}
+
+/* ---------- 模型编辑弹窗 ---------- */
+function providerOptions(sel) {
+  return (state.providers || []).map(p =>
+    `<option value="${esc(p.id)}" ${p.id === sel ? "selected" : ""}>${esc(p.id)}</option>`).join("");
+}
+function depCardHtml(d, idx) {
+  d = d || {};
+  return `<div class="dep-card" data-dep-idx="${idx}">
+    <div class="row-flex">
+      <b class="small">部署 #${idx + 1}</b><span class="grow"></span>
+      <button class="mini" data-dep-del="${idx}">删除此部署</button>
+    </div>
+    <div class="formgrid">
+      <label>部署 ID<input type="text" data-df="id" value="${esc(d.id || "")}" placeholder="如 glm53-nvidia"></label>
+      <label>供应商<select data-df="provider_id">${providerOptions(d.provider_id)}</select></label>
+      <label>上游模型名<input type="text" data-df="model" value="${esc(d.upstream_model || d.model || "")}" placeholder="如 z-ai/glm-5.3"></label>
+      <label>优先级<input type="number" data-df="priority" value="${d.priority ?? 100}"></label>
+      <label>上下文窗口<input type="number" data-df="context_window" value="${d.context_window ?? 128000}"></label>
+      <label>最大输出 tokens<input type="number" data-df="max_output_tokens" value="${d.max_output_tokens ?? ""}" placeholder="可空"></label>
+      <label>输入牌价 ($/Mtok)<input type="number" step="0.01" data-df="input_cost_per_mtok" value="${d.input_cost_per_mtok ?? 0}"></label>
+      <label>输出牌价 ($/Mtok)<input type="number" step="0.01" data-df="output_cost_per_mtok" value="${d.output_cost_per_mtok ?? 0}"></label>
+      <label>启用 <select data-df="enabled">
+        <option value="true" ${d.enabled !== false ? "selected" : ""}>启用</option>
+        <option value="false" ${d.enabled === false ? "selected" : ""}>禁用</option></select></label>
+    </div>
+  </div>`;
+}
+function openModelModal(modelId) {
+  const src = modelId ? (state.modelsCache || []).find(x => x.id === modelId) : null;
+  const m = src || {id: "", enabled: true, context_window: 128000, capabilities: {}, deployments: []};
+  const caps = Object.fromEntries(CAP_DIMS.map(k => [k, (m.capabilities || {})[k] ?? 5]));
+  let deps = (m.deployments || []).map(d => Object.assign({}, d));
+  if (!deps.length && !modelId) deps = [{}];
+  const modal = $("#model-modal");
+  modal.innerHTML = `<div class="card">
+    <h3>${modelId ? "编辑模型" : "新建模型"}</h3>
+    <div class="formgrid">
+      <label>模型 ID（对外名）<input type="text" id="mm-id" value="${esc(m.id)}" ${modelId ? "disabled" : ""} placeholder="如 glm-5.3"></label>
+      <label>显示名<input type="text" id="mm-name" value="${esc(m.display_name || "")}" placeholder="可空"></label>
+      <label>归属<input type="text" id="mm-owner" value="${esc(m.owned_by || "")}" placeholder="如 z-ai"></label>
+      <label>上下文窗口<input type="number" id="mm-ctx" value="${m.context_window ?? 128000}"></label>
+      <label>启用 <select id="mm-enabled">
+        <option value="true" ${m.enabled !== false ? "selected" : ""}>启用</option>
+        <option value="false" ${m.enabled === false ? "selected" : ""}>禁用</option></select></label>
+      <label style="grid-column:1/-1">描述<input type="text" id="mm-desc" value="${esc(m.description || "")}" placeholder="可空"></label>
+    </div>
+    <h4 class="sec">能力评分（0-10，cost 越大越便宜）</h4>
+    <div class="capgrid">${CAP_DIMS.map(k =>
+      `<label>${CAP_ZH[k]} ${k}<input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}"></label>`).join("")}
+    </div>
+    <h4 class="sec">部署（哪个供应商的哪个上游模型）</h4>
+    <div id="mm-deps"></div>
+    <div class="toolbar" style="margin-top:10px"><button id="mm-add-dep">➕ 加部署</button></div>
+    <div class="row-flex" style="margin-top:14px">
+      <button class="primary" id="mm-save">💾 保存</button>
+      <button id="mm-cancel">取消</button>
+      <span class="grow"></span>
+      <span class="small muted">保存立即生效并写入数据库，重启后仍在</span>
+    </div>
+  </div>`;
+  modal.classList.add("show");
+  const renderDeps = () => {
+    $("#mm-deps").innerHTML = deps.map((d, i) => depCardHtml(d, i)).join("");
+    document.querySelectorAll("[data-dep-del]").forEach(b => b.onclick = () => {
+      collectDeps(); deps.splice(Number(b.dataset.depDel), 1); renderDeps();
+    });
+  };
+  const collectDeps = () => {
+    document.querySelectorAll("#mm-deps .dep-card").forEach((card, i) => {
+      const f = k => card.querySelector(`[data-df="${k}"]`);
+      const numv = k => { const v = f(k).value.trim(); return v === "" ? null : Number(v); };
+      deps[i] = {
+        id: f("id").value.trim(),
+        provider_id: f("provider_id").value,
+        model: f("model").value.trim(),
+        priority: Number(f("priority").value || 100),
+        context_window: Number(f("context_window").value || 128000),
+        max_output_tokens: numv("max_output_tokens"),
+        input_cost_per_mtok: Number(f("input_cost_per_mtok").value || 0),
+        output_cost_per_mtok: Number(f("output_cost_per_mtok").value || 0),
+        enabled: f("enabled").value === "true",
+      };
+    });
+  };
+  $("#mm-add-dep").onclick = () => { collectDeps(); deps.push({}); renderDeps(); };
+  renderDeps();
+  $("#mm-cancel").onclick = () => modal.classList.remove("show");
+  $("#mm-save").onclick = async () => {
+    collectDeps();
+    const caps2 = {};
+    document.querySelectorAll("[data-cap]").forEach(i => caps2[i.dataset.cap] = Number(i.value));
+    const payload = {
+      id: $("#mm-id").value.trim(),
+      display_name: $("#mm-name").value.trim() || null,
+      owned_by: $("#mm-owner").value.trim() || null,
+      description: $("#mm-desc").value.trim() || null,
+      enabled: $("#mm-enabled").value === "true",
+      context_window: Number($("#mm-ctx").value || 128000),
+      capabilities: caps2,
+      deployments: deps.filter(d => d.id && d.model),
+    };
+    if (!payload.id) { toast("模型 ID 不能为空", "err"); return; }
+    try {
+      const r = await api("/admin/models", { method: "POST", json: payload });
+      if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
+      toast(`模型 ${payload.id} 已保存`, "ok");
+      modal.classList.remove("show");
+      loadModels();
+    } catch (err) { toast(err.message, "err"); }
+  };
+}
+async function deleteModel(modelId) {
+  if (!confirm(`确定删除模型 ${modelId}？（别名里若引用需先编辑掉）`)) return;
+  try {
+    const r = await api("/admin/models/" + encodeURIComponent(modelId), { method: "DELETE" });
+    if (r.error) { toast(r.error.message || "删除失败", "err"); return; }
+    toast(`模型 ${modelId} 已删除`, "ok");
+    loadModels();
+  } catch (err) { toast(err.message, "err"); }
+}
+
+/* ---------- 别名编辑弹窗 ---------- */
+function openAliasModal(name) {
+  const src = name ? (state.aliasesCache || {})[name] : null;
+  const a = src || {strategy: "capability", targets: [], enabled: true, description: "", weights: {}, requires: {}};
+  const modal = $("#alias-modal");
+  modal.innerHTML = `<div class="card">
+    <h3>${name ? "编辑别名" : "新建别名"}</h3>
+    <div class="formgrid">
+      <label>别名<input type="text" id="am-name" value="${esc(name || "")}" ${name ? "disabled" : ""} placeholder="如 zk-auto"></label>
+      <label>策略<select id="am-strategy">${["capability","priority","speed","cost","round_robin","weighted"]
+        .map(s => `<option ${s === a.strategy ? "selected" : ""}>${s}</option>`).join("")}</select></label>
+      <label>启用 <select id="am-enabled">
+        <option value="true" ${a.enabled !== false ? "selected" : ""}>启用</option>
+        <option value="false" ${a.enabled === false ? "selected" : ""}>禁用</option></select></label>
+      <label style="grid-column:1/-1">目标链（每行一个模型/别名，顺序即优先级）
+        <textarea id="am-targets" rows="5" style="width:100%">${esc((a.targets || []).join("\n"))}</textarea></label>
+      <label style="grid-column:1/-1">描述<input type="text" id="am-desc" value="${esc(a.description || "")}" placeholder="可空"></label>
+      <label>打分权重（可选，k=v 每行一个）<textarea id="am-weights" rows="3" style="width:100%"
+        placeholder="coding=6&#10;tool_use=2">${esc(Object.entries(a.weights || {}).map(([k,v]) => `${k}=${v}`).join("\n"))}</textarea></label>
+      <label>硬门槛 requires（可选，同上）<textarea id="am-requires" rows="3" style="width:100%"
+        placeholder="vision=8">${esc(Object.entries(a.requires || {}).map(([k,v]) => `${k}=${v}`).join("\n"))}</textarea></label>
+    </div>
+    <div class="row-flex" style="margin-top:14px">
+      <button class="primary" id="am-save">💾 保存</button>
+      <button id="am-cancel">取消</button>
+    </div>
+  </div>`;
+  modal.classList.add("show");
+  $("#am-cancel").onclick = () => modal.classList.remove("show");
+  const parseKV = id => {
+    const out = {};
+    $(id).value.split("\n").forEach(line => {
+      const t = line.trim(); if (!t) return;
+      const [k, v] = t.split("=").map(s => s.trim());
+      if (k && v !== undefined && v !== "") out[k] = Number(v);
+    });
+    return out;
+  };
+  $("#am-save").onclick = async () => {
+    const payload = {
+      name: $("#am-name").value.trim(),
+      strategy: $("#am-strategy").value,
+      enabled: $("#am-enabled").value === "true",
+      description: $("#am-desc").value.trim() || null,
+      targets: $("#am-targets").value.split("\n").map(s => s.trim()).filter(Boolean),
+      weights: parseKV("#am-weights"),
+      requires: parseKV("#am-requires"),
+    };
+    if (!payload.name) { toast("别名不能为空", "err"); return; }
+    try {
+      const r = await api("/admin/aliases", { method: "POST", json: payload });
+      if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
+      toast(`别名 ${payload.name} 已保存`, "ok");
+      modal.classList.remove("show");
+      loadModels();
+    } catch (err) { toast(err.message, "err"); }
+  };
+}
+async function deleteAlias(name) {
+  if (!confirm(`确定删除别名 ${name}？客户端再用这个名字会报未知模型。`)) return;
+  try {
+    const r = await api("/admin/aliases/" + encodeURIComponent(name), { method: "DELETE" });
+    if (r.error) { toast(r.error.message || "删除失败", "err"); return; }
+    toast(`别名 ${name} 已删除`, "ok");
+    loadModels();
+  } catch (err) { toast(err.message, "err"); }
 }
 
 /* ================= 令牌 / 启动 ================= */

@@ -652,6 +652,30 @@ def load_app_config(settings: Settings | None = None) -> AppConfig:
 _cache: AppConfig | None = None
 
 
+def apply_db_overrides(
+    config: AppConfig,
+    model_rows: list[dict[str, Any]],
+    alias_rows: list[dict[str, Any]],
+) -> AppConfig:
+    """Re-apply web-console edits (persisted in the DB mirror) over freshly loaded YAML.
+
+    The YAML files stay the baseline, but models/aliases created or edited through
+    ``/admin`` must survive ``POST /admin/config/reload`` and restarts: any model or
+    alias present in the DB replaces (or adds to) the YAML version.
+    """
+    for row in model_rows:
+        try:
+            config.models[row["id"]] = ModelConfig(**row)
+        except ValidationError as exc:
+            config.warnings.append(f"DB model override '{row.get('id')}' invalid: {exc}")
+    for row in alias_rows:
+        try:
+            config.aliases[row["name"]] = ModelAliasConfig(**row)
+        except ValidationError as exc:
+            config.warnings.append(f"DB alias override '{row.get('name')}' invalid: {exc}")
+    return config
+
+
 def get_app_config(*, refresh: bool = False) -> AppConfig:
     """Process-wide cached configuration (call ``refresh=True`` to reload)."""
     global _cache

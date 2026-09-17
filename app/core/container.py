@@ -62,6 +62,20 @@ class Container:
             await self.config_repository.sync_config(self.config)
         except Exception:
             logger.exception("failed to mirror configuration into the database")
+        # Re-apply console edits (models/aliases persisted in the DB mirror) so
+        # they survive restarts; then mirror the merged result back.
+        try:
+            from app.core.config import apply_db_overrides
+
+            apply_db_overrides(
+                self.config,
+                await self.config_repository.model_overrides(),
+                await self.config_repository.alias_overrides(),
+            )
+            self.router.aliases.replace_all(self.config.aliases.values())
+            await self.config_repository.sync_config(self.config)
+        except Exception:
+            logger.exception("failed to apply DB configuration overrides")
         # Housekeeping: close zombie "pending" rows from crashed requests and
         # prune ancient history so the log does not grow forever.
         try:

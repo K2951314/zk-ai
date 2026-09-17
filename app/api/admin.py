@@ -15,9 +15,14 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import ContainerDep, require_admin
-from app.core.config import load_app_config
+from app.core.config import apply_db_overrides, load_app_config
 from app.core.logging import get_logger
-from app.models.provider import AliasStrategy, ModelAliasConfig
+from app.models.provider import (
+    AliasStrategy,
+    DeploymentConfig,
+    ModelAliasConfig,
+    ModelConfig,
+)
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.routing.aliases import AliasRegistry
 
@@ -198,6 +203,91 @@ async def clear_cooldowns(
 
 
 # --------------------------------------------------------------------------- #
+# Model administration (runtime edits persist in the DB mirror)
+# --------------------------------------------------------------------------- #
+class ModelUpsertRequest(BaseModel):
+    """Body for creating/replacing a model at runtime (web console editor)."""
+
+    id: str
+    display_name: str | None = None
+    owned_by: str | None = None
+    description: str | None = None
+    enabled: bool = True
+    context_window: int = 128_000
+    capabilities: dict[str, float] = Field(default_factory=dict)
+    deployments: list[DeploymentConfig] = Field(default_factory=list)
+
+
+@router.post("/models", summary="Create or replace a model")
+async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> dict[str, Any]:
+    """Hot-add/edit a model; takes effect immediately and survives restarts."""
+    try:
+        model = ModelConfig(**payload.model_dump())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"message": str(exc), "type": "invalid_model"}},
+        ) from exc
+
+    unknown_providers = [
+        deployment.provider_id
+        for deployment in model.deployments
+        if deployment.provider_id not in container.config.providers
+    ]
+    if unknown_providers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": f"unknown providers: {', '.join(sorted(set(unknown_providers)))}",
+                    "type": "invalid_model",
+                    "known_providers": sorted(container.config.providers),
+                }
+            },
+        )
+    deployment_ids = [d.id for d in model.deployments]
+    if len(deployment_ids) != len(set(deployment_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"message": "duplicate deployment ids", "type": "invalid_model"}},
+        )
+
+    container.config.models[model.id] = model
+    await container.config_repository.upsert_model(model)
+    return {"object": "model", "data": container.model_service.describe(model.id)}
+
+
+@router.delete("/models/{model_id}", summary="Delete a model")
+async def delete_model(model_id: str, container: ContainerDep) -> dict[str, Any]:
+    if model_id not in container.config.models:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"model '{model_id}' not found"}},
+        )
+    referenced_by = [
+        name
+        for name, alias in container.config.aliases.items()
+        if model_id in alias.targets
+    ]
+    if referenced_by:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": {
+                    "message": (
+                        f"model '{model_id}' is still referenced by aliases: "
+                        f"{', '.join(sorted(referenced_by))} - edit those first"
+                    ),
+                    "type": "model_in_use",
+                }
+            },
+        )
+    container.config.models.pop(model_id, None)
+    await container.config_repository.delete_model(model_id)
+    return {"deleted": model_id}
+
+
+# --------------------------------------------------------------------------- #
 # Routing
 # --------------------------------------------------------------------------- #
 @router.get("/router/preview", summary="Explain a routing decision")
@@ -304,6 +394,7 @@ async def delete_alias(name: str, container: ContainerDep) -> dict[str, Any]:
             detail={"error": {"message": f"alias '{name}' not found"}},
         )
     container.config.aliases.pop(name, None)
+    await container.config_repository.delete_alias(name)
     return {"deleted": name}
 
 
@@ -317,6 +408,13 @@ async def reload_config(container: ContainerDep) -> dict[str, Any]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"message": str(exc), "type": "config_error"}},
         ) from exc
+
+    # Re-apply console edits persisted in the DB so a reload does not drop them.
+    apply_db_overrides(
+        config,
+        await container.config_repository.model_overrides(),
+        await container.config_repository.alias_overrides(),
+    )
 
     container.router.reload(config, alias_registry=AliasRegistry(config.aliases.values()))
     container.config = config

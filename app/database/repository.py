@@ -263,6 +263,119 @@ class ConfigRepository:
             row.requires = dict(requires or {})
             row.description = description
 
+    async def upsert_model(self, model: Any) -> None:
+        """Persist a runtime-created/edited model (ModelConfig) and its deployments.
+
+        Mirrors ``upsert_alias``: the row stays in the DB across restarts and is
+        re-applied on top of the YAML by :meth:`model_overrides`.
+        """
+        async with self.db.session() as session:
+            row = await session.get(Model, model.id)
+            if row is None:
+                row = Model(id=model.id)
+                session.add(row)
+            row.display_name = model.display_name
+            row.owned_by = model.owned_by
+            row.description = model.description
+            row.enabled = model.enabled
+            row.context_window = model.context_window
+            row.capabilities = model.capabilities.as_dict()
+
+            kept: set[str] = set()
+            for deployment in model.deployments:
+                dep_row = await session.get(Deployment, deployment.id)
+                if dep_row is None:
+                    dep_row = Deployment(id=deployment.id)
+                    session.add(dep_row)
+                dep_row.model_id = model.id
+                dep_row.provider_id = deployment.provider_id
+                dep_row.upstream_model = deployment.model
+                dep_row.enabled = deployment.enabled
+                dep_row.priority = deployment.priority
+                dep_row.weight = deployment.weight
+                dep_row.context_window = deployment.context_window
+                dep_row.max_output_tokens = deployment.max_output_tokens
+                dep_row.capabilities = dict(deployment.capabilities)
+                dep_row.input_cost_per_mtok = deployment.input_cost_per_mtok
+                dep_row.output_cost_per_mtok = deployment.output_cost_per_mtok
+                dep_row.tags = list(deployment.tags)
+                kept.add(deployment.id)
+            if kept:
+                await session.execute(
+                    delete(Deployment).where(
+                        Deployment.model_id == model.id, Deployment.id.notin_(kept)
+                    )
+                )
+
+    async def delete_model(self, model_id: str) -> bool:
+        async with self.db.session() as session:
+            result = await session.execute(delete(Model).where(Model.id == model_id))
+            return bool(cast("CursorResult[Any]", result).rowcount or 0)
+
+    async def delete_alias(self, name: str) -> bool:
+        async with self.db.session() as session:
+            result = await session.execute(delete(ModelAlias).where(ModelAlias.name == name))
+            return bool(cast("CursorResult[Any]", result).rowcount or 0)
+
+    async def model_overrides(self) -> list[dict[str, Any]]:
+        """Full model rows (with deployments) used to re-apply web edits over YAML."""
+        async with self.db.session() as session:
+            result = await session.execute(select(Model).order_by(Model.id))
+            rows: list[dict[str, Any]] = []
+            for model in result.scalars():
+                dep_result = await session.execute(
+                    select(Deployment)
+                    .where(Deployment.model_id == model.id)
+                    .order_by(Deployment.priority.desc())
+                )
+                rows.append(
+                    {
+                        "id": model.id,
+                        "display_name": model.display_name,
+                        "owned_by": model.owned_by,
+                        "description": model.description,
+                        "enabled": model.enabled,
+                        "context_window": model.context_window,
+                        "capabilities": dict(model.capabilities or {}),
+                        "deployments": [
+                            {
+                                "id": d.id,
+                                "provider_id": d.provider_id,
+                                "model": d.upstream_model,
+                                "enabled": d.enabled,
+                                "priority": d.priority,
+                                "weight": d.weight,
+                                "context_window": d.context_window,
+                                "max_output_tokens": d.max_output_tokens,
+                                "capabilities": dict(d.capabilities or {}),
+                                "input_cost_per_mtok": d.input_cost_per_mtok,
+                                "output_cost_per_mtok": d.output_cost_per_mtok,
+                                "tags": list(d.tags or []),
+                            }
+                            for d in dep_result.scalars()
+                        ],
+                    }
+                )
+            return rows
+
+    async def alias_overrides(self) -> list[dict[str, Any]]:
+        """Full alias rows used to re-apply web edits (incl. deletions) over YAML."""
+        async with self.db.session() as session:
+            result = await session.execute(select(ModelAlias).order_by(ModelAlias.name))
+            return [
+                {
+                    "name": row.name,
+                    "targets": list(row.targets or []),
+                    "strategy": row.strategy,
+                    "enabled": row.enabled,
+                    "requires": dict(row.requires or {}),
+                    "weights": dict(row.weights or {}),
+                    "fallback_to_local": row.fallback_to_local,
+                    "description": row.description,
+                }
+                for row in result.scalars()
+            ]
+
     async def set_credential_enabled(
         self, credential_id: str, enabled: bool, reason: str | None = None
     ) -> bool:
