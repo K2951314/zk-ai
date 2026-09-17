@@ -9,6 +9,7 @@ Credential responses never contain secret material - only a masked fingerprint.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -16,6 +17,11 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import ContainerDep, require_admin
 from app.core.config import apply_db_overrides, load_app_config
+from app.core.config_writer import (
+    delete_list_entry,
+    sync_provider_rate_limits,
+    upsert_list_entry,
+)
 from app.core.logging import get_logger
 from app.models.provider import (
     AliasStrategy,
@@ -30,6 +36,92 @@ from app.routing.limits import RateLimitRule
 logger = get_logger("api.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+
+# --------------------------------------------------------------------------- #
+# YAML write-through helpers (console edits must update the real files so a
+# reload/restart can never resurrect entries the operator deleted)
+# --------------------------------------------------------------------------- #
+def _strip_nulls(data: Any) -> Any:
+    """Drop ``None`` fields (recursively) for tidy YAML output."""
+    if isinstance(data, dict):
+        return {k: _strip_nulls(v) for k, v in data.items() if v is not None}
+    if isinstance(data, list):
+        return [_strip_nulls(item) for item in data]
+    return data
+
+
+def _source_file(container: ContainerDep, stem: str) -> Path | None:
+    """The real YAML the gateway loaded for *stem*; None = template-only setups.
+
+    ``.example.yaml`` files are committable templates and are never rewritten;
+    in that case the DB override keeps the change alive and the warning surfaces.
+    """
+    name = container.config.source_files.get(stem)
+    if not name or ".example." in name:
+        return None
+    path = container.settings.resolved_config_dir / name
+    return path if path.suffix in {".yaml", ".yml"} else None
+
+
+def _file_write_failed(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "error": {
+                "message": f"配置文件写入失败，本次改动已取消（避免界面与文件不一致）：{exc}",
+                "type": "config_write_failed",
+            }
+        },
+    )
+
+
+def _write_model_file(container: ContainerDep, model: ModelConfig) -> str | None:
+    path = _source_file(container, "models") or _source_file(container, "config")
+    if path is None:
+        return None
+    try:
+        upsert_list_entry(
+            path, "models", "id", model.id, _strip_nulls(model.model_dump(mode="json"))
+        )
+    except (OSError, ValueError) as exc:
+        raise _file_write_failed(exc) from exc
+    return path.name
+
+
+def _write_alias_file(container: ContainerDep, alias: ModelAliasConfig) -> str | None:
+    path = _source_file(container, "models") or _source_file(container, "config")
+    if path is None:
+        return None
+    try:
+        upsert_list_entry(
+            path, "aliases", "name", alias.name, _strip_nulls(alias.model_dump(mode="json"))
+        )
+    except (OSError, ValueError) as exc:
+        raise _file_write_failed(exc) from exc
+    return path.name
+
+
+def _delete_file_entry(container: ContainerDep, section: str, key: str, name: str) -> str | None:
+    path = _source_file(container, "models") or _source_file(container, "config")
+    if path is None:
+        return None
+    try:
+        delete_list_entry(path, section, key, name)
+    except (OSError, ValueError) as exc:
+        raise _file_write_failed(exc) from exc
+    return path.name
+
+
+def _write_limits_file(container: ContainerDep, provider_id: str, rules: list[dict]) -> str | None:
+    path = _source_file(container, "providers")
+    if path is None:
+        return None
+    try:
+        sync_provider_rate_limits(path, provider_id, rules)
+    except (OSError, ValueError, KeyError) as exc:
+        raise _file_write_failed(exc) from exc
+    return path.name
 
 
 # --------------------------------------------------------------------------- #
@@ -193,11 +285,22 @@ async def set_provider_limits(
                 },
             )
         cleaned.append(rule.as_mapping())
+    synced = _write_limits_file(container, provider_id, cleaned)
     provider.options = {**provider.options, "rate_limits": cleaned}
     container.rate_limiter.register_provider(provider)
-    await container.config_repository.set_provider_rate_limits(provider_id, cleaned)
+    if synced is not None:
+        # The YAML now holds the value: drop any legacy console shadow so a later
+        # hand-edit of providers.yaml stays authoritative.
+        await container.config_repository.clear_provider_rate_limits(provider_id, cleaned)
+    else:
+        await container.config_repository.set_provider_rate_limits(provider_id, cleaned)
     logger.info("provider %s quota rules set to %s", provider_id, cleaned)
-    return {"object": "rate_limits", "provider_id": provider_id, "rules": cleaned}
+    return {
+        "object": "rate_limits",
+        "provider_id": provider_id,
+        "rules": cleaned,
+        "synced": synced,
+    }
 
 
 @router.delete("/providers/{provider_id}/limits", summary="Reset quota rules to YAML")
@@ -318,9 +421,16 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
             detail={"error": {"message": "duplicate deployment ids", "type": "invalid_model"}},
         )
 
+    # File first: if the YAML cannot be written we abort with no partial state,
+    # so the console and the on-disk config never drift apart.
+    synced = _write_model_file(container, model)
     container.config.models[model.id] = model
     await container.config_repository.upsert_model(model)
-    return {"object": "model", "data": container.model_service.describe(model.id)}
+    return {
+        "object": "model",
+        "synced": synced,
+        "data": container.model_service.describe(model.id),
+    }
 
 
 @router.delete("/models/{model_id}", summary="Delete a model")
@@ -348,9 +458,10 @@ async def delete_model(model_id: str, container: ContainerDep) -> dict[str, Any]
                 }
             },
         )
+    synced = _delete_file_entry(container, "models", "id", model_id)
     container.config.models.pop(model_id, None)
     await container.config_repository.delete_model(model_id)
-    return {"deleted": model_id}
+    return {"deleted": model_id, "synced": synced}
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +548,7 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
             },
         )
 
+    synced = _write_alias_file(container, alias)
     container.router.aliases.upsert(alias)
     container.config.aliases[alias.name] = alias
     await container.config_repository.upsert_alias(
@@ -448,7 +560,11 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
         requires=dict(alias.requires),
         description=alias.description,
     )
-    return {"object": "alias", "data": container.router.aliases.describe()[alias.name]}
+    return {
+        "object": "alias",
+        "synced": synced,
+        "data": container.router.aliases.describe()[alias.name],
+    }
 
 
 @router.delete("/aliases/{name}", summary="Delete an alias")
@@ -459,9 +575,10 @@ async def delete_alias(name: str, container: ContainerDep) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"message": f"alias '{name}' not found"}},
         )
+    synced = _delete_file_entry(container, "aliases", "name", name)
     container.config.aliases.pop(name, None)
     await container.config_repository.delete_alias(name)
-    return {"deleted": name}
+    return {"deleted": name, "synced": synced}
 
 
 @router.post("/config/reload", summary="Reload YAML configuration")
@@ -475,11 +592,10 @@ async def reload_config(container: ContainerDep) -> dict[str, Any]:
             detail={"error": {"message": str(exc), "type": "config_error"}},
         ) from exc
 
-    # Re-apply console edits persisted in the DB so a reload does not drop them.
+    # Re-apply quota rules that could not reach providers.yaml (file is otherwise
+    # authoritative: models/aliases edits were written back to it on save).
     apply_db_overrides(
         config,
-        await container.config_repository.model_overrides(),
-        await container.config_repository.alias_overrides(),
         await container.config_repository.provider_rate_limit_overrides(),
     )
 

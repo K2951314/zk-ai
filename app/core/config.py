@@ -654,28 +654,18 @@ _cache: AppConfig | None = None
 
 def apply_db_overrides(
     config: AppConfig,
-    model_rows: list[dict[str, Any]],
-    alias_rows: list[dict[str, Any]],
     provider_limit_rows: dict[str, list[dict[str, Any]]] | None = None,
 ) -> AppConfig:
-    """Re-apply web-console edits (persisted in the DB mirror) over freshly loaded YAML.
+    """Re-apply the provider quota rules that could not be written to YAML.
 
-    The YAML files stay the baseline, but models/aliases created or edited through
-    ``/admin`` must survive ``POST /admin/config/reload`` and restarts: any model or
-    alias present in the DB replaces (or adds to) the YAML version. ``provider_limit_rows``
-    carries per-provider quota rules the operator set from the console; they shadow the
-    YAML ``options.rate_limits`` (and an empty list means "operator cleared them").
+    Models/aliases edited through the console are **written back to the YAML files**
+    (see :mod:`app.core.config_writer`), so the file is the single source of truth and
+    nothing is replayed from the DB mirror - a hand-deleted file entry therefore stays
+    deleted across reloads and restarts. ``provider_limit_rows`` is the sole exception:
+    it only carries rules from template-only/read-only setups where the
+    ``providers.yaml`` write was impossible (the console flags them with
+    ``rate_limits_source=console``).
     """
-    for row in model_rows:
-        try:
-            config.models[row["id"]] = ModelConfig(**row)
-        except ValidationError as exc:
-            config.warnings.append(f"DB model override '{row.get('id')}' invalid: {exc}")
-    for row in alias_rows:
-        try:
-            config.aliases[row["name"]] = ModelAliasConfig(**row)
-        except ValidationError as exc:
-            config.warnings.append(f"DB alias override '{row.get('name')}' invalid: {exc}")
     for provider_id, rules in (provider_limit_rows or {}).items():
         provider = config.providers.get(provider_id)
         if provider is None:

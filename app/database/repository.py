@@ -328,65 +328,6 @@ class ConfigRepository:
             result = await session.execute(delete(ModelAlias).where(ModelAlias.name == name))
             return bool(cast("CursorResult[Any]", result).rowcount or 0)
 
-    async def model_overrides(self) -> list[dict[str, Any]]:
-        """Full model rows (with deployments) used to re-apply web edits over YAML."""
-        async with self.db.session() as session:
-            result = await session.execute(select(Model).order_by(Model.id))
-            rows: list[dict[str, Any]] = []
-            for model in result.scalars():
-                dep_result = await session.execute(
-                    select(Deployment)
-                    .where(Deployment.model_id == model.id)
-                    .order_by(Deployment.priority.desc())
-                )
-                rows.append(
-                    {
-                        "id": model.id,
-                        "display_name": model.display_name,
-                        "owned_by": model.owned_by,
-                        "description": model.description,
-                        "enabled": model.enabled,
-                        "context_window": model.context_window,
-                        "capabilities": dict(model.capabilities or {}),
-                        "deployments": [
-                            {
-                                "id": d.id,
-                                "provider_id": d.provider_id,
-                                "model": d.upstream_model,
-                                "enabled": d.enabled,
-                                "priority": d.priority,
-                                "weight": d.weight,
-                                "context_window": d.context_window,
-                                "max_output_tokens": d.max_output_tokens,
-                                "capabilities": dict(d.capabilities or {}),
-                                "input_cost_per_mtok": d.input_cost_per_mtok,
-                                "output_cost_per_mtok": d.output_cost_per_mtok,
-                                "tags": list(d.tags or []),
-                            }
-                            for d in dep_result.scalars()
-                        ],
-                    }
-                )
-            return rows
-
-    async def alias_overrides(self) -> list[dict[str, Any]]:
-        """Full alias rows used to re-apply web edits (incl. deletions) over YAML."""
-        async with self.db.session() as session:
-            result = await session.execute(select(ModelAlias).order_by(ModelAlias.name))
-            return [
-                {
-                    "name": row.name,
-                    "targets": list(row.targets or []),
-                    "strategy": row.strategy,
-                    "enabled": row.enabled,
-                    "requires": dict(row.requires or {}),
-                    "weights": dict(row.weights or {}),
-                    "fallback_to_local": row.fallback_to_local,
-                    "description": row.description,
-                }
-                for row in result.scalars()
-            ]
-
     async def set_provider_rate_limits(self, provider_id: str, rules: list[dict[str, Any]]) -> bool:
         """Persist console-edited quota rules; they shadow YAML until reset."""
         async with self.db.session() as session:

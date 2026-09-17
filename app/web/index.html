@@ -234,6 +234,13 @@ const STATUS_PILL = {
   success: ["green", "成功"], error: ["red", "失败"],
   cancelled: ["gray", "取消"], pending: ["blue", "进行中"],
 };
+/** 已同步到 YAML 文件时告诉用户写到了哪里；模板模式（无本地文件）时提醒。 */
+function syncedNote(resp) {
+  const s = resp && resp.synced;
+  if (s) return `（已同步 ${s}）`;
+  if (s === null) return "（模板模式：只存数据库，未改文件）";
+  return "";
+}
 function pill(status) {
   const [cls, label] = STATUS_PILL[status] || ["gray", status || "-"];
   return `<span class="pill ${cls}">${esc(label)}</span>`;
@@ -656,7 +663,7 @@ function renderLimitsModal() {
     const r = await api(`/admin/providers/${encodeURIComponent(pid)}/limits`,
       { method: "PUT", json: { rules } });
     if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
-    toast(`${pid} 限额已生效（重启不丢）`, "ok");
+    toast(`${pid} 限额已生效${syncedNote(r)}`, "ok");
     openLimitsModal();
   });
   modal.querySelectorAll("[data-limit-reset]").forEach(btn => btn.onclick = async () => {
@@ -664,7 +671,7 @@ function renderLimitsModal() {
     if (!confirm(`恢复 ${pid} 的限额为 providers.yaml 中的值？（控制台改动将被丢弃）`)) return;
     const r = await api(`/admin/providers/${encodeURIComponent(pid)}/limits`, { method: "DELETE" });
     if (r.error) { toast(r.error.message || "恢复失败", "err"); return; }
-    toast(`${pid} 已恢复 YAML 限额`, "ok");
+    toast(`${pid} 已恢复 YAML 限额${syncedNote(r)}`, "ok");
     openLimitsModal();
   });
 }
@@ -1042,18 +1049,18 @@ function openModelModal(modelId) {
     try {
       const r = await api("/admin/models", { method: "POST", json: payload });
       if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
-      toast(`模型 ${payload.id} 已保存`, "ok");
+      toast(`模型 ${payload.id} 已保存${syncedNote(r)}`, "ok");
       modal.classList.remove("show");
       loadModels();
     } catch (err) { toast(err.message, "err"); }
   };
 }
 async function deleteModel(modelId) {
-  if (!confirm(`确定删除模型 ${modelId}？（别名里若引用需先编辑掉）`)) return;
+  if (!confirm(`确定删除模型 ${modelId}？（别名里若引用需先编辑掉；删除会同步改掉本地配置文件）`)) return;
   try {
     const r = await api("/admin/models/" + encodeURIComponent(modelId), { method: "DELETE" });
     if (r.error) { toast(r.error.message || "删除失败", "err"); return; }
-    toast(`模型 ${modelId} 已删除`, "ok");
+    toast(`模型 ${modelId} 已删除${syncedNote(r)}`, "ok");
     loadModels();
   } catch (err) { toast(err.message, "err"); }
 }
@@ -1110,18 +1117,18 @@ function openAliasModal(name) {
     try {
       const r = await api("/admin/aliases", { method: "POST", json: payload });
       if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
-      toast(`别名 ${payload.name} 已保存`, "ok");
+      toast(`别名 ${payload.name} 已保存${syncedNote(r)}`, "ok");
       modal.classList.remove("show");
       loadModels();
     } catch (err) { toast(err.message, "err"); }
   };
 }
 async function deleteAlias(name) {
-  if (!confirm(`确定删除别名 ${name}？客户端再用这个名字会报未知模型。`)) return;
+  if (!confirm(`确定删除别名 ${name}？客户端再用这个名字会报未知模型；删除会同步改掉本地配置文件。`)) return;
   try {
     const r = await api("/admin/aliases/" + encodeURIComponent(name), { method: "DELETE" });
     if (r.error) { toast(r.error.message || "删除失败", "err"); return; }
-    toast(`别名 ${name} 已删除`, "ok");
+    toast(`别名 ${name} 已删除${syncedNote(r)}`, "ok");
     loadModels();
   } catch (err) { toast(err.message, "err"); }
 }
