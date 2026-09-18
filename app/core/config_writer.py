@@ -345,12 +345,46 @@ def delete_credential_from_provider(path: Path, provider_id: str, credential_id:
     raise KeyError(f"credential '{credential_id}' not found in provider '{provider_id}'")
 
 
+def upsert_provider(path: Path, provider_id: str, payload: dict[str, Any]) -> None:
+    """Create-or-update one entry in ``providers.yaml`` (in place when it exists).
+
+    Existing entries keep their comments and their hand-written credentials list:
+    only the keys present in ``payload`` are stamped. ``credentials`` is treated as
+    sacred - when the payload omits it, the file's own list is restored after the
+    sync, so editing a provider from the console can never wipe its keys.
+    """
+    doc = load_document(path)
+    providers = _list_of(doc, "providers")
+    index = _find(providers, "id", provider_id)
+    data = {k: v for k, v in payload.items() if v is not None}
+    data.setdefault("id", provider_id)
+    if index >= 0:
+        entry = providers[index]
+        keep_credentials = "credentials" not in data and isinstance(
+            entry.get("credentials"), (list, CommentedSeq)
+        )
+        existing_credentials = entry.get("credentials")
+        _sync_entry(entry, data)
+        if keep_credentials:
+            entry["credentials"] = existing_credentials
+    else:
+        providers.append(_plain(data))
+    atomic_write(path, doc)
+
+
+def delete_provider(path: Path, provider_id: str) -> bool:
+    """Remove a provider entry from ``providers.yaml`` (comment header included)."""
+    return delete_list_entry(path, "providers", "id", provider_id)
+
+
 __all__ = [
     "append_credential_to_provider",
     "atomic_write",
     "delete_credential_from_provider",
     "delete_list_entry",
+    "delete_provider",
     "load_document",
     "sync_provider_rate_limits",
     "upsert_list_entry",
+    "upsert_provider",
 ]

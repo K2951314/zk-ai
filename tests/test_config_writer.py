@@ -187,3 +187,43 @@ def test_real_config_roundtrip_stays_schema_valid() -> None:
             ModelConfig(**m)  # would raise on any malformed round-trip
         for a in data["aliases"]:
             ModelAliasConfig(**a)
+
+
+def test_upsert_provider_keeps_existing_credentials(tmp_path) -> None:
+    """Console edits must not wipe the hand-written credentials list."""
+    import yaml
+
+    from app.core.config_writer import upsert_provider
+
+    path = tmp_path / "providers.yaml"
+    path.write_text(
+        "providers:\n"
+        "  - id: fake\n"
+        "    type: openai_compatible\n"
+        "    base_url: http://x/v1\n"
+        "    credentials:\n"
+        "      - id: k1\n"
+        "        env: FAKE_KEY\n"
+        "      - id: k2\n"
+        "        env: FAKE_KEY_2\n",
+        encoding="utf-8",
+    )
+    upsert_provider(path, "fake", {"id": "fake", "type": "openai_compatible",
+                                   "base_url": "http://x/v1", "timeout": 99.0})
+    data = yaml.safe_load(path.read_text("utf-8"))
+    entry = data["providers"][0]
+    assert entry["timeout"] == 99.0
+    assert [c["id"] for c in entry["credentials"]] == ["k1", "k2"]
+
+
+def test_delete_provider_removes_entry(tmp_path) -> None:
+    import yaml
+
+    from app.core.config_writer import delete_provider, upsert_provider
+
+    path = tmp_path / "providers.yaml"
+    path.write_text("providers:\n  - id: fake\n    type: openai_compatible\n", encoding="utf-8")
+    upsert_provider(path, "to-delete", {"id": "to-delete", "type": "openai_compatible",
+                                         "base_url": "http://y/v1"})
+    assert delete_provider(path, "to-delete") is True
+    assert yaml.safe_load(path.read_text("utf-8"))["providers"][0]["id"] == "fake"

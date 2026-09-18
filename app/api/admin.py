@@ -24,6 +24,8 @@ from app.core.config_writer import (
     sync_provider_rate_limits,
     upsert_list_entry,
 )
+from app.core.config_writer import delete_provider as delete_provider_file
+from app.core.config_writer import upsert_provider as upsert_provider_file
 from app.core.logging import get_logger
 from app.models.provider import (
     AliasStrategy,
@@ -465,6 +467,110 @@ async def reset_provider_limits(provider_id: str, container: ContainerDep) -> di
     container.rate_limiter.register_provider(provider)
     await container.config_repository.clear_provider_rate_limits(provider_id, yaml_rules)
     return {"object": "rate_limits", "provider_id": provider_id, "rules": yaml_rules, "source": "yaml"}
+
+
+class ProviderUpsertRequest(BaseModel):
+    """Body for creating/replacing a provider from the console."""
+
+    id: str
+    type: str = "openai_compatible"
+    base_url: str
+    enabled: bool = True
+    timeout: float = 60.0
+    connect_timeout: float = 10.0
+    max_retries: int = 2
+    api_version: str | None = None
+    referer: str | None = None
+    app_title: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/providers", summary="Create or replace a provider")
+async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDep) -> dict[str, Any]:
+    """Add or edit a provider (endpoint + protocol type); persists across restarts.
+
+    Credentials are managed separately (``/providers/{id}/credentials``), so this
+    never touches an existing provider's key list.
+    """
+    from app.models.provider import ProviderConfig, ProviderType
+
+    try:
+        provider = ProviderConfig(**payload.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"message": str(exc), "type": "invalid_provider"}},
+        ) from exc
+    if provider.type is ProviderType.OLLAMA and not provider.base_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"message": "ollama providers need a base_url", "type": "invalid_provider"}},
+        )
+    existing = container.config.providers.get(provider.id)
+    if existing is not None:
+        # Keep the hand-managed key list; only the endpoint/protocol fields change.
+        provider.credentials = existing.credentials
+        # Console edits only manage the top-level fields; provider-specific options
+        # (e.g. sensenova's rate_limits) stay untouched unless this payload is meant
+        # to replace them wholesale.
+        if not payload.options:
+            provider.options = dict(existing.options)
+    synced = None
+    path = _source_file(container, "providers")
+    if path is not None:
+        file_payload = _strip_nulls(provider.model_dump(mode="json"))
+        file_payload.pop("credentials", None)  # never overwrite keys from here
+        upsert_provider_file(path, provider.id, file_payload)
+        synced = path.name
+    container.config.providers[provider.id] = provider
+    container.pool.register_provider(provider)
+    container.rate_limiter.register_provider(provider)
+    await container.config_repository.sync_config(container.config)
+    logger.info("provider %s upserted (%s) via console", provider.id, provider.type.value)
+    return {
+        "object": "provider",
+        "provider_id": provider.id,
+        "created": existing is None,
+        "synced": synced,
+    }
+
+
+@router.delete("/providers/{provider_id}", summary="Delete a provider")
+async def delete_provider(provider_id: str, container: ContainerDep) -> dict[str, Any]:
+    """Remove a provider and its credentials; refuses while models still deploy on it."""
+    if provider_id not in container.config.providers:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    referenced = [
+        model.id
+        for model in container.config.models.values()
+        if any(d.provider_id == provider_id for d in model.deployments)
+    ]
+    if referenced:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": {
+                    "message": (
+                        f"provider '{provider_id}' still serves models: "
+                        f"{', '.join(sorted(referenced))} - delete or move those deployments first"
+                    ),
+                    "type": "provider_in_use",
+                }
+            },
+        )
+    synced = None
+    path = _source_file(container, "providers")
+    if path is not None:
+        delete_provider_file(path, provider_id)
+        synced = path.name
+    container.config.providers.pop(provider_id, None)
+    pruned = container.pool.reconcile(container.config.providers)
+    await container.config_repository.sync_config(container.config)
+    logger.info("provider %s deleted via console (%d credential(s) dropped)", provider_id, pruned)
+    return {"deleted": provider_id, "credentials_removed": pruned, "synced": synced}
 
 
 # --------------------------------------------------------------------------- #

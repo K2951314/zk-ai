@@ -168,6 +168,7 @@
 <div class="modal-mask" id="limits-modal"></div>
 <div class="modal-mask" id="market-modal"></div>
 <div class="modal-mask" id="addkey-modal"></div>
+<div class="modal-mask" id="providers-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
   <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
@@ -543,6 +544,7 @@ async function loadPool() {
       <span class="pill amber">限流 ${s.rate_limits}</span>
       <span class="grow"></span>
       <button id="pool-add-key">➕ 加 Key</button>
+      <button id="pool-providers">🏢 供应商</button>
       <button id="pool-limits">⚙ 限额</button>
       <button id="pool-clear-all">🧹 全部清冷却</button>
     </div>
@@ -556,6 +558,7 @@ async function loadPool() {
     冷却规则：分钟限流指数退避（60→900 秒），额度耗尽（token plan exhausted）平铺休 30 分钟。</p>`;
   tickCountdowns();
   $("#pool-add-key").onclick = openAddKeyModal;
+  $("#pool-providers").onclick = openProvidersModal;
   $("#pool-limits").onclick = openLimitsModal;
   $("#pool-clear-all").onclick = async () => {
     const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
@@ -678,6 +681,98 @@ function renderLimitsModal() {
     toast(`${pid} 已恢复 YAML 限额${syncedNote(r)}`, "ok");
     openLimitsModal();
   });
+}
+/* ---------- 凭据池：供应商管理 ---------- */
+function openProvidersModal() {
+  const modal = $("#providers-modal");
+  const renderList = () => {
+    const providers = state.providers || [];
+    const rows = providers.map(p => {
+      const limits = (p.rate_limits || []).length ? "pill green" : "pill gray";
+      const limitCount = (p.rate_limits || []).length;
+      return `<tr>
+        <td><b>${esc(p.id)}</b><div class="small muted">${esc(p.type)}</div></td>
+        <td class="small muted ell" title="${esc(p.base_url)}" style="max-width:200px">${esc(p.base_url)}</td>
+        <td>${p.enabled ? pill("healthy") : pill("disabled")}</td>
+        <td class="small">${p.timeout}s</td>
+        <td>${limitCount ? `<span class="pill green" title="已设限额">${limitCount} 条限额</span>` : '<span class="muted">-</span>'}</td>
+        <td><button class="mini" data-edit-provider="${esc(p.id)}">编辑</button>
+            <button class="mini" data-del-provider="${esc(p.id)}">删除</button></td>
+      </tr>`;
+    }).join("");
+    modal.innerHTML = `<div class="card">
+      <h3>🏢 供应商管理</h3>
+      <div class="small muted" style="margin:-4px 0 10px">供应商 = 上游协议 + 接入地址。Key 在「凭据池」里单独加；改这里不会动已配的 Key。</div>
+      <div class="row-flex" style="margin-bottom:10px">
+        <button class="primary" id="pv-new">➕ 新建供应商</button>
+        <span class="grow"></span>
+        <button id="pv-close">关闭</button>
+      </div>
+      <div class="tablewrap" style="max-height:55vh"><table>
+        <thead><tr><th>供应商</th><th>接入地址</th><th>状态</th><th>超时</th><th>限额</th><th>操作</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="muted">无供应商</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+    modal.classList.add("show");
+    $("#pv-close").onclick = () => modal.classList.remove("show");
+    $("#pv-new").onclick = () => openProviderForm(null);
+    document.querySelectorAll("[data-edit-provider]").forEach(b =>
+      b.onclick = () => openProviderForm(b.dataset.editProvider));
+    document.querySelectorAll("[data-del-provider]").forEach(b =>
+      b.onclick = async () => {
+        const id = b.dataset.delProvider;
+        if (!confirm(`确定删除供应商 ${id}？（会同步删掉它的 Key；有模型引用时会被拒绝）`)) return;
+        const r = await api(`/admin/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+        if (r.error) { toast(r.error.message || "删除失败", "err"); return; }
+        toast(`供应商 ${id} 已删除${syncedNote(r)}`, "ok");
+        state.providers = (await api("/admin/providers")).data || [];
+        renderList();
+      });
+  };
+  renderList();
+}
+function openProviderForm(pid) {
+  const src = pid ? (state.providers || []).find(p => p.id === pid) : null;
+  const p = src || {id: "", type: "openai_compatible", base_url: "", enabled: true, timeout: 60};
+  const types = ["openai_compatible", "openai", "anthropic", "gemini", "openrouter", "ollama"];
+  const modal = $("#providers-modal");
+  modal.innerHTML = `<div class="card">
+    <h3>${pid ? "编辑供应商" : "新建供应商"}</h3>
+    <div class="formgrid">
+      <label>供应商 ID（唯一，自己起）<input type="text" id="pf-id" value="${esc(p.id)}" ${pid ? "disabled" : ""} placeholder="如 my-openai"></label>
+      <label>协议类型
+        <select id="pf-type">${types.map(t => `<option ${t === p.type ? "selected" : ""}>${t}</option>`).join("")}</select>
+        <div class="small muted">绝大多数用 openai_compatible；anthropic 才用 anthropic</div></label>
+      <label style="grid-column:1/-1">接入地址（base_url，必须带 /v1 结尾）
+        <input type="text" id="pf-url" value="${esc(p.base_url)}" placeholder="https://api.example.com/v1"></label>
+      <label>超时（秒）<input type="number" id="pf-timeout" value="${p.timeout ?? 60}"></label>
+      <label>启用 <select id="pf-enabled">
+        <option value="true" ${p.enabled !== false ? "selected" : ""}>启用</option>
+        <option value="false" ${p.enabled === false ? "selected" : ""}>禁用</option></select></label>
+    </div>
+    <div class="small muted" style="margin-top:8px">Key 不在这里加——保存后去「凭据池 → ➕ 加 Key」。</div>
+    <div class="row-flex" style="margin-top:14px">
+      <button class="primary" id="pf-save">💾 保存</button>
+      <button id="pf-cancel">取消</button>
+    </div>
+  </div>`;
+  $("#pf-cancel").onclick = () => openProvidersModal();
+  $("#pf-save").onclick = async () => {
+    const payload = {
+      id: $("#pf-id").value.trim(),
+      type: $("#pf-type").value,
+      base_url: $("#pf-url").value.trim(),
+      timeout: Number($("#pf-timeout").value || 60),
+      enabled: $("#pf-enabled").value === "true",
+    };
+    if (!payload.id) { toast("供应商 ID 不能为空", "err"); return; }
+    if (!payload.base_url) { toast("接入地址不能为空", "err"); return; }
+    const r = await api("/admin/providers", { method: "POST", json: payload });
+    if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
+    toast(`供应商 ${payload.id} 已保存${syncedNote(r)}`, "ok");
+    state.providers = (await api("/admin/providers")).data || [];
+    openProvidersModal();
+  };
 }
 /* ---------- 凭据池：加 Key ---------- */
 async function openAddKeyModal() {
