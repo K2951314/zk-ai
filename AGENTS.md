@@ -76,8 +76,13 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   控制台窗口（任务栏残留）。必须读 `pyvenv.cfg` 的 `home` 直接用 base 目录的真
   `pythonw.exe` + `__PYVENV_LAUNCHER__` 指回 venv；port_guard 及其
   powershell/taskkill 子进程也都要 `CREATE_NO_WINDOW`
-- 门禁 ruff / mypy / pytest 全绿（332 passed）；2026-09-18 提交在本地
-  （6 个提交待推送，需要时 `git push origin main`，推送走本机代理）
+- 2026-09-18（晚）：①控制台**增删供应商**（POST/DELETE `/admin/providers`，
+  回写 `providers.yaml`，编辑不动已有 Key/限额；`config_writer.upsert_provider`
+  保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
+  坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
+  「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
+- 门禁 ruff / mypy / pytest 全绿（343 passed）；2026-09-18 提交在本地
+  （10 个提交待推送，需要时 `git push origin main`，推送走本机代理）
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
   （重启不清零），`--calibrate-actual 实扣数` 可随时精校准；并发 AIMD 自适应

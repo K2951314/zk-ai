@@ -968,9 +968,10 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 
 **浏览器打开 `http://127.0.0.1:8317/ui`** 即可使用内置 Web 控制台（单文件、零依赖、
 无需构建）：五个视图——总览（供应商可用性 + 池成功率 + 一键健康检查/热重载/清冷却）、
-凭据池（状态徽章 + 冷却倒计时 + 逐把启用/禁用）、请求记录（多条件筛选 + 分页 +
-点击行看每次 attempt 的上游错误原文）、用量统计（按天/供应商/模型/凭据）、
-模型与别名（含路由预览）。页面壳公开、不含数据，所有数据仍走下面鉴权的 `/admin/*`。
+凭据池（状态徽章 + 冷却倒计时 + 逐把启用/禁用 + 加/删 Key + 供应商管理 + 限额）、
+请求记录（多条件筛选 + 分页 + 点击行看每次 attempt 的上游错误原文）、用量统计（按天/
+供应商/模型/凭据）、模型与别名（含路由预览 + 模型市场：探测供应商真实可用模型，
+点选即预填上下文/能力/价格）。页面壳公开、不含数据，所有数据仍走下面鉴权的 `/admin/*`。
 
 `/admin/*` 除 `/docs` 外全部需要 `X-Admin-Token` 或 `Authorization: Bearer`（仅在配置了
 `admin.token` 时；`admin.enabled: false` 会整体返回 404）。
@@ -979,7 +980,16 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 |---|---|---|
 | `GET` | `/ui` | Web 管理控制台（页面壳公开，数据接口仍鉴权） |
 | `GET` | `/admin/providers` | 供应商及其凭据概览 |
+| `POST` | `/admin/providers` | 新建/编辑供应商（回写 `providers.yaml`，编辑不动 Key） |
+| `DELETE` | `/admin/providers/{id}` | 删除供应商（有模型引用时 409） |
+| `GET` | `/admin/providers/{id}/models` | 探测该供应商真实可用模型（模型市场数据源） |
+| `POST` | `/admin/providers/{id}/credentials` | 给供应商加 Key（回写 `providers.yaml`，Key 本体只存 `.env`） |
+| `DELETE` | `/admin/providers/{id}/credentials/{cred}` | 删 Key（回写 `providers.yaml`） |
+| `PUT` | `/admin/providers/{id}/limits` | 改限额（回写 `providers.yaml`，重启不丢） |
+| `DELETE` | `/admin/providers/{id}/limits` | 恢复 YAML 限额 |
 | `GET` | `/admin/models` | 模型、部署、能力分 |
+| `POST` | `/admin/models` | 新建/编辑模型（回写 `models.yaml`） |
+| `DELETE` | `/admin/models/{id}` | 删除模型（回写 `models.yaml`；被别名引用时 409） |
 | `GET` | `/admin/credentials` | Key 池快照（脱敏）+ 统计 |
 | `POST` | `/admin/credentials/{id}/enable` | 启用 Key |
 | `POST` | `/admin/credentials/{id}/disable` | 禁用 Key |
@@ -994,6 +1004,11 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 | `GET` | `/admin/requests` | 请求日志：状态/供应商/别名/模型/错误 筛选 + 分页 |
 | `GET` | `/admin/requests/{id}` | 单请求详情 + 全部 attempt（含上游错误原文） |
 | `POST` | `/admin/config/reload` | 重读 YAML，热替换别名与适配器 |
+
+**控制台的写操作都是「文件即真相」**：模型/别名/供应商/Key/限额的改动直接回写
+`config/*.yaml`（ruamel 保注释往返），删掉的条目重启/reload 不会复活；
+数据库只当查询镜像。模板模式（只有 `.example.yaml`）才回退到数据库暂存，
+页面会提示"模板模式：只存数据库，未改文件"。
 
 `/admin/router/preview` 支持模拟各种请求形态，用来回答「为什么走了这个模型」：
 
