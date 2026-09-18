@@ -71,7 +71,7 @@ echo   - Tray : bottom-right corner, green=running / blue=stopped
 echo   - Log  : data\burn_sensenova.log
 echo   - Stop : right-click tray icon - Quit
 echo.
-start "" /min .venv\Scripts\pythonw.exe scripts\tray_launcher.py burner %*
+.venv\Scripts\python.exe scripts\launch_hidden.py burner %*
 goto :end
 
 :end

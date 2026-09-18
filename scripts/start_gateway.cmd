@@ -109,7 +109,10 @@ echo   - Host : %ZKAI_HOST%   (0.0.0.0 = reachable from other machines on the LA
 echo   - Tray : bottom-right corner, green=running / blue=stopped
 echo   - Stop : right-click tray icon - Quit
 echo.
-start "" /min .venv\Scripts\pythonw.exe scripts\tray_launcher.py gateway
+REM launch_hidden.py spawns pythonw with NO console window; a bare
+REM `start ... pythonw.exe` inherits the batch console and leaves a minimized
+REM python.exe window stuck in the taskbar (uv venv launcher is a trampoline).
+.venv\Scripts\python.exe scripts\launch_hidden.py gateway
 goto :end
 
 :busy
