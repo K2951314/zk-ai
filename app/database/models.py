@@ -1,9 +1,8 @@
 """ORM models.
 
-Nine tables, exactly as specified:
-
 ``providers``, ``models``, ``credentials``, ``deployments``, ``model_aliases``,
-``requests``, ``request_attempts``, ``health_checks``, ``usage_records``.
+``requests``, ``request_attempts``, ``health_checks``, ``usage_records`` plus the
+ZK-Agent tables ``agent_sessions`` / ``agent_messages``.
 
 Security note: **no table stores a secret**. ``credentials`` only keeps a
 reference to the environment variable (``secret_ref``) plus a non-reversible
@@ -276,7 +275,58 @@ class UsageRecord(Base):
     )
 
 
+# --------------------------------------------------------------------------- #
+# ZK-Agent: batch coding-task sessions (transcript = LLM replay history)
+# --------------------------------------------------------------------------- #
+class AgentSession(Base):
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    #: alias or model id the loop routes through (default ``zk-auto``)
+    model: Mapped[str] = mapped_column(String(128), default="zk-auto")
+    workspace: Mapped[str] = mapped_column(String(500), default="")
+    #: running | waiting_approval | done | failed | cancelled | interrupted
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    steps: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class AgentMessage(Base):
+    """One transcript row. ``role``/``content``/``data`` double as the LLM
+    replay history (user / assistant / tool rows); display-only rows carry
+    ``kind`` values the loop skips when rebuilding the context."""
+
+    __tablename__ = "agent_messages"
+    __table_args__ = (Index("ix_agent_messages_session", "session_id", "seq"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: user | assistant | tool  (OpenAI replay roles)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: task | message | tool_call | tool_result | approval | summary | note
+    kind: Mapped[str] = mapped_column(String(24), default="message")
+    content: Mapped[str | None] = mapped_column(Text)
+    data: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
 __all__ = [
+    "AgentMessage",
+    "AgentSession",
     "Base",
     "Credential",
     "Deployment",

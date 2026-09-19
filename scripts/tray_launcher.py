@@ -284,6 +284,10 @@ class TrayLauncher:
             if self._mode == "gateway":
                 webbrowser.open("http://127.0.0.1:8317/ui")
 
+        def show_agent(icon, item) -> None:
+            if self._mode == "gateway":
+                webbrowser.open("http://127.0.0.1:8317/ui/agent")
+
         def view_log(icon, item) -> None:
             subprocess.Popen(  # noqa: S603 - notepad is a fixed Windows component
                 [r"C:\Windows\System32\notepad.exe", str(self._child.view_log)],
@@ -303,6 +307,7 @@ class TrayLauncher:
             MenuItem("状态：--", lambda: None, enabled=False),
             Menu.SEPARATOR,
             MenuItem("打开控制台", show_console, visible=self._mode == "gateway"),
+            MenuItem("打开 Agent", show_agent, visible=self._mode == "gateway"),
             MenuItem("查看日志", view_log),
             MenuItem("重启", restart),
             Menu.SEPARATOR,

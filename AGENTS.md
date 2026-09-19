@@ -36,8 +36,12 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - 商汤窗口刷新模型默认按滚动记账；控制台显示的每账号「重置时间」可能是固定锚点
   （判定方法见使用手册），确认后用 `--anchors "1=HH:MM;..."` 切固定窗口爆发模式
 - 商汤额度按**账号**算：01+02 同账号，07~09 归属待核对；额度上限见 providers.yaml 注释
+- **数据库并发串行化（2026-09-19）**：`:memory:`/池化 aiosqlite 是单连接，两个
+  AsyncSession 在同一连接上事务互相踩——实测表现为 UPDATE 静默丢失、空事务
+  COMMIT 报错。`Database.session()` 已加进程级 asyncio.Lock 把事务串行化；
+  新 repository 别绕过它自己开连接，也别在持有 session 时做长耗时工作
 
-## 当前状态（2026-09-17）
+## 当前状态（2026-09-19）
 
 - 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
 - `retry.max_credentials_per_deployment` 已从 6 提到 8（试满全部商汤账号，
@@ -87,3 +91,21 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
   （重启不清零），`--calibrate-actual 实扣数` 可随时精校准；并发 AIMD 自适应
   （全局≤128、单账号 8→24、429 减半/静默每分钟 +1），429 频繁就调低 `--per-account-max`
+- 2026-09-19：①**修积分池溢出事故**（用户实测专属池烧穿、吃掉 K3 通用池积分）：
+  根因 = 周预算滚动记账「遗忘」旧消耗 + 费率取实测区间下沿 → 熔断线（54 万/周）
+  按烧速（≈27 万/周/账号）物理上永远触不到。修复：周预算改**固定窗口**（自
+  `--week-anchor` 默认周一 00:00 起累计，到线停靠至下周锚点）、`--safety-margin`
+  默认 0.9→0.45（内建 2 倍费率不确定性）、新增 `--pool-total-credits` 绝对上限
+  （到线永久停靠）、额度耗尽错误升级为「溢出实锤」ERROR 告警。行为变化：全速烧
+  到周预算线（≈27 万积分/账号）会停靠等下周——**预期行为，不是 bug**。测试
+  `tests/test_burn_budget.py`。②新增 **ZK-Agent 任务台** `/ui/agent`（Codex 式
+  批量任务跑批器，网关进程内）：`app/services/agent/`（loop/tools/confirm/prompts）
+  + `/admin/agent/*`（REST+SSE）+ `app/web/agent.html`；6 工具两段式审批
+  （写文件/跑命令需用户批准，diff/命令预览，破坏性命令硬黑名单），工作区路径
+  锁定（resolve 后必须落在 `ZKAI_AGENT_WORKSPACE` 内），步数/并发双熔断，
+  transcript 行即 LLM 重放历史（`agent_sessions`/`agent_messages` 表，重启可续）。
+  托盘菜单加「打开 Agent」；`ZKAI_AGENT_*` 配置见 .env.example。定位：批量跑批
+  + 网关展示窗，不做 IDE 替代品（Web 先行，CLI 壳/模型分级路由留待后续）
+- 门禁 ruff / mypy / pytest 全绿（371 passed）；E2E 实测（8400 临时实例）：会话
+  创建→真实路由→tool_calls→审批→命令执行→结果回填全链路通；第二步因当天
+  K3/GLM 链路整体超时正确转入 failed（上游波动，非 Agent bug）

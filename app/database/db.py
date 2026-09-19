@@ -7,6 +7,7 @@ swapping the driver - no repository changes required.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,6 +48,8 @@ class Database:
         self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             bind=self.engine, expire_on_commit=False, autoflush=False
         )
+        # Serializes whole transactions (see :meth:`session`).
+        self._tx_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     def _ensure_sqlite_dir(self) -> None:
@@ -82,16 +85,26 @@ class Database:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        """Transactional session scope."""
-        session = self.session_factory()
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
+        """Transactional session scope.
+
+        Sessions are serialized with a process-wide lock. The async engine
+        funnels every session through a single pooled aiosqlite connection
+        (SQLite is single-writer anyway), and two sessions overlapping on that
+        connection corrupt each other's implicit transaction — observed as
+        silently lost UPDATEs and spurious "no transaction is active" commits
+        when the ZK-Agent loop wrote status rows while a console poller read
+        them. Contention is a non-issue at personal-gateway scale.
+        """
+        async with self._tx_lock:
+            session = self.session_factory()
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
 
     def _safe_url(self) -> str:
         """URL without credentials embedded (PostgreSQL URLs may contain them)."""

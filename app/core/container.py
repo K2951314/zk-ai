@@ -17,6 +17,7 @@ from app.credentials.cooldown import CooldownPolicy
 from app.credentials.pool import CredentialPool
 from app.database.db import Database
 from app.database.repository import (
+    AgentRepository,
     ConfigRepository,
     HealthRepository,
     RequestRepository,
@@ -26,6 +27,7 @@ from app.retry.policy import RetryPolicy
 from app.routing.limits import RateLimiter
 from app.routing.router import Router
 from app.routing.scheduler import Scheduler
+from app.services.agent.service import AgentService
 from app.services.health_service import HealthService
 from app.services.model_service import ModelService
 from app.services.request_service import RequestService
@@ -53,6 +55,8 @@ class Container:
     request_repository: RequestRepository
     usage_repository: UsageRepository
     health_repository: HealthRepository
+    agent_repository: AgentRepository
+    agent_service: AgentService
     started_at: float = field(default_factory=time.time)
     ready: bool = False
 
@@ -88,6 +92,13 @@ class Container:
                 logger.info("purged %d request row(s) older than 14 days", purged)
         except Exception:
             logger.exception("startup database housekeeping failed")
+        # ZK-Agent sessions that were mid-flight when the process died.
+        try:
+            interrupted = await self.agent_service.mark_stale_interrupted()
+            if interrupted:
+                logger.info("marked %d agent session(s) interrupted", interrupted)
+        except Exception:
+            logger.exception("agent session housekeeping failed")
         try:
             await self.health_service.startup()
         except Exception:
@@ -190,6 +201,7 @@ async def build_container(
     request_repository = RequestRepository(database)
     usage_repository = UsageRepository(database)
     health_repository = HealthRepository(database)
+    agent_repository = AgentRepository(database)
 
     usage_service = UsageService(config, usage_repository)
     health_service = HealthService(
@@ -200,6 +212,12 @@ async def build_container(
         scheduler=scheduler,
         request_repository=request_repository,
         usage_service=usage_service,
+    )
+    agent_service = AgentService(
+        settings=settings,
+        config=config,
+        request_service=request_service,
+        repository=agent_repository,
     )
 
     container = Container(
@@ -218,6 +236,8 @@ async def build_container(
         request_repository=request_repository,
         usage_repository=usage_repository,
         health_repository=health_repository,
+        agent_repository=agent_repository,
+        agent_service=agent_service,
     )
 
     if start_services:

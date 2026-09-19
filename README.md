@@ -58,6 +58,7 @@
 - [11. 错误分类决策矩阵](#11-错误分类决策矩阵)
 - [12. 重试、退避与故障转移](#12-重试退避与故障转移)
 - [13. API 参考](#13-api-参考)
+- [13.3 ZK-Agent 任务台（/ui/agent）](#133-zk-agent-任务台-uiagent)
 - [14. 流式输出](#14-流式输出)
 - [15. 健康检查](#15-健康检查)
 - [16. 数据库](#16-数据库)
@@ -79,6 +80,7 @@
 | **Key Pool** | 显式状态机 `HEALTHY / COOLDOWN / UNHEALTHY / DISABLED`，5 种轮换策略，`threading.RLock` 保证选择原子性。 |
 | **错误分类驱动** | 26 种错误原因 → `retryable / switch_credential / switch_provider / cooldown`。400/413 **绝不**轮换 Key；401 → UNHEALTHY；429 → 分钟限流指数冷却 / 额度耗尽长休；529 → deployment 冷却 + 故障转移。 |
 | **Web 控制台** | 浏览器打开 `http://127.0.0.1:8317/ui`：总览 / 凭据池（冷却倒计时+一键解禁）/ 请求日志筛选+attempt 明细 / 用量统计 / 路由预览。单文件零依赖，数据仍走鉴权的 `/admin/*`。 |
+| **ZK-Agent 任务台** | `http://127.0.0.1:8317/ui/agent`：浏览器里的批量任务跑批器——思考→调工具（读/搜/写文件、跑命令）循环，写与执行需批准，路径锁在工作区，步数/并发双熔断（见 §13.3）。 |
 | **有界重试** | 指数退避 + 抖动，`max_total_attempts` 是硬顶，结构上不可能死循环。 |
 | **可解释路由** | 8 个能力维度加权打分 + 硬门槛，每个响应都带 `zk_ai.routing_reason` 与逐维度得分。 |
 | **别名热更新** | `POST /admin/aliases` 运行时改线，客户端零感知。 |
@@ -1016,6 +1018,46 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 curl -s "http://127.0.0.1:8317/admin/router/preview?model=zk-coding&prompt=write%20a%20python%20function&tools=2&json_mode=true" \
   -H 'X-Admin-Token: <token>'
 ```
+
+---
+
+### 13.3 ZK-Agent 任务台（`/ui/agent`）
+
+网关进程内的 Codex 式批量任务跑批器（无新进程/端口）：浏览器里给一句话任务，
+agent 循环「LLM → 工具调用 → 回填结果 → 再 LLM」直到给出总结。**不是 IDE 替代品**
+——定位是批量改写、挂机跑批这类无人值守任务，以及展示网关的路由/统计能力。
+
+实现要点：
+
+- **进程内直调**：每步非流式调 `RequestService.chat`（带 tools），复用别名路由、
+  凭据池、限额与用量统计；`session_id = agent-{sid}` 触发凭据亲和，长任务钉在同一把 Key
+- **工具两层**：`read_file / list_dir / search_files / grep` 只读直执行；
+  `write_file / run_command` 走两段式——`prepare` 渲染 diff/命令预览并执行黑名单校验，
+  用户在页面上批准后才 `perform`。所有路径 `resolve()` 后必须落在
+  `ZKAI_AGENT_WORKSPACE`（默认项目根）内，`..`/绝对路径/符号链接逃逸一律拒绝
+- **熔断**：单任务步数上限（`ZKAI_AGENT_MAX_STEPS=40`）、并发会话数
+  （`ZKAI_AGENT_MAX_CONCURRENT=3`，超出的排队）、上下文超限（
+  `ZKAI_AGENT_CONTEXT_TOKEN_LIMIT`）触发临时摘要压缩
+- **持久化**：`agent_sessions` / `agent_messages` 两张表；transcript 行本身就是
+  LLM 重放历史（user/assistant/tool 三种 role + kind 区分显示行），重启后可回看，
+  中断会话接着发消息即续跑；启动时把无主 running 会话标记 `interrupted`
+- **事件流**：`GET .../events` SSE（snapshot 回放 + 实时事件 + 15s 心跳），前端用
+  fetch 流消费（EventSource 无法带 admin token 头）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/ui/agent` | 任务台页面（页面壳公开，数据接口鉴权） |
+| `GET` | `/admin/agent/models` | 会话可选的模型/别名清单 |
+| `GET` | `/admin/agent/sessions` | 会话列表（惰性清理僵尸 running） |
+| `POST` | `/admin/agent/sessions` | 创建会话并启动循环 `{task, model?, workspace?}` |
+| `GET` | `/admin/agent/sessions/{id}` | 会话详情 + 全部 transcript 行 |
+| `POST` | `/admin/agent/sessions/{id}/messages` | 终态会话追加任务（重放历史续跑） |
+| `POST` | `/admin/agent/sessions/{id}/cancel` | 取消（挂起的审批一并拒绝） |
+| `DELETE` | `/admin/agent/sessions/{id}` | 删除会话（执行中 409） |
+| `POST` | `/admin/agent/sessions/{id}/approvals/{aid}` | 审批决定 `{approved, remember}` |
+| `GET` | `/admin/agent/sessions/{id}/events` | SSE 事件流 |
+
+`ZKAI_AGENT_ENABLED=false` 整体下线（`/admin/agent/*` 与页面同时消失）。
 
 ---
 

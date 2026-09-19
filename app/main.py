@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
-from app.api import admin, chat, health, messages, models, responses, ui
+from app.api import admin, agent, chat, health, messages, models, responses, ui
 from app.core.config import Settings, get_app_config, reset_config_cache
 from app.core.container import Container, build_container
 from app.core.errors import ZKAIError
@@ -82,6 +82,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(messages.router)
     app.include_router(responses.router)
     app.include_router(ui.router)
+    # /admin/agent/*: routes internally 404 when ZKAI_AGENT_ENABLED=false, and
+    # require_admin already 404s when the admin surface is off.
+    app.include_router(agent.router)
     if settings.admin_enabled:
         app.include_router(admin.router)
 
@@ -94,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "docs": "/docs",
             "health": "/health",
             "console": "/ui",
+            "agent": "/ui/agent",
             "models": "/v1/models",
             "chat_completions": "/v1/chat/completions",
             "messages": "/v1/messages",

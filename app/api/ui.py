@@ -15,7 +15,9 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter(tags=["web"])
 
-_INDEX = Path(__file__).resolve().parent.parent / "web" / "index.html"
+_WEB = Path(__file__).resolve().parent.parent / "web"
+_INDEX = _WEB / "index.html"
+_AGENT = _WEB / "agent.html"
 
 
 @router.get("/ui", include_in_schema=False, response_class=HTMLResponse)
@@ -27,6 +29,19 @@ async def console() -> HTMLResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "console assets unavailable"}},
+        ) from exc
+    return HTMLResponse(html)
+
+
+@router.get("/ui/agent", include_in_schema=False, response_class=HTMLResponse)
+async def agent_console() -> HTMLResponse:
+    """The ZK-Agent task console (single-file vanilla JS)."""
+    try:
+        html = _AGENT.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - file ships with the package
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": {"message": "agent assets unavailable"}},
         ) from exc
     return HTMLResponse(html)
 

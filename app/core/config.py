@@ -179,6 +179,25 @@ class Settings(BaseSettings):
     #: ids pass through unchanged.
     anthropic_default_model: str = "zk-auto"
 
+    # ---- ZK-Agent (batch coding-task runner, /ui/agent) ------------------- #
+    #: Master switch for the ``/admin/agent/*`` surface and the ``/ui/agent`` page.
+    agent_enabled: bool = True
+    #: Root the agent may touch: every path the model passes is resolved and must
+    #: stay inside this tree; ``run_command`` also executes with this cwd.
+    agent_workspace: Path = Path(".")
+    #: Alias (or model id) the agent loop routes through. ``zk-auto`` keeps the
+    #: traffic off the flash-lite dedicated points pool by design.
+    agent_default_model: str = "zk-auto"
+    #: Hard cap of tool-loop steps per task (protects the points pools from a
+    #: runaway loop even if the model keeps asking for tools).
+    agent_max_steps: int = 40
+    #: Sessions allowed to run their loop simultaneously (extra ones queue).
+    agent_max_concurrent: int = 3
+    #: Per-command timeout and output cap for ``run_command``.
+    agent_command_timeout: float = 60.0
+    #: Estimated input tokens above which the transcript gets summarised down.
+    agent_context_token_limit: int = 120_000
+
     @property
     def resolved_config_dir(self) -> Path:
         """Absolute config directory (relative paths resolve against the project root)."""
@@ -188,6 +207,12 @@ class Settings(BaseSettings):
     @property
     def resolved_data_dir(self) -> Path:
         path = Path(self.data_dir)
+        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+    @property
+    def resolved_workspace(self) -> Path:
+        """Agent workspace anchored to the project root (like ``data_dir``)."""
+        path = Path(self.agent_workspace)
         return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
     @property

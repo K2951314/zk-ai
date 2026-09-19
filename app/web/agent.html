@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZK-Agent · 批量任务跑批</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --panel2: #f1f3f4; --border: #e4e7ec;
+    --text: #1e293b; --muted: #64748b; --accent: #1a73e8;
+    --ok: #16a34a; --warn: #d97706; --err: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --border: #2d333b;
+      --text: #e6edf3; --muted: #8b949e; --accent: #4da3ff;
+      --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex: none;
+  }
+  header h1 { font-size: 15px; margin: 0; }
+  header .spacer { flex: 1; }
+  select, input[type=text], textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font: inherit;
+  }
+  select:focus, textarea:focus { outline: 1px solid var(--accent); }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 14px; cursor: pointer; font: inherit;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); color: #fff; }
+  .chip {
+    display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .chip.running { color: var(--accent); border-color: var(--accent); }
+  .chip.waiting_approval { color: var(--warn); border-color: var(--warn); }
+  .chip.done { color: var(--ok); border-color: var(--ok); }
+  .chip.failed, .chip.cancelled, .chip.interrupted { color: var(--err); border-color: var(--err); }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 280px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  aside .head {
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  aside .head b { flex: 1; font-size: 13px; }
+  #sessionList { overflow-y: auto; flex: 1; }
+  .session {
+    padding: 9px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+    display: flex; flex-direction: column; gap: 3px; position: relative;
+  }
+  .session:hover { background: var(--panel2); }
+  .session.active { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
+  .session .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 22px; }
+  .session .meta { display: flex; gap: 6px; align-items: center; }
+  .session .del {
+    position: absolute; right: 8px; top: 8px; border: none; background: none;
+    color: var(--muted); padding: 2px 4px; display: none;
+  }
+  .session:hover .del { display: block; }
+
+  section.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  #stream { flex: 1; overflow-y: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 12px; }
+  .row { max-width: 900px; width: 100%; margin: 0 auto; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px;
+  }
+  .row.user .card { border-left: 3px solid var(--accent); }
+  .row .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; display: flex; gap: 8px; align-items: center; }
+  pre {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; margin: 6px 0 0;
+  }
+  details { margin-top: 6px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12.5px; user-select: none; }
+  .tools-line { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .toolchip {
+    font-family: Consolas, monospace; font-size: 12px; padding: 1px 8px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .routing { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .approval-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .approval-actions .ok { color: var(--ok); border-color: var(--ok); }
+  .approval-actions .no { color: var(--err); border-color: var(--err); }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--accent);
+    border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .step-line { color: var(--muted); font-size: 12.5px; text-align: center; }
+
+  form#composer {
+    flex: none; border-top: 1px solid var(--border); background: var(--panel);
+    padding: 12px 22px; display: flex; gap: 10px; align-items: flex-end; max-width: 944px; margin: 0 auto; width: 100%;
+  }
+  #taskInput { flex: 1; resize: vertical; min-height: 44px; max-height: 160px; }
+  #empty {
+    margin: auto; text-align: center; color: var(--muted); max-width: 520px;
+  }
+  #empty h2 { color: var(--text); font-size: 18px; }
+  .toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--err);
+    border-radius: 8px; padding: 10px 16px; box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 50;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 ZK-Agent</h1>
+  <span class="chip small" id="wsChip">workspace</span>
+  <span class="spacer"></span>
+  <select id="modelSel" title="模型 / 别名"></select>
+  <button id="cancelBtn" class="small" hidden>■ 停止</button>
+  <button id="newBtn" class="primary small">＋ 新任务</button>
+</header>
+
+<main>
+  <aside>
+    <div class="head"><b>任务会话</b><button id="refreshBtn" class="small">刷新</button></div>
+    <div id="sessionList"></div>
+  </aside>
+
+  <section class="chat">
+    <div id="stream">
+      <div id="empty">
+        <h2>给 Agent 一个任务</h2>
+        <p>例如：<em>把所有脚本的 print 换成 logger</em>、<em>给 app/services 下每个公开函数补 docstring 并跑 pytest 验证</em>。<br>
+        模型默认走 <code>zk-auto</code>；写文件和跑命令会先请你批准。</p>
+      </div>
+    </div>
+    <form id="composer">
+      <textarea id="taskInput" placeholder="描述任务，Enter 发送，Shift+Enter 换行"></textarea>
+      <button type="submit" class="primary" id="sendBtn">▶ 运行</button>
+    </form>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const TOKEN = localStorage.getItem("zkai_admin_token") || "";
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Token": TOKEN,
+      ...(opts.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    let msg = `${res.status}`;
+    try {
+      const body = await res.json();
+      msg = body?.error?.message || body?.detail || msg;
+    } catch { /* keep status */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+const state = {
+  current: null,       // session id
+  session: null,       // session object
+  messages: [],
+  streamCtrl: null,    // AbortController for SSE
+  pendingApprovals: new Map(),  // approval_id -> seq of rendered card
+  autoScroll: true,
+};
+
+function toast(msg) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ---------------------------------------------------------------- render
+function statusChip(status) { return `<span class="chip ${esc(status)}">${esc(status)}</span>`; }
+
+function renderSessionList(sessions) {
+  const list = $("sessionList");
+  list.innerHTML = "";
+  for (const s of sessions) {
+    const div = document.createElement("div");
+    div.className = "session" + (s.id === state.current ? " active" : "");
+    div.innerHTML = `
+      <div class="t">${esc(s.title || "(无标题)")}</div>
+      <div class="meta">${statusChip(s.status)}
+        <span class="small muted">${esc(s.model)} · ${fmtTime(s.updated_at)}</span></div>
+      <button class="del" title="删除">🗑</button>`;
+    div.onclick = () => openSession(s.id);
+    div.querySelector(".del").onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm("删除该会话及其全部记录？")) return;
+      try { await api(`/admin/agent/sessions/${s.id}`, { method: "DELETE" }); await loadSessions(); }
+      catch (err) { toast(err.message); }
+    };
+    list.appendChild(div);
+  }
+}
+
+function addRow(html, cls = "") {
+  $("empty")?.remove();
+  const stream = $("stream");
+  const row = document.createElement("div");
+  row.className = `row ${cls}`;
+  row.innerHTML = html;
+  stream.appendChild(row);
+  if (state.autoScroll) stream.scrollTop = stream.scrollHeight;
+  return row;
+}
+
+function renderTranscript() {
+  $("stream").innerHTML = "";
+  for (const m of state.messages) appendMessageRow(m);
+  const st = state.session?.status;
+  if (st === "running" || st === "waiting_approval") addStepLine();
+}
+
+function toolCallChips(tcs) {
+  if (!tcs?.length) return "";
+  return `<div class="tools-line">${tcs.map(tc =>
+    `<span class="toolchip">🔧 ${esc(tc.function?.name || "?")}</span>`).join("")}</div>`;
+}
+
+function appendMessageRow(m) {
+  const d = m.data || {};
+  if (m.role === "user") {
+    if (m.kind === "summary") {
+      addRow(`<div class="card small muted"><b>摘要</b><br>${esc(m.content)}</div>`);
+    } else {
+      addRow(`<div class="card">${esc(m.content)}</div>`, "user");
+    }
+    return;
+  }
+  if (m.kind === "note") {
+    addRow(`<div class="step-line">— ${esc(m.content)} —</div>`);
+    return;
+  }
+  if (m.kind === "approval") {
+    if (d.decision !== undefined) {
+      addRow(`<div class="card small"><b>${d.decision ? "✅ 已批准" : "🚫 已拒绝"}</b>
+        <span class="muted">${esc(d.tool)}</span>${d.remember ? "（本会话不再询问）" : ""}</div>`);
+    } else {
+      renderApprovalCard(m);
+    }
+    return;
+  }
+  if (m.role === "tool") {
+    addRow(`<div class="card"><div class="who">🔧 ${esc(d.tool || "tool")}
+      <span class="chip ${d.ok ? "done" : "failed"}">${d.ok ? "ok" : "fail"}</span></div>
+      <pre>${esc(m.content || "")}</pre></div>`);
+    return;
+  }
+  // assistant message
+  const routing = d.routing
+    ? `<div class="routing">${esc(d.routing.provider || "")} · ${esc(d.routing.model || "")} · ${d.routing.latency_ms ?? "?"}ms</div>` : "";
+  const thinking = d.thinking
+    ? `<details><summary>💭 思考过程</summary><pre>${esc(d.thinking)}</pre></details>` : "";
+  const pending = d.tool_calls?.length && state.session?.status === "waiting_approval";
+  addRow(`<div class="card"><div class="who">🤖 助手 <span class="muted small">#${m.seq}</span></div>
+    <div>${esc(m.content || "")}</div>${toolCallChips(d.tool_calls)}${thinking}${routing}</div>`);
+}
+
+function renderApprovalCard(m) {
+  const d = m.data || {};
+  const row = addRow(`<div class="card" style="border-left:3px solid var(--warn)">
+    <div class="who">⚠️ 请求批准：<b>${esc(d.tool)}</b></div>
+    <pre>${esc(m.content || "")}</pre>
+    <div class="approval-actions">
+      <button class="ok" data-act="approve">✓ 批准</button>
+      <button class="no" data-act="deny">✕ 拒绝</button>
+      <button data-act="remember">✓ 批准且本会话不再询问</button>
+    </div></div>`);
+  row.querySelectorAll("button").forEach(btn => {
+    btn.onclick = async () => {
+      const approved = btn.dataset.act !== "deny";
+      const remember = btn.dataset.act === "remember";
+      try {
+        await api(`/admin/agent/sessions/${state.current}/approvals/${d.approval_id}`, {
+          method: "POST", body: JSON.stringify({ approved, remember }),
+        });
+        row.querySelector(".approval-actions").remove();
+        row.insertAdjacentHTML("beforeend",
+          `<div class="routing">${approved ? "已批准，执行中…" : "已拒绝。"}</div>`);
+      } catch (err) { toast(err.message); }
+    };
+  });
+}
+
+function addStepLine(text) {
+  const stream = $("stream");
+  const old = stream.querySelector(".step-live");
+  if (old) old.remove();
+  const row = document.createElement("div");
+  row.className = "row step-line step-live";
+  row.innerHTML = text
+    ? esc(text)
+    : `<span class="spinner"></span> 模型思考中…（此步可能需要 1 分钟以上）`;
+  stream.appendChild(row);
+  if (state.autoScroll) stream.scrollTop = stream.scrollHeight;
+}
+
+function setHeader() {
+  const s = state.session;
+  const active = s && (s.status === "running" || s.status === "waiting_approval");
+  $("cancelBtn").hidden = !active;
+  $("wsChip").textContent = s?.workspace ? s.workspace.split(/[\\/]/).pop() : "workspace";
+  $("sendBtn").disabled = !!active;
+  $("sendBtn").textContent = active ? "执行中…" : (state.current ? "▶ 继续" : "▶ 运行");
+}
+
+// ---------------------------------------------------------------- SSE
+async function connectEvents(sessionId) {
+  state.streamCtrl?.abort();
+  const ctrl = new AbortController();
+  state.streamCtrl = ctrl;
+  try {
+    const res = await fetch(`/admin/agent/sessions/${sessionId}/events`, {
+      headers: { "X-Admin-Token": TOKEN, Accept: "text/event-stream" },
+      signal: ctrl.signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`SSE ${res.status}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const chunk = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of chunk.split("\n")) {
+          if (line.startsWith("data: ")) handleEvent(JSON.parse(line.slice(6)));
+        }
+      }
+    }
+  } catch (err) {
+    if (ctrl.signal.aborted) return;
+    addStepLine(`连接中断（${err.message}），可点「刷新」重试`);
+  }
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case "snapshot":
+      state.session = ev.session;
+      state.messages = ev.messages;
+      renderTranscript();
+      setHeader();
+      return;
+    case "session_started":
+      state.session && (state.session.status = "running");
+      setHeader();
+      addStepLine(`任务启动 · 模型 ${ev.model} · 工作区 ${ev.workspace}`);
+      return;
+    case "step_start":
+      addStepLine();
+      return;
+    case "assistant":
+      state.messages.push({ seq: ev.seq, role: "assistant", kind: "message",
+        content: ev.content || null, data: { tool_calls: ev.tool_calls, thinking: ev.thinking, routing: ev.routing } });
+      appendMessageRow(state.messages[state.messages.length - 1]);
+      if (!ev.tool_calls?.length) addStepLine(`第 ${ev.step} 步完成，等待模型后续…`);
+      return;
+    case "approval_request":
+      state.session && (state.session.status = "waiting_approval");
+      setHeader();
+      state.messages.push({ seq: ev.seq, role: "assistant", kind: "approval",
+        content: ev.preview, data: { approval_id: ev.approval_id, tool: ev.tool } });
+      appendMessageRow(state.messages[state.messages.length - 1]);
+      loadSessions();
+      return;
+    case "approval_resolved":
+      state.session && (state.session.status = "running");
+      setHeader();
+      return;
+    case "tool_result":
+      state.messages.push({ seq: ev.seq, role: "tool", kind: "tool_result",
+        content: ev.output, data: { tool: ev.tool, ok: ev.ok } });
+      appendMessageRow(state.messages[state.messages.length - 1]);
+      return;
+    case "note":
+      addRow(`<div class="step-line">— ${esc(ev.content)} —</div>`);
+      return;
+    case "session_done": {
+      const old = document.querySelector(".step-live");
+      if (old) old.remove();
+      state.session && (state.session.status = ev.status);
+      const label = ev.status === "done" ? "任务完成 ✅" :
+        ev.status === "failed" ? `任务失败：${ev.error || "?"}` :
+        ev.status === "cancelled" ? "已取消" : ev.status;
+      addRow(`<div class="step-line">${esc(label)}</div>`);
+      setHeader();
+      loadSessions();
+      return;
+    }
+    default:
+  }
+}
+
+// ---------------------------------------------------------------- actions
+async function loadSessions() {
+  try {
+    const data = await api("/admin/agent/sessions");
+    renderSessionList(data.sessions);
+  } catch (err) { toast(err.message); }
+}
+
+async function openSession(id) {
+  state.current = id;
+  try {
+    const detail = await api(`/admin/agent/sessions/${id}`);
+    state.session = detail.session;
+    state.messages = detail.messages;
+    renderTranscript();
+    setHeader();
+    renderSessionList((await api("/admin/agent/sessions")).sessions);
+    if (detail.session.status === "running" || detail.session.status === "waiting_approval") {
+      connectEvents(id);
+    }
+  } catch (err) { toast(err.message); }
+}
+
+async function loadModels() {
+  try {
+    const data = await api("/admin/agent/models");
+    const sel = $("modelSel");
+    sel.innerHTML = "";
+    for (const alias of data.aliases) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(alias)}">${esc(alias)}（别名）</option>`);
+    }
+    for (const m of data.models) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(m)}">${esc(m)}</option>`);
+    }
+    if (data.aliases.includes(data.default)) sel.value = data.default;
+  } catch { /* 无 token 时静默 */ }
+}
+
+$("composer").onsubmit = async (e) => {
+  e.preventDefault();
+  const input = $("taskInput");
+  const text = input.value.trim();
+  if (!text) return;
+  try {
+    if (!state.current) {
+      const created = await api("/admin/agent/sessions", {
+        method: "POST",
+        body: JSON.stringify({ task: text, model: $("modelSel").value || null }),
+      });
+      input.value = "";
+      state.current = created.session.id;
+      state.session = created.session;
+      state.messages = [];
+      renderTranscript();
+      setHeader();
+      connectEvents(state.current);
+      loadSessions();
+    } else {
+      await api(`/admin/agent/sessions/${state.current}/messages`, {
+        method: "POST", body: JSON.stringify({ content: text }),
+      });
+      input.value = "";
+      state.messages.push({ seq: 0, role: "user", kind: "task", content: text });
+      appendMessageRow(state.messages[state.messages.length - 1]);
+      addStepLine();
+      state.session.status = "running";
+      setHeader();
+      connectEvents(state.current);
+    }
+  } catch (err) { toast(err.message); }
+};
+
+$("taskInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+$("newBtn").onclick = () => {
+  state.current = null;
+  state.session = null;
+  state.messages = [];
+  state.streamCtrl?.abort();
+  $("stream").innerHTML = `<div id="empty"><h2>给 Agent 一个任务</h2>
+    <p>模型默认走 <code>zk-auto</code>；写文件和跑命令会先请你批准。</p></div>`;
+  setHeader();
+  $("taskInput").focus();
+};
+
+$("cancelBtn").onclick = async () => {
+  if (!state.current) return;
+  try {
+    await api(`/admin/agent/sessions/${state.current}/cancel`, { method: "POST" });
+    toast("已请求取消");
+  } catch (err) { toast(err.message); }
+};
+
+$("refreshBtn").onclick = () => {
+  loadSessions();
+  if (state.current) openSession(state.current);
+};
+
+$("stream").addEventListener("scroll", (e) => {
+  const el = e.target;
+  state.autoScroll = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+});
+
+loadSessions();
+loadModels();
+setHeader();
+</script>
+</body>
+</html>
