@@ -85,8 +85,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（343 passed）；2026-09-18 提交在本地
-  （10 个提交待推送，需要时 `git push origin main`，推送走本机代理）
+- 门禁 ruff / mypy / pytest 全绿（2026-09-19 起 371 passed；推送走本机代理，
+  直连常被重置——见记忆 github-push-via-local-proxy）
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
   （重启不清零），`--calibrate-actual 实扣数` 可随时精校准；并发 AIMD 自适应
