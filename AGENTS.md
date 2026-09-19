@@ -36,6 +36,13 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - 商汤窗口刷新模型默认按滚动记账；控制台显示的每账号「重置时间」可能是固定锚点
   （判定方法见使用手册），确认后用 `--anchors "1=HH:MM;..."` 切固定窗口爆发模式
 - 商汤额度按**账号**算：01+02 同账号，07~09 归属待核对；额度上限见 providers.yaml 注释
+- **消耗器会挤占 K3 的 TPM**（2026-09-19 实测）：满速烧 flash-lite 时同账号 K3 报
+  `inference exceeds tpm/rpm limit`（疑似账号级 TPM 跨模型共享）——K3 频繁 429 先查
+  消耗器是否在烧，用它时把消耗器停掉或调低 `--per-account-max`
+- **`retry.max_deployments` 是路由计划硬顶**：按 zk-k3 的 3 部署估成 4，zk-auto 全链
+  6 部署时 DeepSeek/Qwen 根本进不了计划，坏渠道烧光 `max_total_attempts` 就整体失败
+  （已改 8）。**NVIDIA `max_retries` 会让挂起重试翻倍墙钟**（60s 超时→120s+/次），
+  已设 0——挂起交给上层冷却+换渠道，别盲目重试
 - **数据库并发串行化（2026-09-19）**：`:memory:`/池化 aiosqlite 是单连接，两个
   AsyncSession 在同一连接上事务互相踩——实测表现为 UPDATE 静默丢失、空事务
   COMMIT 报错。`Database.session()` 已加进程级 asyncio.Lock 把事务串行化；
