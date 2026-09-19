@@ -9,9 +9,20 @@
     3. 仍不足时消耗 通用池 · 活动固定积分 ← 同上
   其他模型（kimi-k3 等）只扣通用池。池切到下一步时请求照常成功、完全无感，
   API 不返回任何「当前扣的哪个池」的信号（已实测：响应头/body 无池信息，
-  兼容层也没有余额查询端点），所以唯一安全的做法是**按积分记账、预算熔断**：
-  每个账号只烧「专属池 5h 窗口上限 × 安全系数」以内的量，烧到线就停靠，
-  等滚动窗口吐回余量再继续。宁可少烧（少转换），绝不溢出（烧 K3 口粮）。
+  兼容层也没有余额查询端点），所以唯一安全的做法是**按积分记账、预算熔断**。
+
+预算模型（2026-09-19 定稿，修「烧穿专属池溢出」事故）：
+  - 5h 窗口：滚动记账（未配 --anchors 时），窗口上限只防瞬时爆发
+  - 周窗口：**固定窗口记账**——从 --week-anchor（默认周一 00:00）起累计，
+    到线停靠到下周锚点。旧版按滚动 7 天记账会「遗忘」一周前的消耗，且
+    默认费率取实测区间下沿，按烧速推算熔断线物理上永远触不到 → 专属池
+    被烧穿后无感溢出扣通用池（2026-09 实测事故：26h 烧 ≈13 万积分/账号，
+    真实费率在区间上沿时周实扣正好贴近官方 60 万上限）
+  - 安全系数默认 0.45：内建 2 倍费率不确定性（实测区间 出333~720，估算
+    取 360），估算口径熔断时实扣也不超过官方上限的一半
+  - 绝对上限 --pool-total-credits：账号累计（持久化账本口径）烧到即永久
+    停靠，防赠送池过期后空转。0 = 关闭
+  宁可少烧（少转换），绝不溢出（烧 K3 口粮）。
 
 速度模型（2026-09-12 实测）：
   - 单流生成速度固定 ~70 tok/s，总速率 = 70 × 在飞请求数 → 唯一杠杆是并发
@@ -116,20 +127,30 @@ class AccountState:
     def burned(self, now: float, window: float) -> float:
         return sum(c for ts, c in self.events if ts > now - window)
 
-    def available(self, now: float, cap5h: float, capweek: float) -> float:
+    def burned_since(self, start: float) -> float:
+        """固定窗口记账：自 start（周锚点的当前窗口起点）起的累计消耗。"""
+        return sum(c for ts, c in self.events if ts >= start)
+
+    def available(self, now: float, cap5h: float, capweek: float,
+                  week_start: float = 0.0) -> float:
         """窗口余量（已扣掉在飞请求的预估成本）。
-        锚点模式：5h 约束按「当前固定窗口内烧量」算（窗口刚重置 = 满血爆发）；
-        滚动模式：按「最近 5h 烧量」算。周约束两种模式都按滚动 7 天（保守方向）。"""
+        5h 约束：锚点模式按「当前固定窗口内烧量」，滚动模式按「最近 5h 烧量」。
+        周约束：week_start>0 时按固定窗口（自周锚点累计，防「滚动遗忘」烧穿）；
+        =0 时退回滚动 7 天（--week-anchor 显式置空的逃生口，不推荐）。"""
         if self.anchor_ts:
             ws = self.window_start(now)
             avail5h = cap5h - sum(c for ts, c in self.events if ts >= ws)
         else:
             avail5h = cap5h - self.burned(now, WIN_5H)
-        avail_week = capweek - self.burned(now, WIN_WEEK)
+        if week_start:
+            avail_week = capweek - self.burned_since(week_start)
+        else:
+            avail_week = capweek - self.burned(now, WIN_WEEK)
         return min(avail5h, avail_week) - self.inflight_cost
 
-    def resume_time(self, now: float, cap5h: float, capweek: float, need: float) -> float:
-        """最早什么时候两个约束都能腾出 need 积分（取各约束要求时刻的最大值）。"""
+    def resume_time(self, now: float, cap5h: float, capweek: float, need: float,
+                    week_start: float = 0.0) -> float:
+        """最早什么时候各约束都能腾出 need 积分（取各约束要求时刻的最大值）。"""
         cands: list[float] = []
         if self.anchor_ts:
             ws = self.window_start(now)
@@ -161,22 +182,29 @@ class AccountState:
                             break
                     else:
                         cands.append(now + 86400.0)
-        # 周约束（两种模式都按滚动 7 天，只会更保守、不会烧穿）
-        evs_w = sorted((ts, c) for ts, c in self.events if ts > now - WIN_WEEK)
-        total_w = sum(c for _, c in evs_w)
-        if capweek < need:
-            cands.append(now + 86400.0)
+        # 周约束：固定窗口到线就停靠到下周锚点（滚动分支只是逃生口）
+        if week_start:
+            burned_w = self.burned_since(week_start)
+            if capweek < need:
+                cands.append(now + 86400.0)
+            elif burned_w > capweek - need:
+                cands.append(week_start + WIN_WEEK + 30)
         else:
-            need_release = total_w - (capweek - need)
-            if need_release > 0:
-                acc = 0.0
-                for ts, c in evs_w:
-                    acc += c
-                    if acc >= need_release:
-                        cands.append(ts + WIN_WEEK + 30)
-                        break
-                else:
-                    cands.append(now + 86400.0)
+            evs_w = sorted((ts, c) for ts, c in self.events if ts > now - WIN_WEEK)
+            total_w = sum(c for _, c in evs_w)
+            if capweek < need:
+                cands.append(now + 86400.0)
+            else:
+                need_release = total_w - (capweek - need)
+                if need_release > 0:
+                    acc = 0.0
+                    for ts, c in evs_w:
+                        acc += c
+                        if acc >= need_release:
+                            cands.append(ts + WIN_WEEK + 30)
+                            break
+                    else:
+                        cands.append(now + 86400.0)
         if not cands:
             cands.append(now + 60)
         return max(cands)
@@ -271,6 +299,29 @@ def group_accounts(keys: list[KeyState], groups_spec: str) -> None:
                 m.account = shared
 
 
+WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def parse_week_anchor(spec: str) -> float:
+    """解析 --week-anchor "Mon 00:00"，返回当前 7 天固定窗口的起点 epoch。
+
+    取「最近一个（含今天）该星期几的 HH:MM」；若该时刻在今天还没到，
+    则再往前推一周。确定性只依赖本地时钟，无需持久化。"""
+    m = re.fullmatch(r"([A-Za-z]{3})\s*(\d{1,2}):(\d{2})", spec.strip())
+    if not m or m.group(1).lower() not in WEEKDAY_NAMES:
+        raise ValueError('应为 "Mon 00:00" 形式（星期几缩写 + HH:MM）')
+    wd = WEEKDAY_NAMES.index(m.group(1).lower())
+    hh, mm = int(m.group(2)), int(m.group(3))
+    if hh > 23 or mm > 59:
+        raise ValueError("HH:MM 时刻非法")
+    lt = time.localtime()
+    days_back = (lt.tm_wday - wd) % 7
+    ts = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_back, hh, mm, 0, 0, 0, -1))
+    if ts > time.time():
+        ts -= WIN_WEEK
+    return ts
+
+
 def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
     """把 "1=03:30;3=07:15" 形式的窗口重置时刻应用到对应账号。
 
@@ -323,6 +374,10 @@ class Burner:
             acct.target = float(args.per_account_start)
         self.cap5h = args.window_credits * args.safety_margin
         self.capweek = args.weekly_credits * args.safety_margin
+        # 周预算用固定窗口（自锚点累计），防滚动记账「遗忘」旧消耗后烧穿专属池
+        self.week_anchor_ts = parse_week_anchor(args.week_anchor)
+        # 绝对上限：账号累计烧到即永久停靠（0 = 关闭）
+        self.cap_total = args.pool_total_credits
         self.total = Totals()
         self.stop = asyncio.Event()
         self.started = time.time()
@@ -334,6 +389,11 @@ class Burner:
         # 本段运行的基线（恢复账本后「速率」只算本次运行新增的量）
         self.base_in = 0
         self.base_out = 0
+
+    def week_start(self, now: float) -> float:
+        """当前 7 天固定窗口的起点（周锚点 + k×7d）。"""
+        k = int((now - self.week_anchor_ts) // WIN_WEEK)
+        return self.week_anchor_ts + k * WIN_WEEK
 
     # ---- 预算 --------------------------------------------------------------
     def request_cost(self, messages: list[dict]) -> float:
@@ -348,13 +408,23 @@ class Burner:
         now = time.time()
         if now < acct.parked_until:
             return False
+        # 绝对上限（按持久化账本的累计口径）：到线永久停靠，绝不溢出
+        if self.cap_total > 0 and acct.credits_total >= self.cap_total:
+            if acct.parked_until != float("inf"):
+                acct.parked_until = float("inf")
+                acct.park_reason = (f"累计 ≈{acct.credits_total:.0f} 积分已达绝对上限"
+                                    f" {self.cap_total:.0f}（--pool-total-credits）")
+                self.log(f"[账号 {acct.name}] {acct.park_reason}，永久停靠。"
+                         "如确认池已重置，删除账本里该账号的 credits_total 后重启", "ERROR")
+            return False
         if self.cap5h <= 0 and self.capweek <= 0:
             return True  # 预算显式关闭（危险，启动时已大声警告）
-        avail = acct.available(now, self.cap5h, self.capweek)
+        ws = self.week_start(now)
+        avail = acct.available(now, self.cap5h, self.capweek, ws)
         if avail >= cost:
             return True
         # 能走到这里说明账号此前未在停靠 → 这是一次新的停靠，记一条日志
-        acct.parked_until = acct.resume_time(now, self.cap5h, self.capweek, cost)
+        acct.parked_until = acct.resume_time(now, self.cap5h, self.capweek, cost, ws)
         acct.park_reason = f"预算触顶（窗口余 {avail:.0f} < 需 {cost:.0f} 积分）"
         self.log(f"[账号 {acct.name}] {acct.park_reason}，停靠至 "
                  f"{time.strftime('%m-%d %H:%M', time.localtime(acct.parked_until))} 后继续",
@@ -391,7 +461,7 @@ class Burner:
             return False
         loaded = False
         by_name = {a.name: a for a in self.accounts}
-        cutoff = time.time() - WIN_WEEK
+        cutoff = time.time() - (WIN_WEEK + 86400)
         for name, blob in data.get("accounts", {}).items():
             acct = by_name.get(name)
             if acct is None:
@@ -534,8 +604,8 @@ class Burner:
         # 记账：成功扣减的积分进账号窗口（只有成功响应才真的扣了积分）
         now = time.time()
         acct.events.append((now, credits))
-        while acct.events and acct.events[0][0] <= now - WIN_WEEK:
-            acct.events.popleft()  # 裁剪：7 天外的记账点已对任何窗口无影响
+        while acct.events and acct.events[0][0] <= now - (WIN_WEEK + 86400):
+            acct.events.popleft()  # 裁剪：8 天外的记账点对任何窗口都无影响
         acct.credits_total += credits
         rate = (self.total.tokens_out - self.base_out) / max(1e-9, time.time() - self.started)
         self.log(
@@ -588,8 +658,17 @@ class Burner:
             acct.park_reason = "疑似额度/积分耗尽"
             ks.rate_limited += 1
             self.total.rate_limited += 1
-            self.log(f"[{ks.name}] 疑似积分耗尽，账号停靠 {self.args.quota_park_hours:.0f}h"
-                     f"（{body[:160]}）", "WARN")
+            self.log(
+                f"[{ks.name}] 疑似积分耗尽（专属池+通用池都已扣完），账号停靠 "
+                f"{self.args.quota_park_hours:.0f}h（{body[:160]}）", "ERROR",
+            )
+            self.log(
+                "⚠ 溢出实锤：走到这一步说明专属池此前已被烧穿、通用池/活动池已受损。"
+                "请到商汤控制台核对「Flash-lite 专属池」的实际规模/重置时刻，用 "
+                f"--weekly-credits / --safety-margin（当前 {self.args.safety_margin}）/ "
+                "--week-anchor 收紧预算，或 --pool-total-credits 设绝对上限",
+                "ERROR",
+            )
             return
 
         # 5xx / 其他：短冷却换个 Key 顶上
@@ -622,6 +701,15 @@ class Burner:
                 await asyncio.wait_for(self.stop.wait(), timeout=self.args.summary_interval)
             if self.stop.is_set():
                 break
+            # 绝对上限全触顶 → 任务结束（没有恢复可能，空转没有意义）
+            if self.cap_total > 0 and all(a.parked_until == float("inf")
+                                          and a.credits_total >= self.cap_total
+                                          for a in self.accounts):
+                self.log("所有账号累计烧量都已达 --pool-total-credits 绝对上限，消耗器退出。"
+                         "如商汤已发放新周期积分，清掉账本对应账号的 credits_total 再启动",
+                         "ERROR")
+                self.stop.set()
+                break
             # AIMD 加性增：账号静默（60s 无 429）就 +1 并发，自动贴回供应商上限
             for acct in self.accounts:
                 if acct.target < self.args.per_account_max \
@@ -634,9 +722,11 @@ class Burner:
             now = time.time()
             parked = sum(1 for a in self.accounts if now < a.parked_until)
             inflight = sum(a.inflight for a in self.accounts)
+            week_burned = sum(a.burned_since(self.week_start(now)) for a in self.accounts)
             self.log(
                 f"汇总 {elapsed / 3600:.2f}h | 累计 {htokens(self.total.tokens_in)}入"
                 f" {htokens(self.total.tokens_out)}出 ≈{self.total.credits:.0f}积分"
+                f" | 本周(全部账号)≈{week_burned:.0f}积分"
                 f" | 本段速率 {htokens(rate_in)}/{htokens(rate_out)} tok/s"
                 f" | 在飞 {inflight} | 成功 {self.total.ok} 失败 {self.total.fail}"
                 f" 429 {self.total.rate_limited} | 账号停靠 {parked}/{len(self.accounts)}"
@@ -736,6 +826,7 @@ class Burner:
                           + self.total.tokens_out - self.base_out) / elapsed
             self.log(f"本段平均速率 {htokens(total_rate)} tok/s（含限流/停靠等待）")
         now = time.time()
+        ws = self.week_start(now)
         for acct in self.accounts:
             tag = ""
             if now < acct.parked_until:
@@ -746,7 +837,7 @@ class Burner:
                 tag += f" 锚点下边界 {time.strftime('%m-%d %H:%M', time.localtime(acct.next_boundary(now)))}"
             self.log(
                 f"  账号 {acct.name:<28} 5h窗口≈{acct.burned(now, WIN_5H):.0f}积分"
-                f" 周≈{acct.burned(now, WIN_WEEK):.0f}积分 累计≈{acct.credits_total:.0f}积分"
+                f" 本周(固定)≈{acct.burned_since(ws):.0f}积分 累计≈{acct.credits_total:.0f}积分"
                 f" 并发目标 {acct.target:.0f} {tag}"
             )
         for ks in self.keys:
@@ -789,9 +880,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--window-credits", type=float, default=60000,
                    help="每账号 Flash-lite 专属池 5h 窗口积分上限（官方 6 万）")
     p.add_argument("--weekly-credits", type=float, default=600000,
-                   help="每账号 Flash-lite 专属池每周积分上限（官方 60 万）")
-    p.add_argument("--safety-margin", type=float, default=0.9,
-                   help="预算安全系数（实际熔断线 = 上限 × 该系数）")
+                   help="每账号 Flash-lite 专属池每周积分上限（官方 60 万；"
+                        "若控制台显示的实际规模更小，请按控制台填）")
+    p.add_argument("--safety-margin", type=float, default=0.45,
+                   help="预算安全系数（熔断线 = 上限 × 该系数）。0.45 = 内建 2 倍"
+                        "费率不确定性（实测区间 出333~720，估算取 360）——即使实际"
+                        "费率是估算的 2 倍，实扣也不会超过官方上限")
+    p.add_argument("--week-anchor", default="Mon 00:00",
+                   help="周固定窗口的起点（星期几缩写 + HH:MM，本地时区），如 "
+                        '"Mon 00:00"、"Wed 09:30"。自该时刻起累计周烧量，到线停靠'
+                        "至下周同一时刻。可对齐控制台「专属池」的重置时刻")
+    p.add_argument("--pool-total-credits", type=float, default=0,
+                   help="每账号累计烧量绝对上限（按持久化账本口径，到线永久停靠，"
+                        "防赠送池过期后继续空转烧通用池）。0 = 关闭")
     p.add_argument("--rate-in", type=float, default=120,
                    help="输入 token 积分费率（积分/百万token）。2026-09-12 两次控制台"
                         "实测交叉验证：实际 ≈111（区间 111~240），取 120 贴实测值，"
@@ -837,6 +938,11 @@ def main(argv: list[str] | None = None) -> int:
 
     load_dotenv(ROOT / ".env")
     args = parse_args(argv)
+    try:
+        parse_week_anchor(args.week_anchor)
+    except ValueError as exc:
+        print(f"ERROR: --week-anchor {args.week_anchor!r}：{exc}", file=sys.stderr)
+        return 2
 
     keys = load_keys()
     if args.only:
@@ -878,11 +984,24 @@ def main(argv: list[str] | None = None) -> int:
         f" | 共 {len(keys)} 把 Key、{len(burner.accounts)} 个账号预算："
         f"{', '.join(a.name for a in burner.accounts)}"
     )
+    next_week = burner.week_start(time.time()) + WIN_WEEK
+    anchor_str = time.strftime('%m-%d %H:%M', time.localtime(burner.week_anchor_ts))
+    next_str = time.strftime('%m-%d %H:%M', time.localtime(next_week))
     burner.log(
-        f"预算熔断线（每账号）：5h 窗口 {burner.cap5h:.0f} 积分"
-        f"（官方 6 万 × {args.safety_margin}），每周 {burner.capweek:.0f} 积分"
-        f"（官方 60 万 × {args.safety_margin}）；费率估算 入{args.rate_in:.0f}/出{args.rate_out:.0f}"
-        f" 积分/百万token → 单条请求 ≈{burner.request_cost(build_messages(args)):.0f} 积分"
+        f"预算熔断线（每账号）：5h 滚动窗口 {burner.cap5h:.0f} 积分"
+        f"（官方 6 万 × {args.safety_margin}）；"
+        f"周固定窗口 {burner.capweek:.0f} 积分（官方 60 万 × {args.safety_margin}，"
+        f"锚点 {args.week_anchor}，本窗口 {anchor_str} 起，下边界 {next_str}）"
+    )
+    if args.safety_margin > 0.6:
+        burner.log("提示：安全系数 > 0.6 时，若实际费率处在实测区间上沿（≈估算 2 倍），"
+                   "专属池仍可能被烧穿溢出——2026-09 事故的根因。保持默认 0.45 或更低", "WARN")
+    if burner.cap_total > 0:
+        burner.log(f"绝对上限：每账号累计 ≈{burner.cap_total:.0f} 积分，到线永久停靠")
+    burner.log(
+        f"费率估算 入{args.rate_in:.0f}/出{args.rate_out:.0f} 积分/百万token"
+        f" → 单条请求 ≈{burner.request_cost(build_messages(args)):.0f} 积分"
+        f"（预算按此口径记账，系数已含费率不确定性）"
     )
     burner.log(f"接口：{burner.url}")
     anchored = [a for a in burner.accounts if a.anchor_ts]
