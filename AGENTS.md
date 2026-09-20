@@ -54,9 +54,12 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - `retry.max_credentials_per_deployment` 已从 6 提到 8（试满全部商汤账号，
   **重启网关后生效**）；会话残留（*.mock.bak、*.stale、旧库备份）已清理
 - 对抗审查（2026-09-12）：git 历史无密钥、鉴权常量时间比较且 None 安全、Docker
-  不烤密钥（.dockerignore 已补）。**遗留决策**：`ZKAI_HOST=0.0.0.0` 且未设
-  `ZKAI_API_TOKEN` → /v1/* 对局域网开放（启动时会警告）；要收紧就在 .env 设
-  `ZKAI_API_TOKEN` 并同步所有客户端配置
+  不烤密钥（.dockerignore 已补）。**遗留决策（2026-09-20 已收紧）**：
+  `ZKAI_HOST=0.0.0.0` 曾且未设 `ZKAI_API_TOKEN` → /v1/* 对局域网开放；现已设
+  `ZKAI_API_TOKEN=zk-ai-local`（.env + 用户级环境变量——桌面版 app 从 explorer
+  启动不继承 shell 变量，两个来源都要有），POST /v1/* 需要
+  `Authorization: Bearer zk-ai-local`（GET /v1/models、/health 按设计免鉴权）。
+  **换机器/清环境变量后要同步所有客户端**（ZCode provider、cc-switch 等都发这个值）
 - 2026-09-13：`ZKAI_STRIP_REASONING=true` 折叠思考已生效（含回填进正文的思考，
   README §18 缺陷 11）；`.env.example` 补了 `ZKAI_API_TOKEN` 可发现行；
   双窗口模型（`--anchors`）就绪，待用户从控制台判定滚动/锚点后填值
