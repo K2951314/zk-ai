@@ -33,6 +33,8 @@ __all__ = [
     "StreamEventType",
     "ToolCall",
     "Usage",
+    "function_call_output_item",
+    "message_output_item",
     "new_request_id",
 ]
 
@@ -209,6 +211,29 @@ class ResponsesUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+
+
+def message_output_item(text: str, *, item_id: str | None = None) -> dict[str, Any]:
+    """Assistant text turn as a Responses ``output`` item."""
+    return {
+        "id": item_id or f"msg_{uuid.uuid4().hex[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def function_call_output_item(call: ToolCall, *, item_id: str | None = None) -> dict[str, Any]:
+    """Chat tool call as a Responses ``function_call`` output item."""
+    return {
+        "id": item_id or call.id or f"fc_{uuid.uuid4().hex[:24]}",
+        "type": "function_call",
+        "status": "completed",
+        "arguments": call.function.arguments,
+        "call_id": call.id or f"call_{uuid.uuid4().hex[:24]}",
+        "name": call.function.name,
+    }
 
 
 class ResponsesResponse(BaseModel):

@@ -460,10 +460,11 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 > 网关对此的处理是**逐把独立冷却**：某把 Key 429 只冷却它自己，调度器立刻
 > 换下一把。因此跨账号的额度会**自动叠加**，不需要额外配置。
 > 唯一要确认的是 `config.yaml` 的 `retry.max_credentials_per_deployment`
-> 不小于实际账号数（否则试到一半就停了）——本仓库已配成 `8`（覆盖全部商汤账号）。
+> 不小于实际账号数（否则试到一半就停了）——本仓库已配成 `8`（≥ 现役 7 账号，
+> 全可达；加账号时同步 +1，删这行不会取消限制，会回落到代码默认 3）。
 >
-> 本项目的商汤 9 把 Key 分属**最多 8 个账号**（01+02 同一账号，03~06 各一个，
-> 07~09 归属待核对），所以实际有最多 8 份独立额度。`config/providers.yaml` 里
+> 本项目商汤现役 **7 把 Key = 7 个账号，每账号正好一把**（03~09；01/02 原同属
+> 账号 A，2026-09-20 已禁用），所以有 7 份独立额度。`config/providers.yaml` 里
 > 用 `tags: ["account-x"]` 标出归属（**只是给人看的标签，不参与调度**）。
 >
 > 实测效果：`zk-k3` 在 try 到第 4 把（跨 4 个账号）时才拿到额度并成功返回。
@@ -924,7 +925,7 @@ SSE `error` 事件形式下发。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | 主入口，支持 `stream` |
-| `POST` | `/v1/responses` | Responses API 子集（内部转译为 chat） |
+| `POST` | `/v1/responses` | Responses API 子集（内部转译为 chat；含工具调用与流式完整事件链，Codex CLI 可用） |
 | `GET` | `/v1/models` | 模型 + 别名清单 |
 | `GET` | `/v1/models/{id}` | 单个模型/别名详情 |
 | `GET` | `/health` | 存活与池状态 |
@@ -1335,8 +1336,13 @@ uv run pytest
 
 ## 21. 已知限制与后续计划
 
-- **`/v1/responses` 只覆盖常用子集**：`input` → `messages`、文本输出、usage。
-  函数调用、`previous_response_id` 等尚未实现。
+- **`/v1/responses` 是有状态/托管工具之外的完整子集**：`instructions`、`input`
+  （message / `function_call` / `function_call_output`）、扁平 `tools`、
+  `tool_choice`、`reasoning.effort`、流式完整事件链均已支持（Codex CLI 0.154+
+  只走这条 wire，已实测工具调用闭环）。`store` / `include` /
+  `prompt_cache_key` / `previous_response_id` 接受但忽略——网关无状态，
+  客户端每次重放全量对话。托管工具（web_search 等）与 reasoning summary
+  明细尚未实现。
 - **凭据的加密存储**：当前依赖环境变量/密钥管理系统；若要在库里存密文，
   需要接入 KMS（会引入新的威胁模型）。
 - **多租户与配额**：目前是个人网关，没有租户维度；若要多用户共享，
@@ -1346,8 +1352,6 @@ uv run pytest
   付费渠道这里即真实成本。按**实际命中的部署**计价（`meta.deployment_id` 贯穿 usage/requests）。
   不区分缓存命中/阶梯定价；牌价改动只影响**之后**的记录，历史可用
   `python scripts/backfill_cost.py --apply` 幂等回填。控制台同时显示 ≈¥（`CNY_RATE`）。
-- **`/v1/responses` 只覆盖常用子集**：`input` → `messages`、文本输出、usage。
-  函数调用、`previous_response_id` 等尚未实现。
 - **推理模型的空回复**：`max_tokens` 过小时，推理模型会把预算全花在思考上。
   网关已回填 `reasoning` 并打标（见 §18 缺陷 8），但**治本办法是给够 `max_tokens`**
   （建议 ≥ 800，或让网关按模型自动加预算）。

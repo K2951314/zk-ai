@@ -19,9 +19,13 @@ Usage: ``python scripts/launch_hidden.py gateway [extra args]``
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -29,6 +33,96 @@ if str(_ROOT) not in sys.path:  # allow "python scripts/launch_hidden.py" from a
     sys.path.insert(0, str(_ROOT))
 
 from scripts.tray_launcher import _NO_WINDOW, _child_interpreter, _venv_home  # noqa: E402
+
+#: How long a gracefully-asked tray gets to exit before it is killed outright.
+_EXIT_GRACE = 5.0
+
+#: Flag for the short-lived probe processes (powershell/taskkill).
+#: Deliberately NOT the tray's ``CREATE_NO_WINDOW | DETACHED_PROCESS``: with
+#: DETACHED_PROCESS, powershell's CIM queries answer with empty stdout (rc 0),
+#: which silently disabled every command-line probe - port_guard only survived
+#: it because it falls back to an HTTP identity check.
+_PROBE_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _tray_pattern(mode: str) -> str:
+    """Regex fragment matching ``tray_launcher.py <mode>`` command lines."""
+    return rf"tray_launcher\.py\s+{re.escape(mode)}"
+
+
+def _capture(args: list[str]) -> tuple[int, str]:
+    """Run *args* hidden and capture stdout (empty string on failure)."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no user input
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_PROBE_FLAGS,
+        )
+        return proc.returncode, proc.stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return 1, ""
+
+
+def _still_running(pid: int) -> bool:
+    """True when *pid* still exists (limited-query handle, no admin needed)."""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    return False
+
+
+def _existing_tray_pids(mode: str) -> list[int]:
+    """PIDs of running tray processes for *mode* (empty when none / unreadable).
+
+    Deliberately avoids ``-Filter`` (its double quotes are one more thing to
+    survive argv round-tripping) and retries once: CIM occasionally answers
+    with an empty result under load, and a false negative here resurrects the
+    double-tray bug this module exists to prevent.
+    """
+    command = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -in 'python.exe','pythonw.exe' "
+        f"-and $_.CommandLine -match '{_tray_pattern(mode)}' }} | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    for attempt in range(3):
+        code, out = _capture(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+        )
+        pids = [int(token) for token in out.split() if token.isdigit()] if code == 0 else []
+        if pids or attempt == 2:
+            return pids
+        time.sleep(0.5)
+    return []
+
+
+def stop_existing_trays(mode: str) -> list[int]:
+    """Stop a same-mode tray so a .cmd double-click cannot spawn a second one.
+
+    Without this the .cmd path starts a *second* tray while the first still
+    runs: the new tray's port guard kills the old tray's gateway child, and the
+    old tray - alive but childless - turns its icon blue and lingers as a ghost
+    in the notification area. Graceful ``taskkill`` (WM_CLOSE) first so pystray
+    removes its own icon; hard kill only if it overstays the grace period.
+    """
+    pids = _existing_tray_pids(mode)
+    for pid in pids:
+        _capture(["taskkill", "/PID", str(pid)])
+    deadline = time.monotonic() + _EXIT_GRACE
+    while time.monotonic() < deadline:
+        if not any(_still_running(pid) for pid in pids):
+            break
+        time.sleep(0.3)
+    for pid in pids:
+        if _still_running(pid):
+            _capture(["taskkill", "/F", "/T", "/PID", str(pid)])
+    return pids
 
 
 def main(argv: list[str]) -> int:
@@ -41,6 +135,11 @@ def main(argv: list[str]) -> int:
         print(f"ERROR: interpreter not found: {interpreter}")
         print(f"       (.venv/pyvenv.cfg home = {_venv_home()})")
         return 1
+    with contextlib.suppress(Exception):
+        # Never leave two trays of the same mode running (blue ghost icon).
+        stopped = stop_existing_trays(mode)
+        if stopped:
+            print(f"stopped previous tray ({mode}): PID {', '.join(map(str, stopped))}")
     argv_out = [str(interpreter), "scripts/tray_launcher.py", mode, *argv[1:]]
     print(f"starting tray ({mode}) with {interpreter.name}, no console window")
     # No-console flags *and* a GUI-subsystem interpreter: belt and braces. The

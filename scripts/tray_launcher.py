@@ -299,8 +299,7 @@ class TrayLauncher:
             )
 
         def restart(icon, item) -> None:
-            self._child.start()
-            self._refresh()
+            self.restart_child()
 
         def quit_(icon, item) -> None:
             self._running = False
@@ -329,6 +328,23 @@ class TrayLauncher:
         self._icon.icon = _icon_set(self._color)
         status = self._status_text()
         self._icon.title = f"{_mode_title(self._mode)} - {status}"
+
+    def restart_child(self) -> None:
+        """Restart the child without blocking the menu ("重启" used to freeze).
+
+        ``_ChildProcess.start`` blocks for up to ~40s (terminate the old child,
+        run the port guard, spawn the new one). Doing that on pystray's menu
+        thread froze the whole tray icon - the click looked dead even though the
+        restart eventually happened. The heartbeat repaints the icon within
+        ``_HEARTBEAT_EVERY`` once the new child is up.
+        """
+        def _go() -> None:
+            try:
+                self._child.start()
+            finally:
+                self._refresh()
+
+        threading.Thread(target=_go, daemon=True).start()
 
     def _heartbeat_loop(self) -> None:
         while self._running:

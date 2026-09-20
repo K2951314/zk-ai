@@ -7,9 +7,11 @@ into the console by hand.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from scripts import first_run, open_console
+from scripts import first_run, launch_hidden, open_console
+from scripts.launch_hidden import _tray_pattern
 
 
 # --------------------------------------------------------------------------- #
@@ -97,3 +99,30 @@ def test_open_console_reads_port_and_token_from_env(tmp_path: Path, monkeypatch)
 
     assert open_console.open_console(wait=0.3) is False  # nothing is listening
     assert opened == []  # and nothing was opened either
+
+
+# --------------------------------------------------------------------------- #
+# launch_hidden: one tray per mode
+# --------------------------------------------------------------------------- #
+def test_tray_pattern_matches_only_its_mode() -> None:
+    gateway = re.compile(_tray_pattern("gateway"))
+    assert gateway.search(r"pythonw scripts\tray_launcher.py gateway")
+    assert not gateway.search(r"pythonw scripts\tray_launcher.py burner")
+    burner = re.compile(_tray_pattern("burner"))
+    assert burner.search("python scripts/tray_launcher.py burner")
+    assert not burner.search("python scripts/tray_launcher.py gateway")
+
+
+def test_main_stops_previous_tray_before_spawning(monkeypatch, tmp_path: Path) -> None:
+    """A .cmd double-click must replace the tray, not run a second one."""
+    interpreter = tmp_path / "pythonw.exe"
+    interpreter.write_bytes(b"")
+    monkeypatch.setattr(launch_hidden, "_child_interpreter", lambda: (interpreter, {}))
+    monkeypatch.setattr(launch_hidden, "stop_existing_trays", lambda mode: [4242])
+    calls: list[str] = []
+    monkeypatch.setattr(
+        launch_hidden.subprocess, "Popen", lambda *a, **k: calls.append("spawn") or None
+    )
+
+    assert launch_hidden.main(["gateway"]) == 0
+    assert calls == ["spawn"], "the new tray is spawned only after the old one is stopped"

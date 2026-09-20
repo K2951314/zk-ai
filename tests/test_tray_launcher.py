@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -200,3 +201,30 @@ def test_status_text_burner() -> None:
     assert "无输出" in launcher._status_text()
     launcher._child._alive = False
     assert launcher._status_text() == "已退出"
+
+
+def test_restart_child_does_not_block_the_menu(monkeypatch) -> None:
+    """「重启」 must return immediately - start() blocks on the port guard."""
+    launcher = _make("gateway")
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _SlowChild:
+        def start(self) -> None:
+            entered.set()
+            release.wait(timeout=5.0)
+
+    launcher._child = _SlowChild()
+    refreshed: list[bool] = []
+    monkeypatch.setattr(launcher, "_refresh", lambda: refreshed.append(True))
+
+    started = time.monotonic()
+    launcher.restart_child()
+    assert time.monotonic() - started < 0.5, "menu callback must not block on start()"
+    assert entered.wait(timeout=2.0), "start() should run on a background thread"
+    release.set()
+    for _ in range(100):
+        if refreshed:
+            break
+        time.sleep(0.05)
+    assert refreshed, "the icon is refreshed once the new child is up"

@@ -28,6 +28,8 @@ from app.models.response import (
     RoutingMeta,
     StreamEvent,
     Usage,
+    function_call_output_item,
+    message_output_item,
 )
 from app.routing.scheduler import ExecutionResult, Scheduler
 from app.services.usage_service import UsageService
@@ -309,26 +311,32 @@ class RequestService:
         request_id: str,
         client_ip: str | None = None,
         user_agent: str | None = None,
+        strip_reasoning: bool = False,
     ) -> ResponsesResponse:
         """Serve the Responses API by translating to a chat completion."""
         chat_request = request.to_chat_request()
         chat_response = await self.chat(
             chat_request, request_id=request_id, client_ip=client_ip, user_agent=user_agent
         )
-        text = chat_response.text()
         usage = chat_response.usage or Usage()
+        output: list[dict[str, Any]] = []
+        text_parts: list[str] = []
+        choice = chat_response.choices[0] if chat_response.choices else None
+        if choice is not None:
+            text = choice.message.text()
+            extra = choice.message.model_extra or {}
+            if text and strip_reasoning and extra.get("content_recovered_from_reasoning"):
+                # Thinking promoted by the never-blank guard is not an answer.
+                text = ""
+            if text:
+                output.append(message_output_item(text))
+                text_parts.append(text)
+            for call in choice.message.tool_calls or []:
+                output.append(function_call_output_item(call))
         return ResponsesResponse(
             model=chat_response.model,
-            output=[
-                {
-                    "id": f"msg_{request_id[:16]}",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": text, "annotations": []}],
-                }
-            ],
-            output_text=text,
+            output=output,
+            output_text="\n".join(text_parts),
             usage=ResponsesUsage(
                 input_tokens=usage.prompt_tokens,
                 output_tokens=usage.completion_tokens,

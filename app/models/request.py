@@ -188,7 +188,16 @@ class ChatCompletionRequest(BaseModel):
 
 
 class ResponsesRequest(BaseModel):
-    """Subset of the OpenAI Responses API accepted by ``/v1/responses``."""
+    """Subset of the OpenAI Responses API accepted by ``/v1/responses``.
+
+    Codex CLI (0.154+) only speaks this wire - ``wire_api = "chat"`` was
+    removed - so the subset covers what a tool-calling agent replaying a full
+    transcript actually sends: ``instructions``, ``input`` items of type
+    ``message`` / ``function_call`` / ``function_call_output``, flat-format
+    ``tools``, ``tool_choice`` and ``reasoning``. ``store`` / ``include`` /
+    ``prompt_cache_key`` / ``previous_response_id`` are accepted and ignored:
+    the gateway is stateless and always receives the whole conversation.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -197,38 +206,156 @@ class ResponsesRequest(BaseModel):
     instructions: str | None = None
     max_output_tokens: int | None = None
     temperature: float | None = None
+    top_p: float | None = None
     stream: bool = False
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
+    reasoning: dict[str, Any] | None = None
+    #: Accepted-and-ignored stateful fields (see class docstring).
+    store: bool | None = None
+    include: list[str] | None = None
+    prompt_cache_key: str | None = None
+    previous_response_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_chat_request(self) -> ChatCompletionRequest:
         """Translate the Responses payload into a chat completion request."""
         messages: list[ChatMessage] = []
         if self.instructions:
             messages.append(ChatMessage(role="system", content=self.instructions))
-        if isinstance(self.input, str):
-            messages.append(ChatMessage(role="user", content=self.input))
-        else:
-            for item in self.input:
-                if not isinstance(item, dict):
-                    continue
-                role = str(item.get("role", "user"))
-                if role not in {"system", "user", "assistant", "tool", "developer"}:
-                    role = "user"
-                content = item.get("content")
-                if isinstance(content, list):
-                    text_parts = [
-                        part.get("text", "")
-                        for part in content
-                        if isinstance(part, dict) and part.get("type") in {"input_text", "text"}
-                    ]
-                    content = "\n".join(p for p in text_parts if p)
-                messages.append(ChatMessage(role=role, content=content))
-        return ChatCompletionRequest(
+        messages.extend(self._translate_input())
+        request = ChatCompletionRequest(
             model=self.model,
             messages=messages,
             max_tokens=self.max_output_tokens,
             temperature=self.temperature,
+            top_p=self.top_p,
             stream=self.stream,
+            tools=translate_responses_tools(self.tools),
+            tool_choice=translate_responses_tool_choice(self.tool_choice),
+            parallel_tool_calls=self.parallel_tool_calls,
         )
+        effort = (self.reasoning or {}).get("effort")
+        if effort:
+            # Same extra-param channel /v1/chat/completions clients use
+            # (``reasoning_effort`` is forwarded, never required).
+            request.__pydantic_extra__ = {
+                **(request.__pydantic_extra__ or {}),
+                "reasoning_effort": effort,
+            }
+        return request
+
+    def _translate_input(self) -> list[ChatMessage]:
+        """``input`` items -> chat messages.
+
+        ``function_call`` becomes an assistant message carrying ``tool_calls``
+        and ``function_call_output`` becomes a ``tool`` message, which is how a
+        chat-completions upstream replays a tool round trip. Hosted-tool and
+        reasoning items have no chat equivalent and are dropped.
+        """
+        if isinstance(self.input, str):
+            return [ChatMessage(role="user", content=self.input)]
+        messages: list[ChatMessage] = []
+        for item in self.input:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type")
+            if kind == "function_call":
+                call_id = str(item.get("call_id") or item.get("id") or _new_call_id())
+                messages.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[
+                            ToolCall(
+                                id=call_id,
+                                function=FunctionCall(
+                                    name=str(item.get("name") or ""),
+                                    arguments=str(item.get("arguments") or ""),
+                                ),
+                            )
+                        ],
+                    )
+                )
+                continue
+            if kind == "function_call_output":
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content=_flatten_text(item.get("output")),
+                        tool_call_id=str(item.get("call_id") or ""),
+                    )
+                )
+                continue
+            if kind and kind != "message":
+                continue  # reasoning / hosted-tool items: no chat equivalent
+            role = str(item.get("role", "user"))
+            if role == "developer":
+                role = "system"
+            if role not in {"system", "user", "assistant", "tool"}:
+                role = "user"
+            messages.append(ChatMessage(role=role, content=_flatten_text(item.get("content"))))
+        return messages
+
+
+def _new_call_id() -> str:
+    return f"call_{uuid.uuid4().hex[:12]}"
+
+
+def _flatten_text(content: Any) -> str | None:
+    """Content parts (``input_text``/``output_text``/``text``/``refusal``) -> text."""
+    if content is None or isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"input_text", "output_text", "text", "refusal", None}:
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def translate_responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Flat Responses tools (``{"type":"function","name":...}``) -> chat format.
+
+    Chat completions expects the nested ``{"type":"function","function":{...}}``
+    envelope; Codex sends the flat one. Already-nested payloads pass through.
+    Hosted tools (web_search, file_search, ...) have no equivalent and are
+    dropped rather than forwarded into an upstream 400.
+    """
+    if not tools:
+        return None
+    translated: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        if "function" in tool:
+            translated.append(tool)
+            continue
+        function = {
+            key: tool[key] for key in ("name", "description", "parameters", "strict") if key in tool
+        }
+        translated.append({"type": "function", "function": function})
+    return translated or None
+
+
+def translate_responses_tool_choice(
+    tool_choice: str | dict[str, Any] | None,
+) -> str | dict[str, Any] | None:
+    """``{"type":"function","name":...}`` -> chat's nested function choice."""
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        if "function" in tool_choice:
+            return tool_choice
+        name = tool_choice.get("name")
+        if name:
+            return {"type": "function", "function": {"name": name}}
+        return "required"
+    return tool_choice
 
 
 def now_ts() -> int:

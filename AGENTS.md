@@ -92,7 +92,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-19 起 371 passed；推送走本机代理，
+- 门禁 ruff / mypy / pytest 全绿（2026-09-20 起 421 passed；推送走本机代理，
   直连常被重置——见记忆 github-push-via-local-proxy）
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
@@ -145,3 +145,39 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
     click**，否则"自动探测"是空转（实测踩过）
   - `.gitignore` 的 `config/*.bak` 已放宽为 `config/*.bak*`（`.bak-xxx` 这类后缀
     原来匹配不到，`git add -A` 会把带密钥的备份带进仓库）
+- 2026-09-20（晚）：①**`/v1/responses` 补齐到 Codex 可用**（`app/api/responses.py`
+  的 `_ResponsesAssembler` + `ResponsesRequest` 全量翻译）：Codex CLI 0.154 起
+  **删掉了 chat wire**（配 `wire_api="chat"` 直接报错），只走 Responses，旧实现
+  （文本子集、无工具、SSE 直接发 `output_text.delta`）会被 codex 报
+  `OutputTextDelta without active item` 丢回复。现在：扁平 tools→嵌套、
+  `function_call`/`function_call_output` input items→assistant.tool_calls/tool
+  消息、输出侧组装 function_call items、流式按标准事件链
+  （created→output_item.added→content_part.added→delta→done→completed 完整
+  负载）。**临时实例 E2E 实测通过**：codex exec 写文件→执行→验证全闭环。
+  codex 接入配置见使用手册 §3.4（`[model_providers.zkai]` 纯增量，不依赖
+  ChatGPT 账号）。测试 `tests/test_responses_api.py`。②**商汤 Key 结构调整**：
+  01/02（同账号 A）已被操作员禁用（DB `credentials` 表 status=disabled），
+  现役 = 03–09 共 **7 账号 7 Key，每账号一把**；`max_credentials_per_deployment`
+  随之改为「单请求可轮换的账号数」，**删这行不会取消限制**（`from_mapping`
+  回落默认 3），加账号时同步 +1。yaml 里 01/02 两条僵尸条目待清理；
+  providers.yaml 注释 / README / 使用手册里「9 把 Key、最多 8 账号」的旧描述
+  已一并更正
+- 2026-09-20（深夜，托盘/桌面版接入实测坑）：
+  - **`CREATE_NO_WINDOW | DETACHED_PROCESS` 会让 powershell 的 CIM 查询静默返回空**
+    （rc=0、stdout 空）——`port_guard` 一直没被发现是因为它有 `/health` HTTP
+    兜底识别。短命探测进程（CIM/taskkill）要用裸 `CREATE_NO_WINDOW`
+    （`launch_hidden._PROBE_FLAGS`）；托盘 spawn 仍可用组合标志
+  - **托盘「重启」原来会卡死菜单**：`_ChildProcess.start()` 最长阻塞 ~40s
+    （terminate + port_guard + spawn）全跑在 pystray 菜单线程上，点击像死了。
+    已改 `restart_child()` 后台线程执行，心跳（3s）负责重绘图标
+  - **`launch_hidden.py` 加了防双开**：双击 cmd 原来会起第二个托盘，新托盘的
+    port_guard 杀掉旧托盘的孩子 → 旧托盘变蓝、通知区留幽灵图标。现在启动前
+    CIM 找同 mode 旧托盘，先 `taskkill`（无 /F，WM_CLOSE 让 pystray 自己撤图标），
+    5s 宽限后 /F /T。测试 `test_launch_helpers.py` / `test_tray_launcher.py`
+  - **ChatGPT 桌面版（26.915）接网关三要素**：`~/.codex/config.toml` 的
+    `[model_providers.zkai]`（wire_api="responses"）+ `ZKAI_API_TOKEN` 必须设为
+    **Windows 用户级环境变量**（app 从 explorer 启动不继承 shell 变量，缺了会回
+    "Missing environment variable"）+ **重启 app**（运行中的实例不重读配置）。
+    该版本桌面版**没有模型选择器**，模型完全由 config 的 `model` 决定；app 会用
+    picker 里的旧官方模型名探测网关（收到 404 model_not_found，无害）后落到
+    config 的 model。API key 登录态存 `~/.codex/auth.json`，重启不丢
