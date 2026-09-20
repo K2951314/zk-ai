@@ -293,6 +293,9 @@ def make_config(
     settings = Settings(
         environment="test",
         admin_token=admin_token,
+        # Pin the token too: this machine's .env sets ZKAI_API_TOKEN, and an
+        # unpinned gateway would 401 every test client that posts to /v1/*.
+        api_token=None,
         health_check_mode="off",
         health_check_on_startup=False,
         allow_inline_secrets=True,

@@ -184,3 +184,14 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
     该版本桌面版**没有模型选择器**，模型完全由 config 的 `model` 决定；app 会用
     picker 里的旧官方模型名探测网关（收到 404 model_not_found，无害）后落到
     config 的 model。API key 登录态存 `~/.codex/auth.json`，重启不丢
+- 2026-09-20（商汤工具历史校验坑，实测复现）：**sensenova 对 chat 工具历史的
+  校验比 OpenAI 严**——①`function_call_output` 的 call_id 没有对应
+  function_call（孤儿输出，如编辑/打断过的会话重放）②对话以未应答的
+  function_call 结尾（悬空调用）——两者都直接 HTTP 400 `inference request is
+  invalid` 且**不故障转移**（400 归类为客户错误），桌面版一旦重放到这种历史就
+  永远打不通。`ResponsesRequest._translate_input` 已修复：连续 function_call
+  合并进单个 assistant 消息、孤儿输出丢弃、悬空调用立刻补一条
+  `(no output recorded)` 的 tool 消息（紧跟其 assistant 消息）。回归测试
+  `tests/test_responses_api.py`。另：本机 .env 设了 `ZKAI_API_TOKEN` 后会泄漏进
+  测试容器导致全体 401——`make_config` 已钉 `api_token=None`（与既有
+  strip_reasoning 钉法同源）

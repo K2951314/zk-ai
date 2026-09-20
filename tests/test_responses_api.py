@@ -514,3 +514,117 @@ async def test_non_streaming_recovered_reasoning_is_stripped(responses_api) -> N
     body = response.json()
     assert body["output_text"] == ""
     assert body["output"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Tool-history repair (SenseNova 400 "inference request is invalid")
+# --------------------------------------------------------------------------- #
+async def test_orphan_function_call_output_is_dropped(responses_api) -> None:
+    """An output whose call has no matching function_call makes SenseNova 400."""
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(model="fake-model", content="ok")
+    body = {
+        "model": "fake-model",
+        "input": [
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "function_call_output", "call_id": "call_ghost", "output": "stray"},
+        ],
+        **CODEX_HEAD,
+    }
+    response = await client.post("/v1/responses", json=body)
+    assert response.status_code == 200
+    roles = [m.role for m in adapter.requests[0].messages]
+    assert "tool" not in roles, "orphan output must not reach the upstream"
+    assert roles == ["system", "user"]
+
+
+async def test_dangling_function_call_gets_synthetic_output(responses_api) -> None:
+    """A call that never got its output also makes SenseNova 400."""
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(model="fake-model", content="ok")
+    body = {
+        "model": "fake-model",
+        "input": [
+            {"type": "message", "role": "user", "content": "list files"},
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd": "ls"}',
+                "call_id": "call_open",
+            },
+        ],
+        **CODEX_HEAD,
+    }
+    response = await client.post("/v1/responses", json=body)
+    assert response.status_code == 200
+    messages = adapter.requests[0].messages
+    assert messages[-1].role == "tool"
+    assert messages[-1].tool_call_id == "call_open"
+    assert messages[-1].content == "(no output recorded)"
+    assert messages[-2].role == "assistant"
+    assert messages[-2].tool_calls[0].id == "call_open"
+
+
+async def test_dangling_call_before_a_message_is_answered_in_place(responses_api) -> None:
+    """The synthetic output must sit directly after its assistant message."""
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(model="fake-model", content="ok")
+    body = {
+        "model": "fake-model",
+        "input": [
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd": "ls"}',
+                "call_id": "call_mid",
+            },
+            {"type": "message", "role": "user", "content": "never mind, just say hi"},
+        ],
+        **CODEX_HEAD,
+    }
+    response = await client.post("/v1/responses", json=body)
+    assert response.status_code == 200
+    roles = [(m.role, m.tool_call_id) for m in adapter.requests[0].messages]
+    assert roles == [
+        ("system", None),
+        ("assistant", None),
+        ("tool", "call_mid"),
+        ("user", None),
+    ]
+
+
+async def test_parallel_function_calls_merge_into_one_assistant_message(responses_api) -> None:
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(model="fake-model", content="ok")
+    body = {
+        "model": "fake-model",
+        "input": [
+            {"type": "message", "role": "user", "content": "run both"},
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd": "a"}',
+                "call_id": "call_p1",
+            },
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd": "b"}',
+                "call_id": "call_p2",
+            },
+            {"type": "function_call_output", "call_id": "call_p1", "output": "out-a"},
+            {"type": "function_call_output", "call_id": "call_p2", "output": "out-b"},
+        ],
+        **CODEX_HEAD,
+    }
+    response = await client.post("/v1/responses", json=body)
+    assert response.status_code == 200
+    messages = adapter.requests[0].messages
+    assistants = [m for m in messages if m.role == "assistant"]
+    assert len(assistants) == 1, "parallel calls share one assistant message"
+    assert [c.id for c in assistants[0].tool_calls] == ["call_p1", "call_p2"]
+    tools = [m for m in messages if m.role == "tool"]
+    assert [(m.tool_call_id, m.content) for m in tools] == [
+        ("call_p1", "out-a"),
+        ("call_p2", "out-b"),
+    ]

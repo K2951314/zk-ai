@@ -249,53 +249,87 @@ class ResponsesRequest(BaseModel):
     def _translate_input(self) -> list[ChatMessage]:
         """``input`` items -> chat messages.
 
-        ``function_call`` becomes an assistant message carrying ``tool_calls``
-        and ``function_call_output`` becomes a ``tool`` message, which is how a
-        chat-completions upstream replays a tool round trip. Hosted-tool and
-        reasoning items have no chat equivalent and are dropped.
+        Tool rounds are replayed the way a chat-completions upstream expects:
+        consecutive ``function_call`` items merge into ONE assistant message
+        carrying every ``tool_calls``, and each ``function_call_output``
+        becomes the matching ``tool`` message.
+
+        SenseNova validates that history strictly - it answers HTTP 400
+        "inference request is invalid" for shapes OpenAI tolerates - so two
+        repairs happen here: an output whose ``call_id`` matches no open call
+        (orphan, e.g. an edited-away turn) is dropped, and a call that never
+        received its output (dangling, e.g. an interrupted turn) gets a
+        synthetic response right after its assistant message. Without this a
+        replayed Codex conversation that once interrupted a tool call can never
+        be served again.
         """
         if isinstance(self.input, str):
             return [ChatMessage(role="user", content=self.input)]
         messages: list[ChatMessage] = []
+        #: Consecutive function_call items, merged into one assistant message.
+        pending: list[ToolCall] = []
+        #: call ids of the last assistant message still awaiting their output.
+        open_calls: list[str] = []
+
+        def flush_calls() -> None:
+            if not pending:
+                return
+            messages.append(ChatMessage(role="assistant", content=None, tool_calls=pending))
+            open_calls.extend(call.id for call in pending)
+            pending.clear()
+
+        def answer_open_calls() -> None:
+            for call_id in open_calls:
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content="(no output recorded)",
+                        tool_call_id=call_id,
+                    )
+                )
+            open_calls.clear()
+
         for item in self.input:
             if not isinstance(item, dict):
                 continue
             kind = item.get("type")
             if kind == "function_call":
                 call_id = str(item.get("call_id") or item.get("id") or _new_call_id())
-                messages.append(
-                    ChatMessage(
-                        role="assistant",
-                        content=None,
-                        tool_calls=[
-                            ToolCall(
-                                id=call_id,
-                                function=FunctionCall(
-                                    name=str(item.get("name") or ""),
-                                    arguments=str(item.get("arguments") or ""),
-                                ),
-                            )
-                        ],
+                pending.append(
+                    ToolCall(
+                        id=call_id,
+                        function=FunctionCall(
+                            name=str(item.get("name") or ""),
+                            arguments=str(item.get("arguments") or ""),
+                        ),
                     )
                 )
                 continue
             if kind == "function_call_output":
-                messages.append(
-                    ChatMessage(
-                        role="tool",
-                        content=_flatten_text(item.get("output")),
-                        tool_call_id=str(item.get("call_id") or ""),
+                flush_calls()
+                call_id = str(item.get("call_id") or "")
+                if call_id in open_calls:
+                    messages.append(
+                        ChatMessage(
+                            role="tool",
+                            content=_flatten_text(item.get("output")),
+                            tool_call_id=call_id,
+                        )
                     )
-                )
-                continue
+                    open_calls.remove(call_id)
+                continue  # orphan output (no open call): dropped, upstream would 400
             if kind and kind != "message":
                 continue  # reasoning / hosted-tool items: no chat equivalent
+            flush_calls()
+            answer_open_calls()
             role = str(item.get("role", "user"))
             if role == "developer":
                 role = "system"
             if role not in {"system", "user", "assistant", "tool"}:
                 role = "user"
             messages.append(ChatMessage(role=role, content=_flatten_text(item.get("content"))))
+        flush_calls()
+        answer_open_calls()
         return messages
 
 
