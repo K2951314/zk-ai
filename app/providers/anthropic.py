@@ -456,6 +456,16 @@ class AnthropicAdapter(ProviderAdapter):
                         content=str(delta["text"]),
                         chunk_id=message_id,
                     )
+                elif delta_type == "thinking_delta" and delta.get("thinking"):
+                    # Thinking deltas travel as a ``reasoning`` extra on the chunk,
+                    # mirroring the non-streaming normalize_response path. Dropping
+                    # them silently breaks ZKAI_STRIP_REASONING (nothing to strip)
+                    # and the /v1/messages thinking-block re-emission.
+                    chunk = self._chunk(model=ctx.upstream_model, chunk_id=message_id)
+                    delta_extra = chunk.choices[0].delta.model_extra
+                    if delta_extra is not None:
+                        delta_extra["reasoning"] = str(delta["thinking"])
+                    yield chunk
                 elif delta_type == "input_json_delta":
                     yield self._chunk(
                         model=ctx.upstream_model,

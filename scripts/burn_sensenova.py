@@ -383,6 +383,10 @@ class Burner:
         self.started = time.time()
         self.use_stream_options = True
         self.url = args.base_url.rstrip("/") + "/chat/completions"
+        # 自动校准状态
+        self._calibrating = False
+        self._calibrate_start_in = 0
+        self._calibrate_start_out = 0
         self.log_path = Path(args.log_file)
         self.state_file = Path(args.state_file)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -694,6 +698,77 @@ class Burner:
         self.total.recent.clear()
         self.log(f"所有 Key 都在限流且暂无在飞请求，全局退避 {pause:.0f}s", "WARN")
 
+    # ---- 自动校准：烧够阈值后暂停，查实扣，算精确费率，继续 ----------------
+    def _maybe_auto_calibrate(self) -> None:
+        """烧够 --auto-calibrate 指定的 token 量后，暂停消耗并提示用户校准。"""
+        if not self.args.auto_calibrate or self._calibrating:
+            return
+        burned_tokens = (self.total.tokens_in - self._calibrate_start_in
+                         + self.total.tokens_out - self._calibrate_start_out)
+        if burned_tokens < self.args.auto_calibrate * 1e6:
+            return
+        self._calibrating = True
+        self.save_state()
+        self.log("=" * 72, "WARN")
+        self.log("自动校准：已烧够 "
+                 f"{self.args.auto_calibrate:.0f}M token（本段 "
+                 f"{htokens(self.total.tokens_in - self._calibrate_start_in)}入 "
+                 f"{htokens(self.total.tokens_out - self._calibrate_start_out)}出），"
+                 "消耗已暂停。", "WARN")
+        self.log("请去商汤控制台「积分消耗明细」查本时段实扣积分，"
+                 "然后运行：", "WARN")
+        self.log("  python scripts/burn_sensenova.py --calibrate-actual <实扣积分>", "WARN")
+        self.log("算出的费率写入账本后，重新启动消耗器即可继续（费率持久化，"
+                 "重启不丢）。", "WARN")
+        self.log("=" * 72, "WARN")
+
+    def apply_calibrated_rates(self, r_in: float, r_out: float) -> None:
+        """把校准后的费率写进 args 并持久化到账本。"""
+        old_in, old_out = self.args.rate_in, self.args.rate_out
+        self.args.rate_in = r_in
+        self.args.rate_out = r_out
+        # 费率精确了，安全系数可以提到 0.9（不再预留 2 倍不确定性）
+        if not self.args.auto_calibrate_keep_margin:
+            self.args.safety_margin = 0.9
+            self.cap5h = self.args.window_credits * 0.9
+            self.capweek = self.args.weekly_credits * 0.9
+        # 把费率存到账本里，重启后 load_state 恢复
+        self._save_rates_to_state(r_in, r_out)
+        self.log(f"费率已校准：入 {old_in:.0f}→{r_in:.0f}，出 {old_out:.0f}→{r_out:.0f}"
+                 f" 积分/百万token；安全系数 → {self.args.safety_margin}", "WARN")
+
+    def _save_rates_to_state(self, r_in: float, r_out: float) -> None:
+        """把校准后的费率写进账本文件（与 load_state/save_state 同文件）。"""
+        import json
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data["rate_in"] = r_in
+        data["rate_out"] = r_out
+        data["safety_margin"] = self.args.safety_margin
+        with contextlib.suppress(OSError):
+            tmp = self.state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.state_file)
+
+    def _load_rates_from_state(self) -> None:
+        """从账本恢复上次校准的费率（如果存过）。"""
+        import json
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if "rate_in" in data and "rate_out" in data:
+            self.args.rate_in = float(data["rate_in"])
+            self.args.rate_out = float(data["rate_out"])
+            if "safety_margin" in data:
+                self.args.safety_margin = float(data["safety_margin"])
+                self.cap5h = self.args.window_credits * self.args.safety_margin
+                self.capweek = self.args.weekly_credits * self.args.safety_margin
+            self.log(f"已从账本恢复校准费率：入{self.args.rate_in:.0f}/出{self.args.rate_out:.0f}"
+                     f" 积分/百万token，安全系数 {self.args.safety_margin}")
+
     # ---- 周期汇总 ----------------------------------------------------------
     async def periodic_summary(self) -> None:
         while not self.stop.is_set():
@@ -716,6 +791,7 @@ class Burner:
                         and time.time() - acct.last_429 > 60:
                     acct.target += 1
             self.save_state()
+            self._maybe_auto_calibrate()
             elapsed = time.time() - self.started
             rate_in = (self.total.tokens_in - self.base_in) / max(1e-9, elapsed)
             rate_out = (self.total.tokens_out - self.base_out) / max(1e-9, elapsed)
@@ -735,6 +811,10 @@ class Burner:
     # ---- 工作协程 ----------------------------------------------------------
     async def _worker(self, client: httpx.AsyncClient) -> None:
         while not self.stop.is_set():
+            # 自动校准暂停：烧够阈值后停发新请求，等用户校准
+            if self._calibrating:
+                await asyncio.sleep(5)
+                continue
             if self.all_keys_dead():
                 self.log("所有 Key 都已永久失效，任务结束", "ERROR")
                 return
@@ -927,6 +1007,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--calibrate-actual", type=float, default=0,
                    help="校准模式：传入控制台「积分消耗明细」里与账本同时段的实扣积分"
                         "（如 --calibrate-actual 7000），算出精确费率后退出，不烧积分")
+    p.add_argument("--auto-calibrate", type=float, default=0, metavar="TOKENS",
+                   help="自动校准：每烧够 N 百万 token 暂停一次，提示输入控制台实扣积分，"
+                        "自动算出精确费率并继续烧。0 = 关闭。推荐 5（约 1~2 小时烧到）")
+    p.add_argument("--auto-calibrate-keep-margin", action="store_true",
+                   help="自动校准后保持原安全系数（默认校准后自动提到 0.9，因为费率已精确）")
     return p.parse_args(argv)
 
 
@@ -958,21 +1043,34 @@ def main(argv: list[str] | None = None) -> int:
         n = apply_anchors(args.anchors, keys, burner.log)
         if n == 0:
             print("WARN: --anchors 没有生效到任何账号，将退回滚动窗口模型", file=sys.stderr)
+    burner._load_rates_from_state()
     if burner.load_state():
         burner.base_in, burner.base_out = burner.total.tokens_in, burner.total.tokens_out
         burner.log(f"已恢复历史账本：{htokens(burner.total.tokens_in)}入"
                    f" {htokens(burner.total.tokens_out)}出 ≈{burner.total.credits:.0f}积分"
                    f"（累计口径连续，可与控制台直接对比）")
+    # 自动校准基线：从恢复后的账本算起
+    burner._calibrate_start_in = burner.total.tokens_in
+    burner._calibrate_start_out = burner.total.tokens_out
     if args.calibrate_actual > 0:
         r_in, r_out = burner.suggest_rates(args.calibrate_actual)
         tin = sum(k.tokens_in for k in burner.keys)
         tout = sum(k.tokens_out for k in burner.keys)
         print(f"账本累计：入 {tin:,} + 出 {tout:,} token")
         print(f"你给的实扣：{args.calibrate_actual:,.0f} 积分")
-        print(f"建议费率：--rate-in {r_in:.0f} --rate-out {r_out:.0f}")
-        print("注意：实扣数必须与账本覆盖同一时段（控制台明细的时间范围要包住日志"
-              "第一次启动的时间），且期间网关没烧过 flash-lite（那也计同一池）。")
-        return 0
+        print(f"精确费率：入 {r_in:.0f} / 出 {r_out:.0f} 积分/百万token")
+        if args.auto_calibrate:
+            # 自动校准模式：写入账本并继续烧
+            burner.apply_calibrated_rates(r_in, r_out)
+            burner._calibrating = False
+            burner._calibrate_start_in = burner.total.tokens_in
+            burner._calibrate_start_out = burner.total.tokens_out
+            burner.log("校准完成，费率已持久化到账本，继续烧。", "WARN")
+        else:
+            print(f"建议启动参数：--rate-in {r_in:.0f} --rate-out {r_out:.0f}")
+            print("注意：实扣数必须与账本覆盖同一时段（控制台明细的时间范围要包住日志"
+                  "第一次启动的时间），且期间网关没烧过 flash-lite（那也计同一池）。")
+            return 0
     if burner.cap5h <= 0 or burner.capweek <= 0:
         burner.log("危险：积分预算已关闭（--window-credits/--weekly-credits ≤ 0），"
                    "专属池烧完后会静默扣通用池（kimi-k3 的积分）！", "ERROR")
@@ -1003,6 +1101,9 @@ def main(argv: list[str] | None = None) -> int:
         f" → 单条请求 ≈{burner.request_cost(build_messages(args)):.0f} 积分"
         f"（预算按此口径记账，系数已含费率不确定性）"
     )
+    if args.auto_calibrate:
+        burner.log(f"自动校准：每 {args.auto_calibrate:.0f}M token 暂停一次提示校准"
+                   f"（当前费率 入{args.rate_in:.0f}/出{args.rate_out:.0f}）")
     burner.log(f"接口：{burner.url}")
     anchored = [a for a in burner.accounts if a.anchor_ts]
     if anchored:

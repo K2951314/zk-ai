@@ -1058,3 +1058,146 @@ async def request_detail(request_id: str, container: ContainerDep) -> dict[str, 
 async def backfill_cost(container: ContainerDep) -> dict[str, Any]:
     """Reprice usage rows recorded before list prices existed (console button)."""
     return await container.usage_service.backfill_zero_cost()
+
+
+# --------------------------------------------------------------------------- #
+# ChatGPT / Codex desktop (~/.codex/config.toml + the zk-auto alias)
+#
+# The desktop app reads config.toml once at startup and never reloads it, so
+# rewriting ``model = ...`` there only applies after an app restart. But the
+# app already sends ``model = "zk-auto"`` and the router resolves aliases
+# per-request. The console therefore hot-swaps zk-auto's target list - the
+# next message in a running conversation already uses the new model.
+# config.toml is never rewritten.
+# --------------------------------------------------------------------------- #
+
+_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
+
+#: The alias the desktop app already sends.
+CHATGPT_ALIAS = "zk-auto"
+
+
+def _codex_config_path() -> Path:
+    return _CODEX_CONFIG
+
+
+def _read_codex_config() -> dict[str, str] | None:
+    """Parse model / model_provider from config.toml (top-level keys only)."""
+    path = _codex_config_path()
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip(chr(34)).strip(chr(39)).strip()
+        if key in ("model", "model_provider"):
+            result[key] = value
+        if len(result) == 2:
+            break
+    return result if result else None
+
+
+def _chatgpt_choices(container: ContainerDep) -> list[str]:
+    """Selectable targets: enabled aliases (except our own) + enabled models."""
+    aliases = sorted(
+        name
+        for name, a in container.config.aliases.items()
+        if a.enabled and name != CHATGPT_ALIAS
+    )
+    models = sorted(m.id for m in container.config.models.values() if m.enabled)
+    return aliases + models
+
+
+def _chatgpt_state(container: ContainerDep) -> dict[str, Any]:
+    """Current effective model = zk-auto's first target; plus config.toml state."""
+    cfg = _read_codex_config() or {}
+    config_model = cfg.get("model", "")
+    alias = container.config.aliases.get(CHATGPT_ALIAS)
+    effective = alias.targets[0] if alias and alias.targets else ""
+    return {
+        "ok": True,
+        "path": str(_codex_config_path()),
+        "alias": CHATGPT_ALIAS,
+        "alias_exists": alias is not None,
+        "effective_model": effective,
+        "config_model": config_model,
+        "config_provider": cfg.get("model_provider", ""),
+        "pinned": config_model == CHATGPT_ALIAS,
+        "choices": _chatgpt_choices(container),
+    }
+
+
+@router.get("/chatgpt", summary="ChatGPT/Codex desktop: current model")
+async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
+    cfg_path = _codex_config_path()
+    if not cfg_path.exists():
+        return {"ok": False, "detail": f"not found: {cfg_path}"}
+    return _chatgpt_state(container)
+
+
+@router.post("/chatgpt", summary="ChatGPT/Codex desktop: switch model (hot)")
+async def set_chatgpt_model(
+    container: ContainerDep, payload: dict[str, str] = Body(...)
+) -> dict[str, Any]:
+    """Promote *model* to the front of zk-auto's target chain - takes effect
+    on the next request, no desktop restart needed. The original chain order is
+    preserved behind the new first target so fallback still works."""
+    model = payload.get("model", "").strip()
+    if not model:
+        raise HTTPException(
+            status_code=400, detail={"error": {"message": "model is required"}}
+        )
+    known = _chatgpt_choices(container)
+    if model not in known:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": f"unknown model or alias: {model}"}},
+        )
+
+    existing = container.config.aliases.get(CHATGPT_ALIAS)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"message": f"alias '{CHATGPT_ALIAS}' not found"}},
+        )
+
+    # Build the new target chain: chosen model first, then the rest unchanged.
+    old_targets = [t for t in existing.targets if t != model]
+    new_targets = [model, *old_targets]
+
+    alias = ModelAliasConfig(
+        name=CHATGPT_ALIAS,
+        description=existing.description,
+        strategy=existing.strategy,
+        targets=new_targets,
+        enabled=True,
+        weights=dict(existing.weights),
+        requires=dict(existing.requires),
+    )
+    synced = _write_alias_file(container, alias)
+    container.router.aliases.upsert(alias)
+    container.config.aliases[alias.name] = alias
+    await container.config_repository.upsert_alias(
+        alias.name,
+        targets=list(alias.targets),
+        strategy=alias.strategy.value,
+        enabled=alias.enabled,
+        weights=dict(alias.weights),
+        requires=dict(alias.requires),
+        description=alias.description,
+    )
+
+    return {
+        "ok": True,
+        "model": model,
+        "effective": True,
+        "restart_required": False,
+        "targets": new_targets,
+        "synced": synced,
+        "path": str(_codex_config_path()),
+    }

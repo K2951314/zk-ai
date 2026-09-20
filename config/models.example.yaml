@@ -269,6 +269,39 @@ models:
 # requires: 硬门槛，如 {vision: 1} 表示「必须能看图」，不满足的模型直接淘汰
 # weights : 该别名专属的打分权重（覆盖系统按请求推断出的权重）
 # ===========================================================================
+  # -------------------------------------------------------------------------
+  # StepFun step-5-preview (paid). Pricing: https://platform.stepfun.com/docs/zh/guides/pricing/details
+  # input 7 CNY/M (cache miss) / 0.35 CNY/M (cache hit), output 20 CNY/M
+  # => ~0.97 / 2.78 USD per M tokens
+  # -------------------------------------------------------------------------
+  - id: step-5-preview
+    display_name: Step 5 Preview
+    enabled: true
+    context_window: 1024000
+    capabilities:
+      coding: 8.5
+      reasoning: 8.5
+      tool_use: 8.0
+      vision: 10.0
+      long_context: 10.0
+      structured_output: 8.0
+      speed: 5.5
+      cost: 7.0
+    deployments:
+      - id: step-5-preview-StepFun
+        provider_id: StepFun
+        model: step-5-preview
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 1000000
+        max_output_tokens: 32768
+        capabilities: {}
+        input_cost_per_mtok: 0.97
+        output_cost_per_mtok: 2.78
+        options: {}
+        tags: []
+
 aliases:
   - name: zk-auto
     description: 默认入口：均衡型，由能力路由按每次请求的内容选模型

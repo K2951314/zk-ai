@@ -532,3 +532,78 @@ class TestAnthropicThinkingBlocks:
         assert response.choices[0].finish_reason == "tool_calls"
         assert message.tool_calls[0].function.name == "get_weather"
         assert message.model_extra["reasoning"] == "要调用工具"
+    @pytest.mark.asyncio
+    async def test_stream_thinking_delta_is_not_dropped(self) -> None:
+        """Anthropic streaming thinking_delta events must surface as reasoning extras."""
+        import json
+
+        from app.models.provider import ModelConfig
+        from app.models.request import ChatCompletionRequest
+        from app.providers.base import ProviderContext
+
+        adapter = self._adapter()
+        ctx = ProviderContext(
+            request_id="t",
+            deployment=DeploymentConfig(id="d", provider_id="stepfun", model="step-3.7-flash"),
+            model=ModelConfig(id="step-3.7-flash"),
+        )
+        request = ChatCompletionRequest(
+            model="step-3.7-flash", messages=[{"role": "user", "content": "hi"}]
+        )
+
+        def _sse(payload: dict) -> str:
+            return "data: " + json.dumps(payload, ensure_ascii=False)
+
+        class FakeResp:
+            status_code = 200
+
+            async def aiter_lines(self):
+                events = [
+                    {"type": "message_start",
+                     "message": {"id": "msg_1", "usage": {"input_tokens": 5}}},
+                    {"type": "content_block_start", "index": 0,
+                     "content_block": {"type": "thinking", "thinking": ""}},
+                    {"type": "content_block_delta", "index": 0,
+                     "delta": {"type": "thinking_delta", "thinking": "先想"}},
+                    {"type": "content_block_stop", "index": 0},
+                    {"type": "content_block_start", "index": 1,
+                     "content_block": {"type": "text", "text": ""}},
+                    {"type": "content_block_delta", "index": 1,
+                     "delta": {"type": "text_delta", "text": "你好"}},
+                    {"type": "content_block_stop", "index": 1},
+                    {"type": "message_delta",
+                     "delta": {"stop_reason": "end_turn"},
+                     "usage": {"output_tokens": 10}},
+                    {"type": "message_stop"},
+                ]
+                for event in events:
+                    yield _sse(event)
+                    yield ""
+
+            async def aread(self):
+                return b""
+
+            async def aclose(self):
+                return None
+
+        class FakeClient:
+            is_closed = False
+
+            def build_request(self, *a, **k):
+                return None
+
+            async def send(self, *a, **k):
+                return FakeResp()
+
+        adapter._client = FakeClient()
+        chunks = [chunk async for chunk in adapter.stream(request, ctx)]
+
+        reasoning_chunks = [
+            c for c in chunks
+            if c.choices and (c.choices[0].delta.model_extra or {}).get("reasoning")
+        ]
+        text_chunks = [c for c in chunks if c.choices and c.choices[0].delta.content]
+        assert len(reasoning_chunks) == 1
+        assert reasoning_chunks[0].choices[0].delta.model_extra["reasoning"] == "先想"
+        assert any("你好" in (c.choices[0].delta.content or "") for c in text_chunks)
+

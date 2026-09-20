@@ -143,6 +143,7 @@
   <button id="btn-theme" title="切换浅色/暗色">🌙</button>
   <button id="btn-refresh">⟳ 刷新</button>
   <button id="btn-token">🔑 令牌</button>
+  <button id="btn-chatgpt" title="ChatGPT / Codex 桌面版设置">🤖 ChatGPT</button>
 </header>
 
 <nav id="tabs">
@@ -169,6 +170,7 @@
 <div class="modal-mask" id="market-modal"></div>
 <div class="modal-mask" id="addkey-modal"></div>
 <div class="modal-mask" id="providers-modal"></div>
+<div class="modal-mask" id="chatgpt-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
   <div class="small muted">把项目 <code>.env</code> 里 <code>ZKAI_ADMIN_TOKEN=</code> 后面那串原样粘进来（改过 <code>.env</code> 后令牌会变，浏览器里存的旧值需要重新粘）。令牌保存在本机 localStorage。</div>
@@ -1509,6 +1511,63 @@ async function deleteAlias(name) {
   } catch (err) { toast(err.message, "err"); }
 }
 
+/* ================= ChatGPT / Codex 桌面版 ================= */
+async function openChatGptModal() {
+  const modal = $("#chatgpt-modal");
+  modal.innerHTML = `<div class="card">
+    <h3>🤖 ChatGPT / Codex 桌面版</h3>
+    <div id="cg-loading" class="small muted">读取中…</div>
+    <div id="cg-body" style="display:none">
+      <div class="small muted" style="margin-bottom:10px">
+        桌面版发送的模型是 <code>zk-auto</code>，这里换模型 = 把所选模型提到
+        <code>zk-auto</code> 兜底链的最前面。<strong>立即生效</strong>，不用重启桌面版。
+      </div>
+      <div class="formgrid">
+        <label>当前首选模型
+          <select id="cg-model"></select>
+        </label>
+      </div>
+      <div class="small muted" id="cg-chain" style="margin-top:8px"></div>
+      <div class="row-flex" style="margin-top:14px">
+        <button class="primary" id="cg-save">💾 保存</button>
+        <button id="cg-cancel">取消</button>
+      </div>
+    </div>
+  </div>`;
+  modal.classList.add("show");
+  $("#cg-cancel").onclick = () => modal.classList.remove("show");
+  try {
+    const r = await api("/admin/chatgpt");
+    if (!r.ok) {
+      $("#cg-loading").textContent = r.detail || "读取失败";
+      return;
+    }
+    $("#cg-loading").style.display = "none";
+    $("#cg-body").style.display = "";
+    const sel = $("#cg-model");
+    const current = r.effective_model || "";
+    const options = (r.choices || []).map(c =>
+      `<option value="${esc(c)}" ${c === current ? "selected" : ""}>${esc(c)}</option>`
+    ).join("");
+    const currentOpt = current && !(r.choices || []).includes(current)
+      ? `<option value="${esc(current)}" selected>${esc(current)} (当前)</option>` : "";
+    sel.innerHTML = currentOpt + options;
+    $("#cg-chain").textContent = "zk-auto 兜底链: " + (r.targets || []).join(" → ");
+    $("#cg-save").onclick = async () => {
+      const model = sel.value.trim();
+      if (!model) { toast("模型不能为空", "err"); return; }
+      try {
+        const r2 = await api("/admin/chatgpt", { method: "POST", json: { model } });
+        if (r2.error) { toast(r2.error.message || "保存失败", "err"); return; }
+        toast(`已切换为 ${model}，下一条消息生效`, "ok");
+        modal.classList.remove("show");
+      } catch (err) { toast(err.message, "err"); }
+    };
+  } catch (err) {
+    $("#cg-loading").textContent = "读取失败: " + err.message;
+  }
+}
+
 /* ================= 令牌 / 启动 ================= */
 function showAuth() { $("#auth").classList.add("show"); $("#auth-token").value = state.token; $("#auth-token").focus(); }
 $("#auth-save").onclick = () => {
@@ -1518,6 +1577,7 @@ $("#auth-save").onclick = () => {
 };
 $("#auth-cancel").onclick = () => $("#auth").classList.remove("show");
 $("#btn-token").onclick = showAuth;
+$("#btn-chatgpt").onclick = openChatGptModal;
 $("#btn-refresh").onclick = () => refresh();
 $("#auto-interval").onchange = setupTimer;
 /* 主题切换：浅色（默认，对齐参考项目）/ 暗色，localStorage 持久化 */
