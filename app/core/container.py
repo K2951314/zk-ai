@@ -184,7 +184,15 @@ async def build_container(
         for provider in config.providers.values():
             pool.register_provider(provider)
     if pool.rate_limiter is None:
-        pool.rate_limiter = RateLimiter(settings.resolved_data_dir / "rate_limits.json")
+        # environment="test" containers carry the synthetic "fake" provider's
+        # counters; writing them into the operator's real data dir is pollution
+        # (a test container also has no data_dir of its own).
+        state_file = (
+            None
+            if settings.environment == "test"
+            else settings.resolved_data_dir / "rate_limits.json"
+        )
+        pool.rate_limiter = RateLimiter(state_file)
     rate_limiter = pool.rate_limiter
     rate_limiter.configure(config.providers)
 

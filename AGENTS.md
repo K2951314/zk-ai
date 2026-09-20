@@ -116,3 +116,32 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - 门禁 ruff / mypy / pytest 全绿（371 passed）；E2E 实测（8400 临时实例）：会话
   创建→真实路由→tool_calls→审批→命令执行→结果回填全链路通；第二步因当天
   K3/GLM 链路整体超时正确转入 failed（上游波动，非 Agent bug）
+- 2026-09-20（供应商生命周期 + 易用性收口，实测坑）：
+  - **运行时改 provider 必须同步 adapter 表**：`Router._adapters` 只由构造/reload 重建，
+    运行时增删/禁用 provider 要走 `upsert_adapter()` / `remove_adapter()`，否则下一步
+    探测模型报 `provider 'X' is unknown or disabled`（500，极具误导性）
+  - **Key 只进 `.env`**：控制台 `write_env` 写 `.env` 并即时写 `os.environ`（无需重启生效），
+    YAML 只记变量名；`looks_like_secret()` 拦「40+ 位无分隔串填进 ID 栏」（真出过事：
+    Key 曾以 credential id 形态流进 yaml/db/界面/日志）。改已泄露的条目记得连 `.bak`
+    和 `data/gateway.log` 一起清
+  - **Anthropic 系供应商两个坑**：①`/messages` 认 `x-api-key` 但 `/models` 可能只认
+    `Authorization: Bearer`（StepFun 即如此），`list_models`/`model_catalogue` 要带 Bearer
+    回退；②`thinking` 块不能丢——小 `max_tokens` 截断在思考阶段会让客户端拿到空正文，
+    按项目约定进 `reasoning` extra 走 `_recover_reasoning_only_content` 回填
+    （该 helper 在 `ProviderAdapter` 基类；tool_calls 轮不回填，否则给工具调用粘上思考文本）
+  - **启动即用**：`scripts/open_console.py` 等端口后带 `?token=` 开控制台（令牌变了才需重粘）；
+    `scripts/first_run.py` 自动从 `.example` 建 `.env`/`config/*.yaml`；首页「⚠️ 需要处理」
+    面板列出没值的 Key / 没挂模型的供应商，每行一键修复；`/providers/{id}/models` 失败
+    返回带 note 的 200 而不是 500
+  - **模型能力以实测为准**：`app/models/discovery.py` 归一各厂 `GET /models` 的元数据
+    （**未提及的字段恒为 None，绝不编造**），实测压过手写预设，前端区分「实测/预估」；
+    无实测时才退回 `presets.py`
+  - **`upsert_list_entry` 的 `_sync_entry` 会删 payload 里没有的键**——改模型条目必须把
+    `deployments` 原样带回，否则整条被清空（已靠滚动 `.bak` 恢复过一次）
+  - 测试环境（`environment == "test"`）的容器不写 `data/rate_limits.json`（此前一直
+    在污染，旧文档声称的「测试不污染」不成立）
+  - 新增供应商保存后直接弹出加 Key 窗口（不用回首页再想起"供应商还不能直接用"）；
+    加 Key 表单选好供应商后自动起好 id/变量名。前端注意：**先绑定 onclick 再触发
+    click**，否则"自动探测"是空转（实测踩过）
+  - `.gitignore` 的 `config/*.bak` 已放宽为 `config/*.bak*`（`.bak-xxx` 这类后缀
+    原来匹配不到，`git add -A` 会把带密钥的备份带进仓库）

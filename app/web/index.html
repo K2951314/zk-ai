@@ -171,7 +171,7 @@
 <div class="modal-mask" id="providers-modal"></div>
 <div id="auth"><div class="card">
   <h3>需要管理员令牌</h3>
-  <div class="small muted">令牌在服务端 <code>ZKAI_ADMIN_TOKEN</code> 中配置；保存在浏览器 localStorage，仅本机可见。</div>
+  <div class="small muted">把项目 <code>.env</code> 里 <code>ZKAI_ADMIN_TOKEN=</code> 后面那串原样粘进来（改过 <code>.env</code> 后令牌会变，浏览器里存的旧值需要重新粘）。令牌保存在本机 localStorage。</div>
   <input type="text" id="auth-token" placeholder="粘贴 X-Admin-Token …">
   <div class="row-flex"><button class="primary" id="auth-save">保存并连接</button>
   <button id="auth-cancel">取消</button></div>
@@ -303,6 +303,69 @@ function tickCountdowns() {
 }
 
 /* ================= 总览 ================= */
+/* “需要处理”面板：把配置层面的坏味道直接摊在首页，每行带一个一键修复动作。
+   判断只用 /admin/providers 已经给出的字段，不做额外请求。 */
+function attentionPanel(providers, warnings) {
+  const rows = [];
+  (providers || []).forEach(p => {
+    if (!p.enabled) return;
+    const creds = p.credentials || [];
+    if (p.requires_credential && !creds.length) {
+      rows.push({
+        level: "err", pid: p.id,
+        msg: `${p.id} 还没有任何 Key——请求永远走不到它`,
+        fix: "key", label: "➕ 去加 Key",
+      });
+      return;
+    }
+    const noSecret = creds.filter(c => c.secret_source === "missing");
+    const keyProblem = (p.requires_credential && !creds.length) || noSecret.length;
+    if (noSecret.length) {
+      rows.push({
+        level: "err", pid: p.id,
+        msg: `${p.id} 有 ${noSecret.length} 把 Key 没配上实际值（${noSecret
+          .slice(0, 2).map(c => esc(c.secret_ref || c.id)).join("、")}${noSecret.length > 2 ? " 等" : ""} 在 .env 里是空的）`,
+        fix: "key", label: "✏️ 去填 Key",
+      });
+    }
+    if (!(p.models || []).length) {
+      rows.push({
+        level: "warn", pid: p.id,
+        msg: `${p.id} 一个模型都没挂上——它能调，但没有任何模型走它`,
+        fix: "model", label: "🧺 去模型市场挑",
+      });
+    }
+    // 可用性只在“Key 层面没问题”时补充：没配 Key 的供应商已经报过了，
+    // 再说一遍“都在冷却”只是同一件事的第二副面孔。
+    if (!keyProblem && creds.length && (p.models || []).length && !p.available) {
+      const off = creds.filter(c => c.status === "cooldown" || c.status === "disabled" || !c.enabled).length;
+      if (off === creds.length) {
+        rows.push({
+          level: "warn", pid: p.id,
+          msg: `${p.id} 的全部 ${creds.length} 把 Key 都在冷却/禁用中，暂时不可用`,
+          fix: "warm", label: "🔥 清冷却",
+        });
+      }
+    }
+  });
+  (warnings || []).forEach(w => rows.push({ level: "warn", msg: `配置警告：${esc(w)}` }));
+  if (!rows.length) return "";
+
+  const tone = { err: "red", warn: "amber", ok: "green" }[rows[0].level] || "amber";
+  return `<div class="card" style="border-left:3px solid var(--${tone})">
+    <h3>⚠️ 需要处理（${rows.length}）</h3>
+    <div class="tablewrap"><table><tbody>
+      ${rows.map(r => `<tr>
+        <td class="small">${r.msg}</td>
+        <td style="text-align:right;white-space:nowrap">
+          ${r.fix === "warm"
+            ? `<button class="mini" data-fix="warm">🔥 清冷却</button>`
+            : `<button class="mini primary" data-fix="${r.fix}" data-pid="${esc(r.pid || "")}">${r.label}</button>`}
+        </td></tr>`).join("")}
+    </tbody></table></div>
+  </div>`;
+}
+
 async function loadOverview() {
   const [health, stats, providers] = await Promise.all([
     fetch("/health").then(r => r.json()),
@@ -340,7 +403,7 @@ async function loadOverview() {
       <td class="muted">${ago(r.started_at)}</td>
       <td>${esc(r.requested_model)}</td>
       <td class="muted">${esc(r.resolved_model || "-")}</td>
-      <td>${esc(r.provider || "-")}<span class="muted">/${esc(r.credential_id || "-")}</span></td>
+      <td>${esc(r.provider || "-")}<span class="muted">/${esc(r.credential_id || "-")}</span>
       <td>${pill(r.status)}</td>
       <td class="muted" title="${esc(r.error_type || "")}">${r.error_type ? esc(zhType(r.error_type)) : ""}</td>
       <td>${r.latency_ms ? Math.round(r.latency_ms) + "ms" : "-"}</td>
@@ -352,6 +415,7 @@ async function loadOverview() {
       <button id="ov-reload">↻ 重载配置</button>
       <button id="ov-clear">🧹 清空全部冷却</button>
     </div>
+    ${attentionPanel(providers.data, health.config?.warnings || [])}
     <div class="grid kpis">
       ${kpi("可用凭据", `${pool.usable ?? "-"}/${pool.total ?? "-"}`,
         `正常 ${byCount(pool.by_status, "healthy")} · 冷却 ${byCount(pool.by_status, "cooldown")} · 异常 ${byCount(pool.by_status, "unhealthy")} · 禁用 ${byCount(pool.by_status, "disabled")}`)}
@@ -370,6 +434,17 @@ async function loadOverview() {
     </table></div>`;
 
   bindRowClicks($("#view-overview"));
+  // 需要处理面板：每行一个可一键跳转的修复动作
+  document.querySelectorAll("[data-fix]").forEach(b => b.onclick = async () => {
+    const pid = b.dataset.pid || "";
+    if (b.dataset.fix === "key") openAddKeyModal(pid);
+    else if (b.dataset.fix === "model") openMarketModal(pid);
+    else if (b.dataset.fix === "warm") {
+      const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
+      toast(`已解除 ${r.cleared} 把凭据的冷却`, "ok");
+      refresh();
+    }
+  });
   $("#ov-health").onclick = async e => {
     e.target.disabled = true;
     try {
@@ -772,25 +847,29 @@ function openProviderForm(pid) {
     toast(`供应商 ${payload.id} 已保存${syncedNote(r)}`, "ok");
     state.providers = (await api("/admin/providers")).data || [];
     openProvidersModal();
+    // 新建供应商后紧接着加 Key——否则回头还得先想起「供应商不能直接用」
+    if (r.created) openAddKeyModal(payload.id);
   };
 }
 /* ---------- 凭据池：加 Key ---------- */
-async function openAddKeyModal() {
+async function openAddKeyModal(presetPid) {
   const resp = await api("/admin/providers");
   const providers = (resp.data || []).filter(p => p.requires_credential);
   if (!providers.length) { toast("没有可加 Key 的供应商（都要凭据）", "err"); return; }
   const modal = $("#addkey-modal");
   modal.innerHTML = `<div class="card">
     <h3>➕ 给供应商加 Key</h3>
-    <div class="small muted" style="margin:-6px 0 12px">Key 本身存到 <code>.env</code> 里，这里只记它的「变量名」——这样换机器、重建环境时不用重新配。</div>
+    <div class="small muted" style="margin:-6px 0 12px">Key 会写进 <code>.env</code>（已 gitignore），<code>providers.yaml</code> 里只记「变量名」——换机器、重建环境时不用重新配。选好供应商后 ID 和变量名会自动帮你起好。</div>
     <div class="formgrid">
       <label>供应商
-        <select id="ak-provider">${providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join("")}</select>
+        <select id="ak-provider">${providers.map(p => `<option value="${esc(p.id)}" ${p.id === presetPid ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select>
       </label>
-      <label>Key 的 ID（唯一，自己起）
+      <label>Key 的 ID（唯一短名，不是 Key 本身）
         <input type="text" id="ak-id" placeholder="如 sensenova-10"></label>
       <label>环境变量名（.env 里的那个）
         <input type="text" id="ak-env" placeholder="如 SENSENOVA_API_KEY_10"></label>
+      <label>Key 值（写进 .env，不会存到 YAML）
+        <input type="password" id="ak-value" placeholder="粘贴 Key，如 sk-…" autocomplete="off"></label>
       <label>优先级（越小越优先，默认 100）
         <input type="number" id="ak-priority" value="100"></label>
     </div>
@@ -800,6 +879,17 @@ async function openAddKeyModal() {
     </div>
   </div>`;
   modal.classList.add("show");
+  // 自动命名：切供应商时按已有条目递增，省掉两次「起名字」的思考
+  const suggestNames = () => {
+    const p = providers.find(x => x.id === $("#ak-provider").value);
+    if (!p) return;
+    const n = (p.credentials || []).length + 1;
+    const pad = String(n).padStart(2, "0");
+    $("#ak-id").value = `${p.id.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${pad}`;
+    $("#ak-env").value = `${p.id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY${n > 1 ? "_" + pad : ""}`;
+  };
+  $("#ak-provider").onchange = suggestNames;
+  suggestNames();
   $("#ak-cancel").onclick = () => modal.classList.remove("show");
   $("#ak-save").onclick = async () => {
     const payload = {
@@ -807,14 +897,16 @@ async function openAddKeyModal() {
       env_var: $("#ak-env").value.trim() || null,
       priority: Number($("#ak-priority").value || 100),
     };
+    const value = $("#ak-value").value.trim();
     if (!payload.id) { toast("Key 的 ID 不能为空", "err"); return; }
-    if (!payload.env_var) { toast("环境变量名不能为空（Key 存 .env，这里只记名字）", "err"); return; }
+    if (!payload.env_var) { toast("环境变量名不能为空（Key 值写 .env，这里只记名字）", "err"); return; }
+    if (value) { payload.value = value; payload.write_env = true; }
     try {
       const pid = $("#ak-provider").value;
       const r = await api(`/admin/providers/${encodeURIComponent(pid)}/credentials`,
         { method: "POST", json: payload });
       if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
-      toast(`已加 ${payload.id} 到 ${pid}${syncedNote(r)}`, "ok");
+      toast(`已加 ${payload.id} 到 ${pid}${syncedNote(r)}${r.env_synced ? "，Key 已写入 " + r.env_synced : ""}`, "ok");
       modal.classList.remove("show");
       loadPool();
     } catch (err) { toast(err.message, "err"); }
@@ -1123,27 +1215,53 @@ function openModelModal(modelId, prefill) {
   const src = modelId ? (state.modelsCache || []).find(x => x.id === modelId) : null;
   // prefill: 来自模型市场的预设（modelId 为 null 时）——直接填好表单，用户只微调
   const m = src || prefill || {id: "", enabled: true, context_window: 128000, capabilities: {}, deployments: []};
+  const facts = prefill?.discovered || {};   // 供应商 API 实测（可能为空）
+  const factsNote = prefill?.facts_note || [];
   const caps = Object.fromEntries(CAP_DIMS.map(k => [k, (m.capabilities || {})[k] ?? 5]));
   let deps = (m.deployments || []).map(d => Object.assign({}, d));
   if (!deps.length && !modelId) deps = [{}];
   const modal = $("#model-modal");
   modal.innerHTML = `<div class="card">
     <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建" : "新建模型")}</h3>
-    ${prefill && prefill.presetDescription ? `<div class="small muted" style="margin:-6px 0 10px">${esc(prefill.presetDescription)}（预设已填好，可直接保存或微调）</div>` : ""}
+    ${factsNote.length ? `
+      <div class="card" style="padding:10px 12px;margin-bottom:12px;background:var(--bg2,#fafafa)">
+        <div class="small" style="font-weight:600;margin-bottom:6px">📋 供应商实测能力（已自动按此填好）</div>
+        <table class="small"><tbody>
+          ${factsNote.map(f => `<tr>
+            <td style="white-space:nowrap;width:96px">${esc(f.label)}</td>
+            <td style="white-space:nowrap;width:150px"><b>${esc(f.value)}</b></td>
+            <td class="muted">${esc(f.meaning)}</td></tr>`).join("")}
+        </tbody></table>
+      </div>` : ""}
     <div class="formgrid">
       <label>模型 ID（对外名）<input type="text" id="mm-id" value="${esc(m.id)}" ${modelId ? "disabled" : ""} placeholder="如 glm-5.3"></label>
       <label>显示名<input type="text" id="mm-name" value="${esc(m.display_name || "")}" placeholder="可空"></label>
       <label>归属<input type="text" id="mm-owner" value="${esc(m.owned_by || "")}" placeholder="如 z-ai"></label>
-      <label>上下文窗口<input type="number" id="mm-ctx" value="${m.context_window ?? 128000}"></label>
+      <label>上下文窗口${facts.context_window ? ' <span class="chip" title="上游实测值">实测 ' + fmtK(facts.context_window) + '</span>' : ""}
+        <input type="number" id="mm-ctx" value="${m.context_window ?? 128000}" ${facts.context_window ? 'title="供应商 API 给出的上限，通常不用改"' : ""}></label>
       <label>启用 <select id="mm-enabled">
         <option value="true" ${m.enabled !== false ? "selected" : ""}>启用</option>
         <option value="false" ${m.enabled === false ? "selected" : ""}>禁用</option></select></label>
       <label style="grid-column:1/-1">描述<input type="text" id="mm-desc" value="${esc(m.description || "")}" placeholder="可空"></label>
     </div>
     <h4 class="sec">能力评分（0-10，cost 越大越便宜）</h4>
-    <div class="capgrid">${CAP_DIMS.map(k =>
-      `<label>${CAP_ZH[k]} ${k}<input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}"></label>`).join("")}
+    <div class="capgrid">${CAP_DIMS.map(k => {
+      // 上游只说一次实话的地方就不让手填：视觉/上下文由实测决定
+      const locked = (k === "vision" && facts.vision_input !== undefined) ||
+                     (k === "reasoning" && facts.reasoning !== undefined);
+      if (locked) {
+        const known = k === "vision" ? facts.vision_input : facts.reasoning;
+        return `<label>${CAP_ZH[k]} ${k}
+          <input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}" disabled
+            title="供应商已${known ? "支持" : "不支持"}，此项由实测决定">
+          <span class="chip muted">实测${known ? "支持" : "不支持"}</span></label>`;
+      }
+      return `<label>${CAP_ZH[k]} ${k}<input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}"></label>`;
+    }).join("")}
     </div>
+    ${facts.reasoning_effort?.length ? `
+      <div class="small muted" style="margin-top:8px">该模型的思考强度可调：${facts.reasoning_effort.map(esc).join(" / ")}
+      <span title="请求时用 reasoning_effort 参数指定，越强越慢也越准">（是什么？）</span></div>` : ""}
     <h4 class="sec">部署（哪个供应商的哪个上游模型）</h4>
     <div id="mm-deps"></div>
     <div class="toolbar" style="margin-top:10px"><button id="mm-add-dep">➕ 加部署</button></div>
@@ -1216,16 +1334,17 @@ async function deleteModel(modelId) {
 }
 
 /* ---------- 模型市场：从供应商导入 ---------- */
-async function openMarketModal() {
+async function openMarketModal(presetPid) {
   const modal = $("#market-modal");
-  // 供应商下拉（有可用凭据的才显示，否则 list_models 会 401）
-  const providers = (state.providers || []).filter(p => p.requires_credential);
-  if (!providers.length) { toast("没有可用供应商（先配好凭据）", "err"); return; }
+  // 只列有可用凭据的供应商：list_models 靠 Key 才能列，没有的列了也是 401
+  const providers = (state.providers || []).filter(p => p.requires_credential && p.available);
+  if (!providers.length) { toast("没有可用供应商（先给某个供应商配好能用的 Key）", "err"); return; }
+  const first = presetPid && providers.some(p => p.id === presetPid) ? presetPid : providers[0].id;
   modal.innerHTML = `<div class="card">
     <h3>🧺 模型市场</h3>
     <div class="row-flex" style="margin-bottom:10px">
       <label class="small muted">供应商
-        <select id="mk-provider">${providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join("")}</select>
+        <select id="mk-provider">${providers.map(p => `<option value="${esc(p.id)}" ${p.id === first ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select>
       </label>
       <button class="primary" id="mk-load">🔍 探测可用模型</button>
       <span class="grow"></span>
@@ -1241,11 +1360,15 @@ async function openMarketModal() {
     try {
       const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models`);
       let items = r.data || [];
-      if (!items.length) { $("#mk-list").innerHTML = '<span class="muted">这个供应商没有可列的模型</span>'; return; }
+      if (!items.length) {
+        $("#mk-list").innerHTML = `<span class="pill amber">${esc(r.note || "这个供应商没有可列的模型")}</span>`;
+        return;
+      }
       const render = (arr) => arr.map((x, idx) => `
         <tr class="${x.already_added ? "muted" : ""}">
           <td><b>${esc(x.suggested_model_id)}</b><div class="small muted">${esc(x.upstream_model)}</div></td>
-          <td class="small">${fmtK(x.preset.context_window)}</td>
+          <td class="small">${fmtK(x.discovered?.context_window ?? x.preset.context_window)}
+            ${x.discovered_known ? '<span class="chip" title="来自供应商 API 实测">实测</span>' : '<span class="chip muted" title="没有实测数据，按经验值预估">预估</span>'}</td>
           <td class="small muted">${esc(x.preset.description)}</td>
           <td class="small">${x.preset.input_price ? "$" + x.preset.input_price + "/" + x.preset.output_price : "-"}</td>
           <td>${x.already_added
@@ -1270,14 +1393,17 @@ async function openMarketModal() {
             owned_by: providerId,
             description: p.description,
             enabled: true,
-            context_window: p.context_window,
+            context_window: x.discovered?.context_window || p.context_window,
             capabilities: p.capabilities,
+            // 实测事实随表单一起带过去：表单据此决定哪些参数可调、哪些直接定值
+            discovered: x.discovered,
+            facts_note: x.facts_note,
             deployments: [{
               id: `${x.suggested_model_id}-${providerId}`,
               provider_id: providerId,
               model: x.upstream_model,
               priority: 100,
-              context_window: p.context_window,
+              context_window: x.discovered?.context_window || p.context_window,
               max_output_tokens: 32768,
               input_cost_per_mtok: p.input_price,
               output_cost_per_mtok: p.output_price,
@@ -1309,6 +1435,10 @@ async function openMarketModal() {
       updateCount();
     } catch (err) { $("#mk-list").innerHTML = `<span class="pill red">${esc(err.message)}</span>`; }
   };
+  // Handlers are wired before this trigger - clicking first would be a no-op.
+  $("#mk-provider").onchange = () => $("#mk-load").click();
+  // 从「需要处理」点进来时直接探测，省掉那一次点击
+  if (presetPid) $("#mk-load").click();
 }
 
 /* ---------- 别名编辑弹窗 ---------- */

@@ -210,6 +210,18 @@ class ProviderAdapter(abc.ABC):
     async def list_models(self, credential: CredentialRuntime | None = None) -> list[str]:
         """List provider-native model identifiers."""
 
+    async def model_catalogue(
+        self, credential: CredentialRuntime | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Model ids mapped to the raw upstream entry, when the provider offers one.
+
+        The default keeps only the ids (most providers answer with nothing more),
+        so callers must not assume an entry exists. Adapters that receive rich
+        per-model metadata (context window, vision, reasoning…) override this so
+        the console can fill a form from measured data instead of a guess.
+        """
+        return {model_id: {} for model_id in await self.list_models(credential)}
+
     @abc.abstractmethod
     def build_payload(
         self, request: ChatCompletionRequest, deployment: DeploymentConfig
@@ -219,6 +231,59 @@ class ProviderAdapter(abc.ABC):
     @abc.abstractmethod
     def normalize_response(self, payload: dict[str, Any]) -> ChatCompletionResponse:
         """Convert a native non-streaming payload into the canonical shape."""
+
+    # ------------------------------------------------------------------ #
+    # Thinking / answer recovery (protocol-independent)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _recover_reasoning_only_content(response: ChatCompletionResponse) -> None:
+        """Substitute the thinking text when a reasoning model produced no answer.
+
+        Reasoning models (SenseNova ``*-flash-lite``, DeepSeek ``*-pro``, Kimi K3,
+        GLM-5.2, StepFun ``step-*`` …) emit their chain of thought first and the
+        answer second. When the answer is cut off by ``max_tokens``, ``content``
+        comes back as an empty string while the thinking sits in ``reasoning`` /
+        ``reasoning_content``. Returning that empty string silently is a bad
+        failure mode - the caller sees HTTP 200 with nothing in it. Surface the
+        reasoning instead and mark the finish reason so the truncation stays visible.
+        """
+        for choice in response.choices:
+            message = choice.message
+            if message.content:
+                continue
+            # A tool-call turn legitimately has no text: the answer *is* the call.
+            # Promoting the thinking here would staple commentary onto a tool call.
+            # Keep it as ``reasoning`` - Anthropic clients expect a thinking block
+            # ahead of ``tool_use``, and the strip switch removes it on demand.
+            if message.tool_calls:
+                continue
+            extra = message.model_extra
+            if not extra:
+                continue
+            reasoning = extra.get("reasoning") or extra.get("reasoning_content")
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                continue
+            message.content = reasoning
+            extra["content_recovered_from_reasoning"] = True
+            # Text moved into ``content``; drop the source fields so clients
+            # that read both do not render the same text twice.
+            extra.pop("reasoning_content", None)
+            extra.pop("reasoning", None)
+            if choice.finish_reason is None:
+                choice.finish_reason = "length"
+
+    @staticmethod
+    def _recover_reasoning_only_chunks(chunk: ChatCompletionChunk) -> None:
+        """Surface ``reasoning_content`` when a provider streams no ``content``.
+
+        ModelScope and SenseNova put the whole answer in ``reasoning_content``
+        during streaming and leave ``delta.content`` empty. Without this the
+        client receives a stream of empty deltas and renders nothing, even
+        though the upstream call succeeded. Mirrors the non-streaming
+        :meth:`_recover_reasoning_only_content` behaviour.
+        """
+        for choice in chunk.choices:
+            choice.recover_reasoning_only_delta()
 
     # ------------------------------------------------------------------ #
     # Optional overrides
@@ -703,19 +768,6 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             self._recover_reasoning_only_chunks(chunk)
             yield chunk
 
-    @staticmethod
-    def _recover_reasoning_only_chunks(chunk: ChatCompletionChunk) -> None:
-        """Surface ``reasoning_content`` when a provider streams no ``content``.
-
-        ModelScope and SenseNova put the whole answer in ``reasoning_content``
-        during streaming and leave ``delta.content`` empty. Without this the
-        client receives a stream of empty deltas and renders nothing, even
-        though the upstream call succeeded. Mirrors the non-streaming
-        :meth:`_recover_reasoning_only_content` behaviour.
-        """
-        for choice in chunk.choices:
-            choice.recover_reasoning_only_delta()
-
     async def list_models(self, credential: CredentialRuntime | None = None) -> list[str]:
         ctx = ProviderContext(
             request_id="model-list",
@@ -746,6 +798,49 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             return []
         return [str(item.get("id")) for item in items if isinstance(item, dict) and item.get("id")]
 
+    async def model_catalogue(
+        self, credential: CredentialRuntime | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Same request as :meth:`list_models`, but keeps each entry's extra fields.
+
+        Providers that add per-model metadata beyond ``id`` (context window, vision
+        support, supported parameters) therefore cost no second round-trip: the
+        console reads it straight off the response. Anything not announced simply
+        maps to ``{}``, which callers treat as "unknown, fall back to presets".
+        """
+        ctx = ProviderContext(
+            request_id="model-catalogue",
+            deployment=DeploymentConfig(id="_probe", provider_id=self.provider_id, model=""),
+            model=ModelConfig(id="_probe"),
+            credential=credential,
+            timeout=min(20.0, self.config.timeout),
+        )
+        try:
+            response = await self.client.get(
+                self.models_url,
+                headers=self.headers(credential),
+                timeout=self.request_timeout(ctx),
+            )
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError(f"HTTP {self.provider_id} timeout", provider=self.provider_id) from exc
+        except httpx.TransportError as exc:
+            raise ConnectionFailureError(
+                f"HTTP {self.provider_id} unreachable", provider=self.provider_id
+            ) from exc
+        if response.status_code >= 400:
+            self._raise_for_status(
+                response.status_code, self._safe_json(response.content), dict(response.headers)
+            )
+        data = self._safe_json(response.content) or {}
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return {}
+        catalogue: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if isinstance(item, dict) and item.get("id"):
+                catalogue[str(item["id"])] = item
+        return catalogue
+
     # ------------------------------------------------------------------ #
     def normalize_response(self, payload: dict[str, Any]) -> ChatCompletionResponse:
         """OpenAI payloads already match the canonical shape - validate + pass through."""
@@ -758,34 +853,3 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             ) from exc
         self._recover_reasoning_only_content(response)
         return response
-
-    @staticmethod
-    def _recover_reasoning_only_content(response: ChatCompletionResponse) -> None:
-        """Substitute the thinking text when a reasoning model produced no answer.
-
-        Reasoning models (SenseNova ``*-flash-lite``, DeepSeek ``*-pro``, Kimi K3,
-        GLM-5.2 …) emit their chain of thought first and the answer second. When
-        the answer is cut off by ``max_tokens``, ``content`` comes back as an
-        empty string while the thinking sits in ``reasoning`` / ``reasoning_content``.
-        Returning that empty string silently is a bad failure mode - the caller
-        sees HTTP 200 with nothing in it. Surface the reasoning instead and mark
-        the finish reason so the truncation stays visible.
-        """
-        for choice in response.choices:
-            message = choice.message
-            if message.content:
-                continue
-            extra = message.model_extra
-            if not extra:
-                continue
-            reasoning = extra.get("reasoning") or extra.get("reasoning_content")
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                continue
-            message.content = reasoning
-            extra["content_recovered_from_reasoning"] = True
-            # Text moved into ``content``; drop the source fields so clients
-            # that read both do not render the same text twice.
-            extra.pop("reasoning_content", None)
-            extra.pop("reasoning", None)
-            if choice.finish_reason is None:
-                choice.finish_reason = "length"

@@ -154,6 +154,42 @@ _PRESETS: tuple[ModelPreset, ...] = (
         description="NVIDIA 免费额度兜底",
         providers=("nvidia",),
     ),
+    # --- StepFun（阶跃星辰）-------------------------------------------------- #
+    # Values cross-checked against StepFun's own GET /models (2026-09-20):
+    # max_input_tokens / enable_vision_input / enable_reason.
+    ModelPreset(
+        family="step-5-preview",
+        display_name="Step 5 Preview",
+        context_window=1_024_000,
+        capabilities={
+            "coding": 8.5, "reasoning": 8.5, "tool_use": 8.0, "vision": 10.0,
+            "long_context": 10.0, "structured_output": 8.0, "speed": 5.5, "cost": 7.0,
+        },
+        description="阶跃旗舰预览版：1M 上下文 + 图像输入 + 思考模式",
+        providers=("stepfun",),
+    ),
+    ModelPreset(
+        family="step-3.7-flash",
+        display_name="Step 3.7 Flash",
+        context_window=262_144,
+        capabilities={
+            "coding": 8.0, "reasoning": 8.0, "tool_use": 8.0, "vision": 10.0,
+            "long_context": 8.0, "structured_output": 8.0, "speed": 9.0, "cost": 9.0,
+        },
+        description="阶跃速度杯：256K 上下文 + 图像输入 + 思考模式",
+        providers=("stepfun",),
+    ),
+    ModelPreset(
+        family="step-3.5-flash",
+        display_name="Step 3.5 Flash",
+        context_window=262_144,
+        capabilities={
+            "coding": 7.5, "reasoning": 7.5, "tool_use": 7.5, "vision": 0.0,
+            "long_context": 8.0, "structured_output": 7.5, "speed": 9.0, "cost": 9.0,
+        },
+        description="阶跃上一代速度杯：256K 上下文，纯文本",
+        providers=("stepfun",),
+    ),
 )
 
 #: Exact match first, then longest-suffix match on the family name.

@@ -27,6 +27,7 @@ DB override as fallback and surfaces the warning in the API response.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -377,6 +378,54 @@ def delete_provider(path: Path, provider_id: str) -> bool:
     return delete_list_entry(path, "providers", "id", provider_id)
 
 
+# --------------------------------------------------------------------------- #
+# dotenv (.env) - secrets never go into the YAML
+# --------------------------------------------------------------------------- #
+def upsert_env_var(path: Path, name: str, value: str) -> bool:
+    """Create or update ``NAME=value`` in a dotenv file. Returns True when replaced.
+
+    Text-splice rather than a dotenv re-dump: comments, ordering, line endings and
+    unrelated lines stay byte-identical, and a missing trailing newline is repaired
+    instead of swallowing the appended line. ``.env`` and ``.env.*`` are gitignored,
+    so the rolling ``.env.bak`` holds no tracked secret.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=")
+    raw = ""
+    if path.exists():
+        # newline="" keeps CRLF intact; read_text() would normalise it away and the
+        # rewrite would silently flip the whole file to LF.
+        with path.open(encoding="utf-8-sig", newline="") as fh:
+            raw = fh.read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines()
+    replaced = False
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            lines[index] = f"{name}={value}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"{name}={value}")
+
+    _atomic_write_text(path, eol.join(lines) + eol)
+    logger.info("env file updated: %s (%s)", path, name)
+    return replaced
+
+
+#: Credential ids here are short and human (``sensenova-01``).
+_SECRET_LIKE = re.compile(r"^[A-Za-z0-9_\-]{40,}$")
+
+
+def looks_like_secret(value: str | None) -> bool:
+    """Heuristic: a long, separator-free token pasted where an id belongs.
+
+    A 40+ character opaque string in the *id* field is an API key pasted into the
+    wrong box - it would then travel into the YAML, the DB mirror and the console UI.
+    """
+    return bool(_SECRET_LIKE.match(value or ""))
+
+
 __all__ = [
     "append_credential_to_provider",
     "atomic_write",
@@ -384,7 +433,9 @@ __all__ = [
     "delete_list_entry",
     "delete_provider",
     "load_document",
+    "looks_like_secret",
     "sync_provider_rate_limits",
+    "upsert_env_var",
     "upsert_list_entry",
     "upsert_provider",
 ]

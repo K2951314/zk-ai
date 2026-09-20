@@ -412,3 +412,123 @@ class TestGeminiThoughtParts:
         with pytest.raises(ContentFilterError):
             async for _ in stream:
                 pass
+
+
+class TestAnthropicModelListingAuth:
+    """Anthropic-compatible third parties authenticate ``/models`` differently.
+
+    Observed live with StepFun: ``POST /step_plan/v1/messages`` accepts
+    ``x-api-key``, but ``GET /step_plan/v1/models`` answers 401 for it and only
+    accepts ``Authorization: Bearer``. Listing thus failed for a provider whose
+    chat path works, which surfaces in the console as "this provider has no models".
+    """
+
+    async def _list_with(self, statuses: list[int]) -> tuple[list[str], list[dict[str, str]]]:
+        import httpx
+
+        from app.models.credential import CredentialRuntime
+        from app.providers.anthropic import AnthropicAdapter
+
+        seen: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(dict(request.headers))
+            status = statuses[min(len(seen) - 1, len(statuses) - 1)]
+            if status >= 400:
+                return httpx.Response(status, json={"error": {"message": "Incorrect API key"}})
+            return httpx.Response(200, json={"data": [{"id": "step-3.7-flash"}, {"id": "step-5-preview"}]})
+
+        adapter = AnthropicAdapter(
+            ProviderConfig(
+                id="stepfun", type="anthropic", base_url="https://api.stepfun.com/step_plan/v1"
+            )
+        )
+        adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            cred = CredentialRuntime(id="c1", provider_id="stepfun", secret="sk-test")
+            models = await adapter.list_models(cred)
+        finally:
+            await adapter.aclose()
+        return models, seen
+
+    async def test_falls_back_to_bearer_on_401(self) -> None:
+        models, seen = await self._list_with([401, 200])
+        assert models == ["step-3.7-flash", "step-5-preview"]
+        assert len(seen) == 2, "should retry once"
+        assert seen[0].get("x-api-key") == "sk-test"
+        assert seen[1].get("authorization") == "Bearer sk-test"
+
+    async def test_no_retry_when_first_attempt_succeeds(self) -> None:
+        models, seen = await self._list_with([200])
+        assert models == ["step-3.7-flash", "step-5-preview"]
+        assert len(seen) == 1
+        assert "authorization" not in seen[0]
+
+
+class TestAnthropicThinkingBlocks:
+    """Anthropic-style ``thinking`` blocks must not be dropped on the floor.
+
+    Observed live with StepFun ``step-3.7-flash``: every reply arrives as
+    ``[{type: thinking}, {type: text}]``. The adapter only read ``text`` blocks, so
+    a reply cut off by a low ``max_tokens`` came back as an empty string with no
+    explanation - HTTP 200 and nothing in it.
+    """
+
+    def _adapter(self):
+        from app.providers.anthropic import AnthropicAdapter
+
+        return AnthropicAdapter(
+            ProviderConfig(id="stepfun", type="anthropic", base_url="https://api.stepfun.com/step_plan/v1")
+        )
+
+    def _payload(self, blocks: list[dict], stop_reason: str) -> dict:
+        return {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "step-3.7-flash",
+            "content": blocks,
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 17, "output_tokens": 20},
+        }
+
+    def test_thinking_is_surfaced_when_answer_was_cut_off(self) -> None:
+        response = self._adapter().normalize_response(
+            self._payload([{"type": "thinking", "thinking": "用户要我回两个字……"}], "max_tokens")
+        )
+        message = response.choices[0].message
+        assert message.content == "用户要我回两个字……"
+        assert message.model_extra["content_recovered_from_reasoning"] is True
+        assert response.choices[0].finish_reason == "length"
+
+    def test_thinking_travels_as_reasoning_when_answer_exists(self) -> None:
+        response = self._adapter().normalize_response(
+            self._payload(
+                [{"type": "thinking", "thinking": "思考过程"}, {"type": "text", "text": "你好"}],
+                "end_turn",
+            )
+        )
+        message = response.choices[0].message
+        assert message.content == "你好"
+        assert message.model_extra["reasoning"] == "思考过程"
+        assert "content_recovered_from_reasoning" not in message.model_extra
+
+    def test_tool_use_blocks_still_parse(self) -> None:
+        response = self._adapter().normalize_response(
+            self._payload(
+                [
+                    {"type": "thinking", "thinking": "要调用工具"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                        "input": {"city": "北京"},
+                    },
+                ],
+                "tool_use",
+            )
+        )
+        message = response.choices[0].message
+        assert response.choices[0].finish_reason == "tool_calls"
+        assert message.tool_calls[0].function.name == "get_weather"
+        assert message.model_extra["reasoning"] == "要调用工具"

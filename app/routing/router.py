@@ -25,7 +25,7 @@ from typing import Any
 from app.core.config import AppConfig
 from app.core.errors import AliasNotFoundError, ModelNotFoundError, ProviderNotFoundError
 from app.core.logging import get_logger
-from app.models.provider import ModelAliasConfig, ModelConfig
+from app.models.provider import ModelAliasConfig, ModelConfig, ProviderConfig
 from app.models.request import ChatCompletionRequest
 from app.providers.base import ProviderAdapter
 from app.providers.factory import create_adapter
@@ -39,6 +39,9 @@ from app.routing.capability import (
 from app.routing.strategy import RoutingCandidate, get_strategy
 
 logger = get_logger("routing.router")
+
+# Strong refs to in-flight adapter close tasks (see _close_in_background).
+_PENDING_CLOSES: set[asyncio.Task[None]] = set()
 
 
 @dataclass(slots=True)
@@ -115,6 +118,28 @@ class Router:
         """Inject an adapter (tests / hot-plugging a custom provider)."""
         with self._lock:
             self._adapters[provider_id] = adapter
+
+    def upsert_adapter(self, provider: ProviderConfig) -> None:
+        """Build and install an adapter for *provider*, closing any displaced one.
+
+        Skips the install (and removes any existing entry) when the provider is
+        disabled, so a runtime ``enabled=false`` edit takes effect immediately
+        instead of leaving a zombie adapter that ``adapter()`` would still hand out.
+        """
+        displaced: ProviderAdapter | None = None
+        with self._lock:
+            displaced = self._adapters.pop(provider.id, None)
+            if provider.enabled:
+                self._adapters[provider.id] = create_adapter(provider)
+        if displaced is not None:
+            self._close_in_background([displaced])
+
+    def remove_adapter(self, provider_id: str) -> None:
+        """Drop the adapter for *provider_id* and close its HTTP client."""
+        with self._lock:
+            removed = self._adapters.pop(provider_id, None)
+        if removed is not None:
+            self._close_in_background([removed])
 
     # ------------------------------------------------------------------ #
     # Resolution
@@ -269,16 +294,28 @@ class Router:
             else:
                 self.aliases.replace_all(config.aliases.values())
             self._build_adapters()
-        # Close retired clients in the background: their keep-alive connections
-        # would otherwise accumulate one set per reload until process exit.
         if old_adapters:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None:
-                loop.create_task(self._close_retired(old_adapters))
+            self._close_in_background(old_adapters)
         logger.info("router configuration reloaded (models=%d)", len(config.models))
+
+    @staticmethod
+    def _close_in_background(adapters: list[ProviderAdapter]) -> None:
+        """Schedule ``aclose()`` on retired adapters without blocking the caller.
+
+        Keep-alive connections would otherwise accumulate one set per hot-edit
+        until process exit. Outside a running loop (unit tests, CLI) we skip:
+        those callers own the adapter lifecycle themselves.
+        """
+        if not adapters:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(Router._close_retired(adapters))
+        # RUF006: keep a strong ref until the close finishes, else GC may drop it.
+        _PENDING_CLOSES.add(task)
+        task.add_done_callback(_PENDING_CLOSES.discard)
 
     @staticmethod
     async def _close_retired(adapters: list[ProviderAdapter]) -> None:

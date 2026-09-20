@@ -227,3 +227,70 @@ def test_delete_provider_removes_entry(tmp_path) -> None:
                                          "base_url": "http://y/v1"})
     assert delete_provider(path, "to-delete") is True
     assert yaml.safe_load(path.read_text("utf-8"))["providers"][0]["id"] == "fake"
+
+
+# --------------------------------------------------------------------------- #
+# .env writing (secrets never go into the YAML)
+# --------------------------------------------------------------------------- #
+def test_upsert_env_var_appends_and_preserves_comments(tmp_path) -> None:
+    from app.core.config_writer import upsert_env_var
+
+    path = tmp_path / ".env"
+    # No trailing newline: the append must not glue itself onto the last line.
+    path.write_text("# 注释\nZKAI_PORT=8317", encoding="utf-8")
+    assert upsert_env_var(path, "STEPFUN_API_KEY", "sk-new") is False
+    text = path.read_text("utf-8")
+    assert text == "# 注释\nZKAI_PORT=8317\nSTEPFUN_API_KEY=sk-new\n"
+    assert text.endswith("\n")
+
+
+def test_upsert_env_var_updates_in_place(tmp_path) -> None:
+    from app.core.config_writer import upsert_env_var
+
+    path = tmp_path / ".env"
+    path.write_text("A=1\nSTEPFUN_API_KEY=old\nB=2\n", encoding="utf-8")
+    assert upsert_env_var(path, "STEPFUN_API_KEY", "sk-new") is True
+    text = path.read_text("utf-8")
+    assert "STEPFUN_API_KEY=sk-new" in text
+    assert "old" not in text
+    assert text.index("A=1") < text.index("STEPFUN_API_KEY") < text.index("B=2")
+
+
+def test_upsert_env_var_handles_export_and_crlf(tmp_path) -> None:
+    from app.core.config_writer import upsert_env_var
+
+    path = tmp_path / ".env"
+    path.write_bytes(b"export KEY_A=1\r\nOTHER=2\r\n")
+    assert upsert_env_var(path, "KEY_A", "9") is True
+    assert upsert_env_var(path, "NEW_ONE", "x") is False
+    raw = path.read_bytes()
+    assert b"export KEY_A=9" not in raw  # rewritten as a plain NAME=value line
+    assert b"KEY_A=9" in raw and b"NEW_ONE=x" in raw
+    assert raw.count(b"\r\n") >= 3 and b"\n\n" not in raw  # EOL style preserved
+
+
+def test_upsert_env_var_keeps_one_rolling_backup(tmp_path) -> None:
+    from app.core.config_writer import upsert_env_var
+
+    path = tmp_path / ".env"
+    path.write_text("A=1\n", encoding="utf-8")
+    upsert_env_var(path, "B", "2")
+    upsert_env_var(path, "C", "3")
+    bak = tmp_path / ".env.bak"
+    assert bak.exists()
+    assert "B=2" in bak.read_text("utf-8")  # backup holds the pre-second-write state
+    assert "C=3" not in bak.read_text("utf-8")
+
+
+def test_looks_like_secret_flags_pasted_keys() -> None:
+    from app.core.config_writer import looks_like_secret
+
+    # The real-world mistake: a 64-char key pasted into the id field.
+    assert looks_like_secret("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+    assert looks_like_secret("sk-" + "a" * 40)
+    # Legitimate short ids are left alone.
+    assert not looks_like_secret("sensenova-01")
+    assert not looks_like_secret("stepfun-01")
+    assert not looks_like_secret("a")
+    assert not looks_like_secret(None)
+    assert not looks_like_secret("")

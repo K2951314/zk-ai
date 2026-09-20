@@ -45,11 +45,13 @@ if exist ".env" (
 )
 if not defined ZKAI_HOST set "ZKAI_HOST=127.0.0.1"
 
-if not exist ".env" (
+REM ---- First run: materialise .env / config templates, then tell what to fill ----
+.venv\Scripts\python.exe scripts\first_run.py
+if errorlevel 1 (
   echo.
-  echo   [WARN ] .env not found - the gateway will start with no credentials.
-  echo           Copy your .env from the old machine, or create it from
-  echo           .env.example and fill in the API keys, then restart.
+  echo   Fill in .env as printed above, then run this script again.
+  pause
+  goto :end
 )
 
 REM ---- Ensure a WORKING .venv (missing or copied-and-broken triggers rebuild) ----
@@ -108,11 +110,17 @@ echo   - Port : %ZKAI_PORT%   (CLI arg wins over .env ZKAI_PORT, then default 83
 echo   - Host : %ZKAI_HOST%   (0.0.0.0 = reachable from other machines on the LAN)
 echo   - Tray : bottom-right corner, green=running / blue=stopped
 echo   - Stop : right-click tray icon - Quit
+echo   - UI   : your browser opens automatically, already signed in with the
+echo           admin token from .env (no paste needed).
 echo.
 REM launch_hidden.py spawns pythonw with NO console window; a bare
 REM `start ... pythonw.exe` inherits the batch console and leaves a minimized
 REM python.exe window stuck in the taskbar (uv venv launcher is a trampoline).
 .venv\Scripts\python.exe scripts\launch_hidden.py gateway
+REM Open the console ourselves once the port answers: it waits for the gateway,
+REM then loads /ui with ZKAI_ADMIN_TOKEN in the URL so the operator never has to
+REM paste it. Detached, so this window can close immediately.
+.venv\Scripts\python.exe scripts\open_console.py --detach --port %ZKAI_PORT%
 goto :end
 
 :busy

@@ -338,12 +338,15 @@ class AnthropicAdapter(ProviderAdapter):
                 f"unexpected Anthropic payload: {str(payload)[:200]}", provider=self.provider_id
             )
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         for block in payload.get("content") or []:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
+            elif block.get("type") in {"thinking", "redacted_thinking"}:
+                thinking_parts.append(str(block.get("thinking") or ""))
             elif block.get("type") == "tool_use":
                 tool_calls.append(
                     ToolCall(
@@ -371,6 +374,17 @@ class AnthropicAdapter(ProviderAdapter):
         )
         if payload.get("id"):
             response.id = str(payload["id"])
+        # Carry the thinking the way the rest of the gateway does (a ``reasoning``
+        # extra): /v1/messages re-emits it as a thinking block, ZKAI_STRIP_REASONING
+        # drops it, and _recover_reasoning_only_content surfaces it as the answer
+        # when a low max_tokens cut the reply off before any text block existed -
+        # otherwise the client gets an empty response and no explanation.
+        thinking = "".join(thinking_parts).strip()
+        if thinking:
+            extra = response.choices[0].message.model_extra
+            if extra is not None:
+                extra["reasoning"] = thinking
+        self._recover_reasoning_only_content(response)
         return response
 
     # ------------------------------------------------------------------ #
@@ -479,7 +493,13 @@ class AnthropicAdapter(ProviderAdapter):
         )
 
     async def list_models(self, credential: CredentialRuntime | None = None) -> list[str]:
-        """Anthropic exposes ``GET /v1/models``; auth is the same key header."""
+        """Anthropic exposes ``GET /v1/models``; auth is the same key header.
+
+        Anthropic-compatible third parties (StepFun, ...) often accept ``x-api-key``
+        on ``/messages`` but only ``Authorization: Bearer`` on ``/models``, which
+        would make the console's model marketplace show an auth error for a provider
+        that works fine. Retry once with Bearer before giving up.
+        """
         ctx = ProviderContext(
             request_id="model-list",
             deployment=DeploymentConfig(id="_probe", provider_id=self.provider_id, model=""),
@@ -497,6 +517,14 @@ class AnthropicAdapter(ProviderAdapter):
                 headers=self.headers(credential),
                 timeout=self.request_timeout(ctx),
             )
+            if response.status_code in {401, 403} and credential and credential.secret:
+                bearer = dict(self._base_headers())
+                bearer["Authorization"] = f"Bearer {credential.secret}"
+                response = await self.client.get(
+                    f"{self.base_url}/models",
+                    headers=bearer,
+                    timeout=self.request_timeout(ctx),
+                )
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError("anthropic timeout", provider=self.provider_id) from exc
         except httpx.TransportError as exc:
@@ -510,6 +538,56 @@ class AnthropicAdapter(ProviderAdapter):
         if not isinstance(items, list):
             return []
         return [str(item.get("id")) for item in items if isinstance(item, dict) and item.get("id")]
+
+    async def model_catalogue(
+        self, credential: CredentialRuntime | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Same request as :meth:`list_models`, returning each entry with its extras.
+
+        StepFun answers ``/models`` with ``max_input_tokens``,
+        ``enable_vision_input``, ``enable_reason`` and
+        ``reasoning_effort_support_list`` per model - exactly the facts the console
+        needs to fill a form instead of asking the operator to know them.
+        """
+        ctx = ProviderContext(
+            request_id="model-catalogue",
+            deployment=DeploymentConfig(id="_probe", provider_id=self.provider_id, model=""),
+            model=self._probe_model(),
+            credential=credential,
+            timeout=min(20.0, self.config.timeout),
+        )
+        import httpx
+
+        from app.core.errors import ConnectionFailureError, GatewayTimeoutError
+
+        async def fetch(headers: dict[str, str]) -> httpx.Response:
+            return await self.client.get(
+                f"{self.base_url}/models", headers=headers, timeout=self.request_timeout(ctx)
+            )
+
+        try:
+            response = await fetch(self.headers(credential))
+            if response.status_code in {401, 403} and credential and credential.secret:
+                bearer = dict(self._base_headers())
+                bearer["Authorization"] = f"Bearer {credential.secret}"
+                response = await fetch(bearer)
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError("anthropic timeout", provider=self.provider_id) from exc
+        except httpx.TransportError as exc:
+            raise ConnectionFailureError("anthropic unreachable", provider=self.provider_id) from exc
+        if response.status_code >= 400:
+            self._raise_for_status(
+                response.status_code, self._safe_json(response.content), dict(response.headers)
+            )
+        data = self._safe_json(response.content) or {}
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return {}
+        return {
+            str(item["id"]): item
+            for item in items
+            if isinstance(item, dict) and item.get("id")
+        }
 
     def _probe_model(self):  # pragma: no cover - tiny helper for type checkers
         from app.models.provider import ModelConfig

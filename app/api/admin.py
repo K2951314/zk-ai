@@ -9,6 +9,7 @@ Credential responses never contain secret material - only a masked fingerprint.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,14 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import ContainerDep, require_admin
-from app.core.config import apply_db_overrides, load_app_config
+from app.core.config import PROJECT_ROOT, apply_db_overrides, load_app_config
 from app.core.config_writer import (
     append_credential_to_provider,
     delete_credential_from_provider,
     delete_list_entry,
+    looks_like_secret,
     sync_provider_rate_limits,
+    upsert_env_var,
     upsert_list_entry,
 )
 from app.core.config_writer import delete_provider as delete_provider_file
@@ -180,37 +183,89 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"message": f"provider '{provider_id}' not found"}},
         )
-    adapter = container.router.adapter(provider_id)
+    if not provider.enabled:
+        return {
+            "object": "list",
+            "provider_id": provider_id,
+            "data": [],
+            "note": "该供应商已在配置里禁用（enabled: false）——启用后才能探测模型",
+        }
     credential = next(iter(container.pool.for_provider(provider_id)), None)
-    upstream_ids = await adapter.list_models(credential)
+    if credential is None and provider.requires_credential:
+        return {
+            "object": "list",
+            "provider_id": provider_id,
+            "data": [],
+            "note": "该供应商还没有任何 Key——先去「凭据池 → ➕ 加 Key」",
+        }
+    if credential is not None and credential.secret_source == "missing":  # noqa: S105 - source label
+        return {
+            "object": "list",
+            "provider_id": provider_id,
+            "data": [],
+            "note": (
+                f"该供应商的 Key 没有实际值（{credential.secret_ref} 在 .env 里是空的）"
+                "——去「凭据池 → ➕ 加 Key」把值填上"
+            ),
+        }
+    adapter = container.router.adapter(provider_id)
+    try:
+        catalogue = await adapter.model_catalogue(credential)
+    except Exception as exc:
+        # A probe failure points at the upstream, not the gateway: surface it as
+        # a note in the same shape so the console keeps rendering one panel.
+        logger.info("model probe failed for %s: %s", provider_id, exc)
+        return {
+            "object": "list",
+            "provider_id": provider_id,
+            "data": [],
+            "note": f"探测失败：{exc}（上游/网络问题，不是网关坏了）",
+        }
     known_models = set(container.config.models)
     known_upstream = {
         deployment.model
         for model in container.config.models.values()
         for deployment in model.deployments
     }
+    from app.models.discovery import model_facts
     from app.models.presets import preset_for
 
     data = []
-    for upstream in sorted(upstream_ids):
+    for upstream in sorted(catalogue):
         preset = preset_for(upstream)
-        data.append(
-            {
-                "upstream_model": upstream,
-                "suggested_model_id": _suggest_model_id(upstream),
-                "already_added": preset.family in known_models
-                or upstream in known_upstream,
-                "preset": {
-                    "family": preset.family,
-                    "display_name": preset.display_name,
-                    "context_window": preset.context_window,
-                    "capabilities": preset.capabilities,
-                    "input_price": preset.input_price,
-                    "output_price": preset.output_price,
-                    "description": preset.description,
-                },
-            }
-        )
+        # Measured facts outrank the hand-written preset for the fields the
+        # provider actually reported; anything it stayed silent about keeps the
+        # preset value, and ``fallback`` records where each number came from so
+        # the console can label it instead of presenting a guess as fact.
+        facts = model_facts(catalogue[upstream])
+        capabilities = dict(preset.capabilities)
+        if facts.vision_input is not None:
+            capabilities["vision"] = 10.0 if facts.vision_input else 0.0
+        if facts.reasoning is not None:
+            capabilities["reasoning"] = max(capabilities.get("reasoning", 0.0), 8.0)
+        entry: dict[str, Any] = {
+            "upstream_model": upstream,
+            "suggested_model_id": _suggest_model_id(upstream),
+            "already_added": preset.family in known_models
+            or upstream in known_upstream,
+            "preset": {
+                "family": preset.family,
+                "display_name": preset.display_name,
+                "context_window": preset.context_window,
+                "capabilities": capabilities,
+                "input_price": preset.input_price,
+                "output_price": preset.output_price,
+                "description": preset.description,
+            },
+            "discovered": facts.as_dict(),
+            "discovered_known": facts.known,
+            # Higher-fidelity-vendor presets are only a guess for StepFun's own
+            # models; anything else keeps the preset context window.
+            "context_window_source": "provider" if facts.context_window else "preset",
+        }
+        if facts.known:
+            entry["facts_note"] = facts.describe()
+        data.append(entry)
     return {"object": "list", "provider_id": provider_id, "data": data}
 
 
@@ -366,9 +421,17 @@ class AddCredentialRequest(BaseModel):
 
     id: str
     env_var: str | None = None  # Name of the env var that holds the key (never the key)
-    value: str | None = None  # Inline key, development only; env_var preferred
+    value: str | None = None  # The key itself; with write_env it lands in .env
+    #: Write ``value`` into ``.env`` under ``env_var`` instead of inlining it in
+    #: providers.yaml. The recommended path - the YAML only ever holds the name.
+    write_env: bool = False
     priority: int = 100
     enabled: bool = True
+
+
+def _env_file() -> Path:
+    """The project ``.env`` (secrets live here, never in the YAML)."""
+    return PROJECT_ROOT / ".env"
 
 
 @router.post("/providers/{provider_id}/credentials", summary="Add a credential to a provider")
@@ -377,14 +440,30 @@ async def add_credential(
 ) -> dict[str, Any]:
     """Append a credential to a provider's pool at runtime; persists across restarts.
 
-    Writes to ``providers.yaml`` so the new key survives reloads. If the same id
-    already exists this is an update (idempotent).
+    With ``write_env=true`` the secret is written to ``.env`` under ``env_var`` and
+    only that *name* goes into ``providers.yaml``; the key is also exported into
+    this process so the credential works immediately, without a reload. Without it
+    the legacy inline path applies (``value`` lands in the gitignored YAML),
+    which is development-only.
     """
     provider = container.config.providers.get(provider_id)
     if provider is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"message": f"provider '{provider_id}' not found"}},
+        )
+    if looks_like_secret(payload.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": (
+                        "credential id looks like an API key - use a short name such as "
+                        f"'{provider_id}-01' for the id, and put the key in the value field"
+                    ),
+                    "type": "secret_in_id",
+                }
+            },
         )
     if payload.env_var is None and payload.value is None:
         raise HTTPException(
@@ -397,10 +476,42 @@ async def add_credential(
                 }
             },
         )
+    if payload.write_env and not payload.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": "write_env needs the key itself in 'value'",
+                    "type": "invalid_credential",
+                }
+            },
+        )
+    if payload.write_env and not payload.env_var:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": "write_env needs 'env_var' - the name to store the key under in .env",
+                    "type": "invalid_credential",
+                }
+            },
+        )
+
+    env_synced: str | None = None
+    if payload.write_env and payload.value and payload.env_var:
+        try:
+            replaced = upsert_env_var(_env_file(), payload.env_var, payload.value)
+        except OSError as exc:
+            raise _file_write_failed(exc) from exc
+        # Live-export so the credential works on the next request, not after a reload.
+        os.environ[payload.env_var] = payload.value
+        env_synced = f".env ({'updated' if replaced else 'appended'})"
+
     credential = {
         "id": payload.id,
         "env_var": payload.env_var,
-        "value": payload.value,
+        # Never let the secret reach the YAML when it was written to .env.
+        "value": None if payload.write_env else payload.value,
         "priority": payload.priority,
         "enabled": payload.enabled,
     }
@@ -415,14 +526,20 @@ async def add_credential(
     cred = CredentialConfig(
         id=payload.id,
         env_var=payload.env_var,
-        value=payload.value,
+        value=credential["value"],
         enabled=payload.enabled,
         priority=payload.priority,
     )
     # replace if the id already exists
     provider.credentials = [c for c in provider.credentials if c.id != payload.id] + [cred]
     container.pool.register_provider(provider)
-    return {"object": "credential", "provider_id": provider_id, "credential_id": payload.id, "synced": synced}
+    return {
+        "object": "credential",
+        "provider_id": provider_id,
+        "credential_id": payload.id,
+        "synced": synced,
+        "env_synced": env_synced,
+    }
 
 
 @router.delete("/providers/{provider_id}/credentials/{credential_id}", summary="Remove a credential")
@@ -525,6 +642,7 @@ async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDe
     container.config.providers[provider.id] = provider
     container.pool.register_provider(provider)
     container.rate_limiter.register_provider(provider)
+    container.router.upsert_adapter(provider)
     await container.config_repository.sync_config(container.config)
     logger.info("provider %s upserted (%s) via console", provider.id, provider.type.value)
     return {
@@ -568,6 +686,7 @@ async def delete_provider(provider_id: str, container: ContainerDep) -> dict[str
         synced = path.name
     container.config.providers.pop(provider_id, None)
     pruned = container.pool.reconcile(container.config.providers)
+    container.router.remove_adapter(provider_id)
     await container.config_repository.sync_config(container.config)
     logger.info("provider %s deleted via console (%d credential(s) dropped)", provider_id, pruned)
     return {"deleted": provider_id, "credentials_removed": pruned, "synced": synced}

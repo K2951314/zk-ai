@@ -52,5 +52,5 @@ desktop.ini
 # --- logs -------------------------------------------------------------------
 *.log
 logs/
-config/*.bak
+config/*.bak*
 .zcode/

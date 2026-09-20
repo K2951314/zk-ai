@@ -30,12 +30,13 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 from typing import IO
 
 from PIL import Image, ImageDraw
 from pystray import Icon, Menu, MenuItem
+
+from scripts.open_console import open_console
 
 logger = logging.getLogger("tray_launcher")
 
@@ -282,11 +283,14 @@ class TrayLauncher:
     def _build_icon(self) -> Icon:
         def show_console(icon, item) -> None:
             if self._mode == "gateway":
-                webbrowser.open("http://127.0.0.1:8317/ui")
+                # open_console waits for the port and carries the admin token, so
+                # "open the console" never lands on the token dialog (and follows
+                # a port changed via .env or the launcher argument).
+                open_console(path="ui", wait=5.0)
 
         def show_agent(icon, item) -> None:
             if self._mode == "gateway":
-                webbrowser.open("http://127.0.0.1:8317/ui/agent")
+                open_console(path="ui/agent", wait=5.0)
 
         def view_log(icon, item) -> None:
             subprocess.Popen(  # noqa: S603 - notepad is a fixed Windows component

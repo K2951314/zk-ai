@@ -98,29 +98,38 @@
 ```bash
 git clone <your-repo> zk-ai && cd zk-ai
 
-# 依赖
-uv venv && uv pip install -e ".[dev]"
-#   或者： python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
+# 安装依赖（uv 会自动下载 Python 3.12+，无需单独装 Python）
+uv sync
 
-# 配置
+# 启动（Windows 双击 scripts\start_gateway.cmd 也行，端口作参数传入）
+scripts\start_gateway.cmd 9000
+```
+
+**首次启动会替你做三件事**，不用再手动准备：
+
+1. `.env` 和 `config/*.yaml` 不存在时，从同目录的 `.example` 模板复制一份
+   （都是 gitignore 的本地文件），然后列出还差哪些值没填
+2. 数据库建表（`scripts/init_db.py` 只在你要 `--reset` / `--show` 时才用）
+3. 网关就绪后**自动打开浏览器**进入控制台，并带上 `.env` 里的
+   `ZKAI_ADMIN_TOKEN`——不必再去令牌框里粘贴
+
+想全程手动也可以，结果完全一致：
+
+```bash
 cp config/config.example.yaml  config/config.yaml
 cp config/providers.example.yaml config/providers.yaml
 cp config/models.example.yaml   config/models.yaml
 cp .env.example .env          # 填入真实 Key（.env 已被 .gitignore 忽略）
 
-# 安装依赖（uv 会自动下载 Python 3.12+，无需单独装 Python）
-uv sync
-
-# 建表
-python scripts/init_db.py
-
-# 启动
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8317
-scripts\start_gateway.cmd 9000   # 或用启动脚本，端口作参数传入
 ```
 
 > `config.yaml` / `providers.yaml` / `models.yaml` 缺省时会自动回退到同目录的
 > `*.example.yaml`，所以未配置也能启动（只是没有可用凭据）。
+
+进控制台后，首页的 **「⚠️ 需要处理」** 面板会把配置层面的问题一次列清——
+哪个供应商没配 Key、哪个 Key 的环境变量是空的、哪个供应商一个模型都没挂，
+每行右边就是对应的修复入口，照着点完即可，不用猜哪个供应商坏了。
 
 调用：
 
@@ -1243,15 +1252,42 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
    → `_strip_reasoning_fields()` 见到打标即把正文置空并除标；截断信号仍由
    `finish_reason=length` 承担。**教训**：显式开关的语义要穿透「回填」这类
    跨层变换；开关与防空白守卫冲突时，要在交互点显式裁决。
+12. **新增供应商后适配器没注册**：`POST /admin/providers` 更新了 config / 凭据池 /
+   限速器，唯独没碰 Router 的 adapter 表——而 `_adapters` 只在启动和 reload 时重建。
+   于是加完供应商再点「探测模型」就 500：`provider 'X' is unknown or disabled`
+   （把"我没注册"说成"不存在或禁用"，极具误导性）。删除同理，adapter 会残留。
+   → `Router` 增加 `upsert_adapter()` / `remove_adapter()`，两个端点各调一次；
+   顺带修掉 `loop.create_task` 无强引用的 RUF006（GC 会在关连接前回收任务）。
+13. **真实 Key 被粘进凭据 ID 栏**：控制台「加 Key」只让填环境变量名、没有填 Key 的位置，
+   运营者于是把 Key 粘到「ID」——于是一把 64 位密钥以 credential id 的形态流进
+   `providers.yaml`、DB、控制台和日志，而它引用的环境变量在 `.env` 里并不存在。
+   → 表单补「Key 值」字段 + 后端 `write_env`：密钥写 `.env`（gitignore）、
+   YAML 只记变量名，并即时写 `os.environ` 让新 Key 无需重启即生效；
+   `looks_like_secret()` 对「40+ 位无分隔串当 id」硬拦。
+14. **Anthropic 协议的 `thinking` 块被整块丢弃**：StepFun 每次回复都带
+   `{type: thinking}` 块，适配器只读 `text` / `tool_use`。`max_tokens` 偏小、
+   截断发生在思考阶段时，调用方拿到 **HTTP 200 + 空正文 + 无任何解释**——
+   正是缺陷 8 在 Anthropic 协议侧的同一个坑。→ thinking 文本按项目既有约定进
+   `reasoning` extra，走 `_recover_reasoning_only_content()` 回填（该 helper 父子类
+   重复定义，已上移到 `ProviderAdapter`；顺带补上 tool_calls 轮不回填的漏洞）。
+15. **模型能力靠命名猜**：预设表按 `flash` / `vision` / `long` 等关键词猜能力，
+   `step-5-preview` 一个都不沾 → 判成 1M 上下文但 vision=0、long_context=5，
+   能力路由直接选错。而 StepFun 的 `GET /models` 明明给了
+   `max_input_tokens` / `enable_vision_input` / `enable_reason` /
+   `reasoning_effort_support_list`。→ `app/models/discovery.py` 归一各厂元数据字段
+   （**未提及的字段恒为 None，绝不编造**，前端据此区分「实测 / 预估」），
+   `model_catalogue()` 透出原始条目，实测压过手写预设。
 
 另外修掉了 `"stop" if saw_content else "stop"` 这类死分支、`Repository` 里跨类型复用
-`row` 变量等 40+ 个静态检查问题。
+`row` 变量等 40+ 个静态检查问题，以及托盘「打开控制台」硬编码 8317 端口
+（换端口后点不开）、`upsert_list_entry` 的 `_sync_entry` 删键导致整条模型被清空
+（改模型条目必须把 `deployments` 原样带回）。
 
 **静态检查**：
 
 ```bash
 uv run ruff check app tests scripts   # All checks passed!
-uv run mypy app scripts               # Success: no issues found in 57 source files
+uv run mypy app scripts               # Success: no issues found in 65 source files
 ```
 
 > `mypy` 只检查交付代码（`app/`、`scripts/`）。`tests/` 在 `pyproject.toml` 中显式排除：
