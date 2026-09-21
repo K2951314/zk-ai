@@ -116,11 +116,34 @@ echo.
 REM launch_hidden.py spawns pythonw with NO console window; a bare
 REM `start ... pythonw.exe` inherits the batch console and leaves a minimized
 REM python.exe window stuck in the taskbar (uv venv launcher is a trampoline).
+REM It also returns non-zero when the tray died on startup, and its own output
+REM is captured in data\tray_gateway.log - without that, a broken .venv looked
+REM exactly like "the gateway crashed silently".
 .venv\Scripts\python.exe scripts\launch_hidden.py gateway
-REM Open the console ourselves once the port answers: it waits for the gateway,
-REM then loads /ui with ZKAI_ADMIN_TOKEN in the URL so the operator never has to
-REM paste it. Detached, so this window can close immediately.
-.venv\Scripts\python.exe scripts\open_console.py --detach --port %ZKAI_PORT%
+if errorlevel 1 goto :trayfailed
+REM Wait for the port in the FOREGROUND, then open the console with the admin
+REM token: this window stays open while the gateway boots (a few seconds), so a
+REM gateway that never comes up is reported here instead of vanishing.
+.venv\Scripts\python.exe scripts\open_console.py --port %ZKAI_PORT% --wait 30
+if errorlevel 1 goto :nolisten
+goto :end
+
+:trayfailed
+echo.
+echo   [ERROR] The tray process could not start, so no icon and no gateway.
+echo           Logs: data\tray_gateway.log  and  data\gateway.log
+echo           If it says ModuleNotFoundError, run:  uv sync
+echo.
+pause
+goto :end
+
+:nolisten
+echo.
+echo   [ERROR] The tray is running but nothing answered on port %ZKAI_PORT%.
+echo           Server log: data\gateway.log
+echo           Right-click the tray icon - View log, or re-run this script.
+echo.
+pause
 goto :end
 
 :busy

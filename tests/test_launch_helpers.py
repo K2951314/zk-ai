@@ -117,6 +117,8 @@ def test_main_stops_previous_tray_before_spawning(monkeypatch, tmp_path: Path) -
     """A .cmd double-click must replace the tray, not run a second one."""
     interpreter = tmp_path / "pythonw.exe"
     interpreter.write_bytes(b"")
+    monkeypatch.setattr(launch_hidden, "_ROOT", tmp_path)
+    monkeypatch.setattr(launch_hidden, "_SETTLE_SECONDS", 0)
     monkeypatch.setattr(launch_hidden, "_child_interpreter", lambda: (interpreter, {}))
     monkeypatch.setattr(launch_hidden, "stop_existing_trays", lambda mode: [4242])
     calls: list[str] = []
@@ -126,3 +128,72 @@ def test_main_stops_previous_tray_before_spawning(monkeypatch, tmp_path: Path) -
 
     assert launch_hidden.main(["gateway"]) == 0
     assert calls == ["spawn"], "the new tray is spawned only after the old one is stopped"
+
+
+# --------------------------------------------------------------------------- #
+# launch_hidden: a tray that dies on startup must say so
+# --------------------------------------------------------------------------- #
+class _FakeProc:
+    """Stand-in for Popen: ``poll()`` answers with a fixed liveness verdict."""
+
+    def __init__(self, exit_code: int | None) -> None:
+        self._exit_code = exit_code
+        self.returncode = exit_code
+
+    def poll(self) -> int | None:
+        return self._exit_code
+
+
+def _patch_spawn(monkeypatch, tmp_path: Path, proc: object) -> dict[str, object]:
+    """Wire launch_hidden onto tmp_path and capture what it would spawn."""
+    interpreter = tmp_path / "pythonw.exe"
+    interpreter.write_bytes(b"")
+    captured: dict[str, object] = {}
+
+    def fake_popen(args: list[str], **kwargs: object) -> object:
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(launch_hidden, "_ROOT", tmp_path)
+    monkeypatch.setattr(launch_hidden, "_SETTLE_SECONDS", 0)
+    monkeypatch.setattr(launch_hidden, "_child_interpreter", lambda: (interpreter, {}))
+    monkeypatch.setattr(launch_hidden, "stop_existing_trays", lambda mode: [])
+    monkeypatch.setattr(launch_hidden.subprocess, "Popen", fake_popen)
+    return captured
+
+
+def test_tray_that_crashes_on_startup_is_reported(monkeypatch, tmp_path: Path, capsys) -> None:
+    """The real incident: .venv missing Pillow, tray dead before it drew an icon.
+
+    Nothing used to say so - the child's output went to DEVNULL and the .cmd
+    closed, which read as "the gateway flashed and vanished".
+    """
+    _patch_spawn(monkeypatch, tmp_path, _FakeProc(exit_code=1))
+
+    assert launch_hidden.main(["gateway"]) == 1
+    out = capsys.readouterr().out
+    assert "tray exited immediately" in out
+    assert "uv sync" in out, "point at the fix that actually applies most of the time"
+
+
+def test_dead_tray_leaves_its_output_on_disk(monkeypatch, tmp_path: Path) -> None:
+    """The tray's stdout/stderr must land in a file, not in DEVNULL."""
+    captured = _patch_spawn(monkeypatch, tmp_path, _FakeProc(exit_code=1))
+
+    launch_hidden.main(["gateway"])
+
+    log = tmp_path / "data" / "tray_gateway.log"
+    assert log.exists(), "the launcher creates the log before spawning"
+    assert "launching tray: gateway" in log.read_text(encoding="utf-8")
+    kwargs = captured.get("kwargs")
+    assert isinstance(kwargs, dict)
+    assert kwargs["stderr"] is launch_hidden.subprocess.STDOUT
+    assert kwargs["stdout"] is not launch_hidden.subprocess.DEVNULL
+
+
+def test_healthy_tray_returns_zero(monkeypatch, tmp_path: Path) -> None:
+    """A tray still alive after the settle window is a success."""
+    _patch_spawn(monkeypatch, tmp_path, _FakeProc(exit_code=None))
+
+    assert launch_hidden.main(["gateway"]) == 0
+

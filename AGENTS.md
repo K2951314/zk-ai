@@ -47,12 +47,30 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   AsyncSession 在同一连接上事务互相踩——实测表现为 UPDATE 静默丢失、空事务
   COMMIT 报错。`Database.session()` 已加进程级 asyncio.Lock 把事务串行化；
   新 repository 别绕过它自己开连接，也别在持有 session 时做长耗时工作
+- **`.venv` 不会跟着 `pyproject.toml` 自己长**（2026-09-21 实测）：加了依赖不 `uv sync`，
+  表现就是「双击后闪退、任务栏连图标都没有」——`app.main` 在 `ruamel.yaml` 上
+  ImportError（网关秒退），托盘在 `PIL`/`pystray` 上 ImportError（**托盘自己没起来**，
+  所以不是蓝图标而是压根没图标），而旧版 `launch_hidden.py` 把托盘输出丢进 DEVNULL、
+  `.cmd` 无条件关窗，全程一个字都看不到。现在：托盘自身输出落 `data/tray_<mode>.log`，
+  起来就退 1 并打印日志尾部，`start_gateway.cmd` 前台等端口 30s，两条失败路径都
+  pause+指日志。**本机装包用 `uv sync --default-index
+  https://pypi.tuna.tsinghua.edu.cn/simple`**：PyPI 直连和走 10808 代理都能挂死，
+  镜像几秒完成；代价是它会把 `uv.lock` 里的 URL 改成镜像域（哈希不变，纯 URL churn），
+  同步完 `git checkout -- uv.lock` 复原
+- **导入迁移包前必须先停网关**（2026-09-21 为这条流过血）：`import` 覆盖 `data/zkai.db`
+  时，若同目录还留着上一代的 `-wal`/`-shm`，下次开库会把别人的 WAL 帧回放到新库上 →
+  `database disk image is malformed`，且**不是警告是真损坏**（本机 `requests`/
+  `usage_records` 就是这么废的；SQLite 的 `-wal`/`-shm` 不属于迁移包内容）。现在
+  `import_package` 先把 side-car 备份进 `imports_backup/<时间戳>/` 再删除，CLI 侧只要
+  端口有人听就直接拒绝。验证损坏库要用 sqlite3 backup API 取一致快照再 `PRAGMA
+  integrity_check`——直接 `cp` 正在写的库必然报假阳性
 
 ## 当前状态（2026-09-19）
 
 - 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
 - `retry.max_credentials_per_deployment` 已从 6 提到 8（试满全部商汤账号，
-  **重启网关后生效**）；会话残留（*.mock.bak、*.stale、旧库备份）已清理
+  **重启网关后生效**）；`*.mock.bak` 会话残留已清理，但 `data/*.stale` 与
+  `data/zkai.db.bak-*`（均为 9-12 遗留）仍在，属可删残留
 - 对抗审查（2026-09-12）：git 历史无密钥、鉴权常量时间比较且 None 安全、Docker
   不烤密钥（.dockerignore 已补）。**遗留决策（2026-09-20 已收紧）**：
   `ZKAI_HOST=0.0.0.0` 曾且未设 `ZKAI_API_TOKEN` → /v1/* 对局域网开放；现已设
@@ -95,8 +113,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-21 起 436 passed；推送走本机代理，
-  直连常被重置——见记忆 github-push-via-local-proxy）
+- 门禁 ruff / mypy / pytest 全绿（2026-09-21 起 445 passed）；`git push` 走本机代理
+  （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
   （重启不清零），`--calibrate-actual 实扣数` 可随时精校准；并发 AIMD 自适应
@@ -217,5 +235,31 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   SHA-256），不为换机引入 `cryptography`/7-Zip 依赖——新机器只有 `.venv`
   可用；③`_snapshot_database` 走 sqlite3 backup API，网关在写也不会拿到
   半提交页；④导入默认**拒绝覆盖**，`--overwrite` 才覆盖且先备份到
-  `imports_backup/<时间戳>/`。测试 `tests/test_migrate.py`（6 例：载荷清单、
-  密文无明文 Key、往返、错密码 fail-closed、拒覆盖、备份优先）。
+  `imports_backup/<时间戳>/`。测试 `tests/test_migrate.py`（12 例：载荷清单、
+  密文无明文 Key、往返、错密码 fail-closed、拒覆盖、备份优先、stale WAL 清理、
+  无库时不动 side-car、网关在跑时拒绝、端口取自 .env、冲突退出码、错密码给人话）。
+
+- 2026-09-21（晚，闪退排查→两处收口）：本机双击后窗口秒关、任务栏无图标，根因是
+  `.venv` 停在 9-12 从未再 `uv sync`，`ruamel-yaml`/`pystray`/`pillow` 全缺（详见
+  已知坑）。修的过程中补了两处能力：
+  ①**启动失败必须说话**：`launch_hidden.py` 不再把托盘输出丢进 DEVNULL，落
+  `data/tray_<mode>.log`，spawn 后 `_SETTLE_SECONDS`（1.5s）内托盘退出就打印退出码 +
+  日志尾部并返回 1；`start_gateway.cmd` 据此分 `:trayfailed`，并把 `open_console.py`
+  从 `--detach` 改成**前台等端口 30s**（`:nolisten` 分支），窗口只在真正失败时留下；
+  `start_burner.cmd` 同步加检查。副作用：正常启动窗口多停 ~1.5s+网关启动时间才关。
+  ②**导入不再制造损坏**：`import_package` 恢复 `data/zkai.db` 时先备份再删除目标机的
+  `-wal`/`-shm`（`_DB_SIDECARS`），CLI 侧 `_gateway_is_listening()` 发现端口有人听直接
+  拒绝（library 函数不探测，保持可脚本化）；`import_machine.cmd` 撞到覆盖守卫会问一句
+  就地带 `--overwrite` 重试。测试共 +9（`test_launch_helpers.py` 托盘崩溃/日志落盘/
+  存活三分支、`test_migrate.py` 上条所列 6 例），门禁 ruff / mypy / **445 passed**。
+  ③**`tests/test_burn_budget.py` 一直在污染真实日志**：`_burner()` 没传 `--log-file`，
+  `parse_args` 默认落到 `data/burn_sensenova.log`，于是每跑一次测试就往运营日志里追加
+  几行「账号 K1 预算触顶 / 永久停靠」——而这个文件正是托盘心跳判绿/蓝的依据。已加
+  autouse fixture 把 `DEFAULT_LOG` / `STATE_FILE` 重定向到 `tmp_path`（与 9-20 修
+  `rate_limits.json` 污染同源，那次只修了网关容器这一处）。
+  ④**migrate 的退出码成了 .cmd 的契约**：`_EXIT_CONFLICTS=3`（文件已存在，只有它才
+  值得问 `--overwrite`）、`_EXIT_BAD_PASSPHRASE=2`（密码错/包损坏——原来直接甩
+  ValueError traceback，手册却写着会给一句人话）、`_EXIT_ERROR=1`（含"网关在跑"拒绝）。
+  改这几个码要同步 `import_machine.cmd` 的 `if errorlevel 3` 分支。
+  **本机数据现状**：`requests` / `usage_records` 两张表已因该损坏不可读（其余 7 表正常），
+  待用 22:13 的 `exports/zkai-machine-20260921-221207.zip` 重导恢复。

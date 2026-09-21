@@ -14,6 +14,15 @@ This script runs *inside* the console the .cmd already opened (no new window),
 spawns the tray with the real GUI-subsystem ``pythonw.exe`` and no-console
 creation flags, then exits immediately so the batch window can close.
 
+The tray's own stdout/stderr goes to ``data/tray_<mode>.log`` rather than
+DEVNULL, and we give it a moment before declaring success. Both exist because
+of a real incident: ``.venv`` had never been re-synced after Pillow/pystray
+became dependencies, so the tray died on ``from PIL import ...`` before it
+could even draw an icon. With DEVNULL that failure was invisible - the .cmd
+window vanished and the taskbar stayed empty, which reads as "the gateway
+crashed" when in fact the *watcher* never started. The log plus a non-zero
+exit code turn that into an actionable message.
+
 Usage: ``python scripts/launch_hidden.py gateway [extra args]``
 """
 
@@ -36,6 +45,15 @@ from scripts.tray_launcher import _NO_WINDOW, _child_interpreter, _venv_home  # 
 
 #: How long a gracefully-asked tray gets to exit before it is killed outright.
 _EXIT_GRACE = 5.0
+
+#: How long the freshly-spawned tray gets to prove it is still alive. A tray
+#: that crashes on import (missing dependency, broken interpreter) is already
+#: gone by then, so the check is reliable; the cost is that every successful
+#: launch waits this long before the .cmd window is allowed to close.
+_SETTLE_SECONDS = 1.5
+
+#: Lines of the tray log printed back to the operator when it dies.
+_TAIL_LINES = 15
 
 #: Flag for the short-lived probe processes (powershell/taskkill).
 #: Deliberately NOT the tray's ``CREATE_NO_WINDOW | DETACHED_PROCESS``: with
@@ -125,6 +143,25 @@ def stop_existing_trays(mode: str) -> list[int]:
     return pids
 
 
+def _tray_log(mode: str) -> Path:
+    """Where the tray process' own stdout/stderr lands."""
+    return _ROOT / "data" / f"tray_{mode}.log"
+
+
+def _tail(path: Path, lines: int) -> str:
+    """Last *lines* lines of *path* (empty string when unreadable)."""
+    try:
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    except OSError:
+        return ""
+
+
+def _tray_exit_code(proc: subprocess.Popen[bytes] | None) -> int | None:
+    """The tray's exit code once it has died inside the settle window, else None."""
+    time.sleep(_SETTLE_SECONDS)
+    return proc.poll() if proc is not None else None
+
+
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else "gateway"
     if mode not in {"gateway", "burner"}:
@@ -142,17 +179,32 @@ def main(argv: list[str]) -> int:
             print(f"stopped previous tray ({mode}): PID {', '.join(map(str, stopped))}")
     argv_out = [str(interpreter), "scripts/tray_launcher.py", mode, *argv[1:]]
     print(f"starting tray ({mode}) with {interpreter.name}, no console window")
-    # No-console flags *and* a GUI-subsystem interpreter: belt and braces. The
-    # child is fully detached, so it survives this helper (and the .cmd) exiting.
-    subprocess.Popen(  # noqa: S603 - our own fixed argv
-        argv_out,
-        cwd=_ROOT,
-        env={**os.environ, **env_extra},
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
-    )
+    log = _tray_log(mode)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with log.open("ab", buffering=0) as handle:
+        handle.write(f"\n===== {stamp} launching tray: {mode} =====\n".encode())
+        # No-console flags *and* a GUI-subsystem interpreter: belt and braces. The
+        # child is fully detached, so it survives this helper (and the .cmd) exiting.
+        proc = subprocess.Popen(  # noqa: S603 - our own fixed argv
+            argv_out,
+            cwd=_ROOT,
+            env={**os.environ, **env_extra},
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            creationflags=_NO_WINDOW,
+        )
+    if (code := _tray_exit_code(proc)) is not None:
+        print(f"ERROR: the tray exited immediately (code {code}) - nothing will show in the taskbar.")
+        print(f"       Its own output: {log.relative_to(_ROOT)}")
+        detail = _tail(log, _TAIL_LINES)
+        if detail:
+            print("       last lines:")
+            for line in detail.splitlines():
+                print(f"       | {line}")
+        print("       Most often this is a stale .venv - run: uv sync")
+        return 1
     return 0
 
 

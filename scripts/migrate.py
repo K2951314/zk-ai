@@ -36,6 +36,7 @@ import getpass
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import sys
 import time
@@ -55,6 +56,14 @@ _MAGIC = b"ZKAI-MIGRATE\x00\x01"
 #: is "lost USB stick", not a nation state; the real lock is the passphrase.
 _KDF_ROUNDS = 120_000
 
+#: Process exit codes. The batch wrappers branch on these, so they are part of
+#: the tool's contract: ``import_machine.cmd`` only offers the ``--overwrite``
+#: retry for :data:`_EXIT_CONFLICTS`, and never for a wrong passphrase.
+_EXIT_OK = 0
+_EXIT_ERROR = 1
+_EXIT_BAD_PASSPHRASE = 2
+_EXIT_CONFLICTS = 3
+
 
 # --------------------------------------------------------------------------
 # payload layout
@@ -67,6 +76,19 @@ def _data_files() -> list[Path]:
         Path("data/burn_state.json"),
         Path("data/rate_limits.json"),
     ]
+
+
+#: SQLite side-car files, which belong to whatever database generation is
+#: currently on disk and are deliberately NOT part of the payload (export takes
+#: a clean snapshot through the backup API, so there is nothing to replay).
+#:
+#: They still have to be *dealt with* on the way in: restoring ``data/zkai.db``
+#: while an old ``-wal`` sits next to it makes the next open replay frames from
+#: a different database onto the new one. That is not a warning, it is
+#: corruption - it cost this project its ``requests`` / ``usage_records``
+#: history when an archive was re-imported over a live checkout. Import
+#: therefore moves them into the backup folder and removes them.
+_DB_SIDECARS = ("data/zkai.db-wal", "data/zkai.db-shm")
 
 
 def _config_files() -> list[Path]:
@@ -268,16 +290,41 @@ def import_package(
                 Path(n) for n in manifest["files"]
                 if n != _MANIFEST and not n.startswith("imports_backup/")
             ]
+            # A database in the payload drags its side-cars along: whatever
+            # -wal/-shm is on disk right now describes the database we are
+            # about to replace, so it must go - see ``_DB_SIDECARS``.
+            db_is_restored = any(rel.as_posix() == "data/zkai.db" for rel in to_restore)
+            stale_sidecars = (
+                [Path(rel) for rel in _DB_SIDECARS if (root / rel).exists()]
+                if db_is_restored
+                else []
+            )
 
             conflicts = [rel for rel in to_restore if (root / rel).exists()]
             if conflicts and not overwrite:
                 listing = "\n  ".join(str(c) for c in conflicts)
-                raise SystemExit(
+                # Exit code 3, not 1: import_machine.cmd tells "the target
+                # already has these files" apart from a hard refusal (gateway
+                # running, wrong passphrase) and offers the --overwrite retry
+                # only for this case - asking it after a wrong passphrase would
+                # just be noise.
+                print(
                     "目标机器上已有这些文件，直接覆盖有风险：\n  " + listing +
                     "\n\n确认要覆盖就加 --overwrite 再跑一次（旧文件会先备份）。"
                 )
+                raise SystemExit(_EXIT_CONFLICTS)
 
-            backup = _backup_existing(root, to_restore) if conflicts else None
+            backup = (
+                _backup_existing(root, [*to_restore, *stale_sidecars])
+                if (conflicts or stale_sidecars)
+                else None
+            )
+            # Drop the side-cars *before* the new database lands: for the whole
+            # window in between, an open of data/zkai.db would pair the fresh
+            # file with the old WAL. Backup first, then unlink.
+            for rel in stale_sidecars:
+                (root / rel).unlink()
+                print(f"  已清除旧数据库的残留 {rel}（原文件在备份目录里）")
             restored: list[str] = []
             for rel in to_restore:
                 dst = root / rel
@@ -310,6 +357,55 @@ def _ask_passphrase(confirm: bool) -> str:
                 print("两次不一致，重来。")
                 continue
         return pw
+
+
+def _env_value(name: str, root: Path | None = None) -> str | None:
+    """Read one variable out of ``.env`` (a double-click exports nothing).
+
+    ``root`` is resolved at call time rather than defaulting to ``_ROOT`` in
+    the signature, so a caller (or a test) that redirects ``_ROOT`` actually
+    gets the ``.env`` it asked for.
+    """
+    base = root or _ROOT
+    try:
+        lines = (base / ".env").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if line.startswith("#") or not line.startswith(f"{name}="):
+            continue
+        return line.split("=", 1)[1].strip().strip('"').strip("'") or None
+    return None
+
+
+def _resolve_port(default: int = 8317) -> int:
+    """The port this checkout uses: environment, then ``.env``, then the default.
+
+    A double-click exports neither, and a hardcoded 8317 would probe the wrong
+    socket for anyone who moved the gateway.
+    """
+    raw = os.environ.get("ZKAI_PORT") or _env_value("ZKAI_PORT") or ""
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _gateway_is_listening(port: int = 0, timeout: float = 1.0) -> bool:
+    """True when something already answers on the gateway's port.
+
+    Importing onto a running gateway is the one way to genuinely wreck the
+    database: SQLite keeps the old file open through ``-wal``/``-shm``, and
+    replacing that file underneath it leaves a write-ahead log that belongs to
+    nothing. The CLI refuses before it touches a byte; the library function
+    stays probe-free so tests (and scripted restores) keep full control.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port or _resolve_port()), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -356,15 +452,29 @@ def main(argv: list[str] | None = None) -> int:
         print("  1. 把这个 .zip 拷到新电脑（U盘/网盘/局域网都行）")
         print("  2. 新电脑：git pull（或拷源码）→ 双击 scripts\\import_machine.cmd")
         print("  3. 把这个 .zip 拖进黑窗口，输入刚才的密码")
-        return 0
+        return _EXIT_OK
 
     if args.cmd == "import":
-        pw = args.passphrase or _ask_passphrase(confirm=False)
         archive = Path(args.archive)
         if not archive.exists():
             print(f"找不到迁移包: {archive}")
-            return 1
-        restored, backup = import_package(archive, pw, overwrite=args.overwrite)
+            return _EXIT_ERROR
+        # Refuse before asking for the passphrase: making the operator type a
+        # secret only to be told "stop the gateway first" is a bad trade.
+        if _gateway_is_listening():
+            print(f"网关正在端口 {_resolve_port()} 上运行 - 导入前必须先停掉它。")
+            print("托盘右键「退出」（或 scripts\\port_guard.py），否则覆盖数据库会留下对不上的 WAL，")
+            print("下次启动就是 database disk image is malformed。这一步不能省。")
+            return _EXIT_ERROR
+        pw = args.passphrase or _ask_passphrase(confirm=False)
+        try:
+            restored, backup = import_package(archive, pw, overwrite=args.overwrite)
+        except ValueError as exc:
+            # Wrong passphrase / not one of our archives. Without this the
+            # operator gets a raw traceback where the manual promises a sentence.
+            print(f"导入失败：{exc}")
+            print("什么都没改动（校验不过就不落盘）。密码确认无误还报这条，就是 zip 拷坏了，重拷一次。")
+            return _EXIT_BAD_PASSPHRASE
         print()
         print("导入完成。")
         for name in restored:
@@ -375,9 +485,9 @@ def main(argv: list[str] | None = None) -> int:
         print("下一步：")
         print("  1. 双击 scripts\\start_gateway.cmd 启动（缺 .venv 会自动重建）")
         print("  2. 浏览器打开 http://127.0.0.1:8317/health 看到 healthy 就成了")
-        return 0
+        return _EXIT_OK
 
-    return 2
+    return _EXIT_ERROR
 
 
 if __name__ == "__main__":

@@ -528,7 +528,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 22 个测试模块，436 个用例，全部 Mock
+├── tests/                # conftest + 22 个测试模块，445 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -1183,7 +1183,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**436 个用例，全部通过，零网络、零真实配额。**
+**445 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1357,6 +1357,14 @@ docker run --rm -p 8317:8317 \
 - 包与 `imports_backup/` 都含全部明文 Key，已在 `.gitignore` 忽略；别发公开群。
 - 导出是**在线备份**（SQLite backup API），网关正在写也不会拿到半提交的页。
 - 只想搬配置不要历史：删掉包内 `data/zkai.db` 再导入即可（标准 zip）。
+- **在已经跑过网关的机器上重导（含本机自我修复）：先从托盘右键「退出」再导入**。
+  导入现在会先备份并删除目标机上残留的 `data/zkai.db-wal` / `-shm`——留着上一代的
+  WAL 去开新库，就是 `database disk image is malformed`。命令行侧 `import` 只要发现
+  端口有人听就直接拒绝；双击 `import_machine.cmd` 撞到「文件已存在」守卫时，回答 `y`
+  即带 `--overwrite` 重试（覆盖前一定先备份到 `imports_backup/<时间戳>/`）。
+- 启动失败不再静默：托盘进程自己的输出在 `data/tray_gateway.log`（消耗器为
+  `data/tray_burner.log`），网关进程输出在 `data/gateway.log`。托盘没起来时
+  `start_gateway.cmd` 会留在窗口里打印退出码和日志末尾，不会再「闪退后一无所知」。
 
 ---
 

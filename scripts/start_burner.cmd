@@ -72,6 +72,14 @@ echo   - Log  : data\burn_sensenova.log
 echo   - Stop : right-click tray icon - Quit
 echo.
 .venv\Scripts\python.exe scripts\launch_hidden.py burner %*
+if errorlevel 1 (
+  echo.
+  echo   [ERROR] The tray process could not start, so no icon and no burner.
+  echo           Logs: data\tray_burner.log  and  data\burn_sensenova.log
+  echo           If it says ModuleNotFoundError, run:  uv sync
+  echo.
+  pause
+)
 goto :end
 
 :end

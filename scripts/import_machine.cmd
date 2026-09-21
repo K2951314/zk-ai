@@ -46,14 +46,31 @@ if "%ARCHIVE%"=="" (
 )
 
 ".venv\Scripts\python.exe" scripts\migrate.py import "%ARCHIVE%"
-if errorlevel 1 (
-  echo.
-  echo   Import failed - see the message above.
-  echo.
-  pause
-  goto :end
-)
+if not errorlevel 1 goto :importdone
+REM Exit code 3 = the overwrite guard (target already has .env / config\*.yaml),
+REM which is the only failure worth answering with --overwrite. 1 (gateway still
+REM running) and 2 (wrong passphrase / truncated zip) just get reported as-is.
+if errorlevel 3 goto :askoverwrite
+goto :importfailed
 
+:askoverwrite
+echo.
+echo   (Those files already exist - that is the overwrite guard, not a failure.)
+set "ANSWER="
+set /p "ANSWER=   Retry with --overwrite? current files are backed up first [y/N]: "
+if /i not "%ANSWER%"=="y" goto :importfailed
+echo.
+".venv\Scripts\python.exe" scripts\migrate.py import "%ARCHIVE%" --overwrite
+if errorlevel 1 goto :importfailed
+
+:importdone
+echo.
+pause
+goto :end
+
+:importfailed
+echo.
+echo   Import failed - see the message above.
 echo.
 pause
 goto :end

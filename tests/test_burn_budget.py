@@ -8,7 +8,11 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
+import pytest
+
+from scripts import burn_sensenova
 from scripts.burn_sensenova import (
     WIN_5H,
     WIN_WEEK,
@@ -18,6 +22,21 @@ from scripts.burn_sensenova import (
     parse_args,
     parse_week_anchor,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_burner_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests must never append to the live log or rewrite the live ledger.
+
+    ``parse_args`` resolves both defaults from these module constants at call
+    time, so redirecting them here is enough - and it also covers a future test
+    that forgets to pass ``--log-file``. Found the hard way: every run of this
+    file was appending real-looking "预算触顶 / 永久停靠" lines for a fixture
+    account (K1) into ``data/burn_sensenova.log``, which is the file the tray's
+    heartbeat reads to decide green vs blue.
+    """
+    monkeypatch.setattr(burn_sensenova, "DEFAULT_LOG", tmp_path / "burn_sensenova.log")
+    monkeypatch.setattr(burn_sensenova, "STATE_FILE", tmp_path / "burn_state.json")
 
 # ---------------------------------------------------------------------------
 # parse_week_anchor
