@@ -302,6 +302,10 @@ models:
         options: {}
         tags: []
 
+  # strategy 决定 targets 顺序的含义:
+  #   capability - 按能力分排序，targets 只是兜底链（不决定首选）
+  #   priority   - targets[0] 就是首选，按顺序往后兜
+  #   pin_first: true - capability 下把 targets[0] 硬钉为首选（其余仍按能力分排）
 aliases:
   - name: zk-auto
     description: 默认入口：均衡型，由能力路由按每次请求的内容选模型

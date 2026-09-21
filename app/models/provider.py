@@ -196,6 +196,10 @@ class ModelAliasConfig(BaseModel):
     #: from the request.
     weights: dict[str, float] = Field(default_factory=dict)
     fallback_to_local: bool = False
+    #: When true, `targets[0]` is a hard pin that always leads the attempt order,
+    #: even under `strategy=capability`. Set by the console's model hot-swap so an
+    #: explicit operator choice overrides the capability ranking.
+    pin_first: bool = False
 
     @field_validator("targets")
     @classmethod

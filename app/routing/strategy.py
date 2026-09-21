@@ -103,6 +103,7 @@ class SelectionStrategy(ABC):
         self,
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         """Return eligible candidates first, in attempt order."""
 
@@ -133,7 +134,10 @@ class PrioritySelection(SelectionStrategy):
     name = AliasStrategy.PRIORITY.value
 
     def order(
-        self, candidates: list[RoutingCandidate], requirement: CapabilityRequirement | None = None
+        self,
+        candidates: list[RoutingCandidate],
+        requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (c.target_index, -c.deployment.priority, c.label))
@@ -147,10 +151,23 @@ class CapabilitySelection(SelectionStrategy):
     name = AliasStrategy.CAPABILITY.value
 
     def order(
-        self, candidates: list[RoutingCandidate], requirement: CapabilityRequirement | None = None
+        self,
+        candidates: list[RoutingCandidate],
+        requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
-        eligible.sort(key=lambda c: (-c.score, -c.deployment.priority, c.label))
+        if pin_first:
+            # An explicitly pinned head (console hot-swap) leads the attempt order.
+            # Everything after it stays capability-ranked, so the failover chain
+            # remains as smart as it is without the pin.
+            head = [c for c in eligible if c.target_index == 0]
+            rest = [c for c in eligible if c.target_index > 0]
+            rest.sort(key=lambda c: (-c.score, -c.deployment.priority, c.label))
+            head.sort(key=lambda c: (-c.score, -c.deployment.priority, c.label))
+            eligible = head + rest
+        else:
+            eligible.sort(key=lambda c: (-c.score, -c.deployment.priority, c.label))
         blocked.sort(key=lambda c: c.label)
         return self._number(eligible + blocked)
 
@@ -161,7 +178,10 @@ class CostSelection(SelectionStrategy):
     name = AliasStrategy.COST.value
 
     def order(
-        self, candidates: list[RoutingCandidate], requirement: CapabilityRequirement | None = None
+        self,
+        candidates: list[RoutingCandidate],
+        requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(
@@ -181,7 +201,10 @@ class SpeedSelection(SelectionStrategy):
     name = AliasStrategy.SPEED.value
 
     def order(
-        self, candidates: list[RoutingCandidate], requirement: CapabilityRequirement | None = None
+        self,
+        candidates: list[RoutingCandidate],
+        requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (-(c.breakdown.get("speed", 0.0)), -c.score, c.label))
@@ -199,7 +222,10 @@ class RoundRobinSelection(SelectionStrategy):
         self._cursor: dict[str, int] = {}
 
     def order(
-        self, candidates: list[RoutingCandidate], requirement: CapabilityRequirement | None = None
+        self,
+        candidates: list[RoutingCandidate],
+        requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (-c.deployment.priority, -c.score, c.label))
@@ -218,7 +244,10 @@ class WeightedSelection(SelectionStrategy):
     name = AliasStrategy.WEIGHTED.value
 
     def order(
-        self, candidates: list[RoutingCandidate], requirement: CapabilityRequirement | None = None
+        self,
+        candidates: list[RoutingCandidate],
+        requirement: CapabilityRequirement | None = None,
+        pin_first: bool = False,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         bands: dict[int, list[RoutingCandidate]] = {}

@@ -272,13 +272,15 @@ def make_model(
 
 def make_alias(name: str, targets: list[str], *, strategy: AliasStrategy = AliasStrategy.CAPABILITY,
                weights: dict[str, float] | None = None,
-               requires: dict[str, float] | None = None) -> ModelAliasConfig:
+               requires: dict[str, float] | None = None,
+               pin_first: bool = False) -> ModelAliasConfig:
     return ModelAliasConfig(
         name=name,
         targets=targets,
         strategy=strategy,
         weights=weights or {},
         requires=requires or {},
+        pin_first=pin_first,
     )
 
 

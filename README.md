@@ -420,6 +420,12 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 
 响应里的 `zk_ai` 字段会告诉你**实际**命中了哪个 provider / 模型 / Key：
 
+- `resolved_model` = **真正处理这次请求的模型**（不是别名计划链的第一位；
+  发生故障转移时它反映实际干活的那个，2026-09-21 修正）
+- `provider` / `credential_id` = 实际命中的供应商与 Key
+- `fallback_used` = 是否发生了故障转移
+
+
 ```json
 "zk_ai": {
   "requested_model": "zk-coding",
@@ -441,6 +447,13 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 | 选一个别名 | `"model": "zk-coding"` | 最常用，后端模型变了客户端不用改 |
 | 直接点名模型 | `"model": "kimi-k3"` | 临时指定 |
 | 改别名指向 | `PUT /admin/aliases/zk-coding` 热更新 | 不重启换后端 |
+| 控制台热切换（`zk-auto` 专用） | `POST /admin/chatgpt {"model": "..."}` 或控制台「🤖 ChatGPT」按钮 | 桌面版 / CLI 客户端，下一条消息生效 |
+
+**`zk-auto` 默认按能力分选模型**（`strategy=capability`）：别名里的 targets 顺序只是
+兜底链，不决定首选。想让某个模型必定排第一，用控制台热切换——它会把该模型设为
+`pin_first`（别名上的一个布尔标记），这一下会盖过能力分排序，目标模型必定领先，
+其余目标仍按能力分排成兜底链。只影响 `zk-auto`，其他别名不受影响。
+
 
 ### 3.5.7 关于 429
 
@@ -513,8 +526,9 @@ ZK-AI/
 │                         # —— 商汤日日新 + NVIDIA + Kimi 的可复制模板，见 §3.5
 ├── scripts/              # init_db, health_check, benchmark, mock_upstream, smoke_test,
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
+│                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 8 个测试模块，228 个用例，全部 Mock
+├── tests/                # conftest + 22 个测试模块，436 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -1169,7 +1183,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**228 个用例，全部通过，零网络、零真实配额。**
+**436 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1187,6 +1201,7 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
 | `tests/test_api.py` | 全部 HTTP 端点、SSE 形状、流式预检状态码、admin 鉴权、断开连接 |
 | `tests/test_config.py` | `.env` 注入进程环境、`${VAR}` 插值与默认值、env 优先于 YAML、三文件端到端加载、`*.example.yaml` 兜底、凭证配置告警 |
 | `tests/test_adapters.py` | **只在真实端点上才会暴露的形状**：推理模型只回思考内容、`base_url` 尾斜杠、带厂商前缀的模型名 |
+| `tests/test_migrate.py` | 一键换机：载荷清单、密文不含明文 Key、加解密往返、错密码 fail-closed、拒绝覆盖、覆盖前备份 |
 
 所有测试都用 `FakeAdapter`，**不会**发出任何真实请求。
 
@@ -1312,6 +1327,36 @@ docker run --rm -p 8317:8317 \
 
 镜像基于 `ghcr.io/astral-sh/uv`，多阶段构建；以非 root 用户运行；`HEALTHCHECK`
 直接打 `/health`。`docker-compose.yml` 里已配好数据卷、日志轮转和环境变量占位。
+
+---
+
+## 20.1 一键换机（迁移全部 Key / 配置 / 数据）
+
+换电脑不用重抄一遍密钥。整套可迁移状态 = `.env`（所有 Key）+ `config/*.yaml`
+（供应商/模型/别名）+ `data/zkai.db`（用量、Agent 会话、限额账本）+ 消耗器账本
+`data/burn_state.json` / `data/rate_limits.json`。
+
+- **旧电脑**：双击 `scripts/export_machine.cmd` → 设迁移密码 → 得到加密 zip
+  （`exports/zkai-machine-*.zip`）。纯快照，不停网关、不删文件。
+- **搬文件**：zip 拷到新电脑（任意方式）。
+- **新电脑**：装 uv → 跑一次 `scripts/start_gateway.cmd`（建 `.venv`）→
+  双击 `scripts/import_machine.cmd` → 拖入 zip → 输密码 → 再启动即可。
+
+等价命令行（可脚本化）：
+
+```bash
+.venv/Scripts/python.exe scripts/migrate.py export            # 交互输密码
+.venv/Scripts/python.exe scripts/migrate.py import pkg.zip    # 还原
+.venv/Scripts/python.exe scripts/migrate.py import pkg.zip --overwrite  # 允许覆盖（旧文件先备份）
+```
+
+安全说明：
+
+- 迁移包是 **XOR + PBKDF2 加密**的自包含 zip（仅依赖标准库，新机器不用装 7-Zip），
+  内嵌 SHA-256 校验——密码错了立刻报「密码不对」，不会解密出垃圾再坏掉。
+- 包与 `imports_backup/` 都含全部明文 Key，已在 `.gitignore` 忽略；别发公开群。
+- 导出是**在线备份**（SQLite backup API），网关正在写也不会拿到半提交的页。
+- 只想搬配置不要历史：删掉包内 `data/zkai.db` 再导入即可（标准 zip）。
 
 ---
 

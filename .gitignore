@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# 一键换机产物：迁移包与导入前备份都可能含全部 Key，绝不进仓库
+exports/
+imports_backup/
 config/config.yaml
 config/providers.yaml
 config/models.yaml

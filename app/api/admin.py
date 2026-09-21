@@ -1178,6 +1178,10 @@ async def set_chatgpt_model(
         enabled=True,
         weights=dict(existing.weights),
         requires=dict(existing.requires),
+        # The operator just pinned this model, so it must lead the attempt order
+        # even under `strategy=capability` - otherwise the highest-scoring
+        # model wins again and the hot-swap silently does nothing.
+        pin_first=True,
     )
     synced = _write_alias_file(container, alias)
     container.router.aliases.upsert(alias)

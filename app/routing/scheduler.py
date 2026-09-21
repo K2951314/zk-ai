@@ -272,7 +272,7 @@ class Scheduler:
             request_id=request_id,
             requested_model=decision.requested_model,
             alias=decision.alias,
-            resolved_model=decision.resolved_models[0] if decision.resolved_models else candidate.model.id,
+            resolved_model=candidate.model.id,
             provider=candidate.deployment.provider_id,
             deployment_id=candidate.deployment.id,
             credential_id=credential.id if credential else None,

@@ -308,6 +308,40 @@ def test_capability_strategy_orders_by_score() -> None:
     assert scores == sorted(scores, reverse=True)
     assert decision.strategy == "capability"
 
+def test_capability_strategy_pin_first_overrides_the_score_ranking() -> None:
+    """Regression: the console's model hot-swap must actually take effect.
+
+    ``zk-auto`` uses ``strategy=capability``, so without a pin the highest-scoring
+    model always won and promoting another model to ``targets[0]`` did nothing.
+    ``pin_first=True`` makes the operator's choice lead the attempt order while the
+    rest of the chain stays capability-ranked for failover.
+    """
+    router = build_router()
+    # sprinter has the lowest capability score -> it cannot win by ranking.
+    plain = router.plan(request_for("zk-all"))
+    order_plain = [c.model.id for c in plain.eligible_candidates()]
+    assert order_plain[0] != "sprinter"
+    assert order_plain.index("sprinter") > 0
+
+    router.aliases.upsert(
+        make_alias("zk-all", ["sprinter", "coder", "thinker", "eye"], pin_first=True)
+    )
+    pinned = router.plan(request_for("zk-all"))
+    order_pinned = [c.model.id for c in pinned.eligible_candidates()]
+    assert order_pinned[0] == "sprinter"        # the pin leads
+    assert sorted(order_pinned[1:]) == sorted([m for m in order_plain if m != "sprinter"])
+
+
+def test_capability_strategy_without_pin_ignores_the_alias_order() -> None:
+    """Default behaviour is unchanged: capability score decides, targets order does not."""
+    router = build_router()
+    # Same targets, reversed: without a pin the ranking is identical.
+    router.aliases.upsert(make_alias("zk-all", ["sprinter", "coder", "thinker", "eye"]))
+    reversed_order = [c.model.id for c in router.plan(request_for("zk-all")).eligible_candidates()]
+    router.aliases.upsert(make_alias("zk-all", ["coder", "thinker", "eye", "sprinter"]))
+    original_order = [c.model.id for c in router.plan(request_for("zk-all")).eligible_candidates()]
+    assert reversed_order == original_order
+
 
 def test_priority_strategy_keeps_the_alias_order() -> None:
     router = build_router()

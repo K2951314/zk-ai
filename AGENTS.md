@@ -95,7 +95,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-20 起 421 passed；推送走本机代理，
+- 门禁 ruff / mypy / pytest 全绿（2026-09-21 起 436 passed；推送走本机代理，
   直连常被重置——见记忆 github-push-via-local-proxy）
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
@@ -195,3 +195,27 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `tests/test_responses_api.py`。另：本机 .env 设了 `ZKAI_API_TOKEN` 后会泄漏进
   测试容器导致全体 401——`make_config` 已钉 `api_token=None`（与既有
   strip_reasoning 钉法同源）
+
+- 2026-09-21（路由两连修）：
+  ①**控制台「实际模型」与供应商/凭据错配**——`resolved_model` 原本写别名计划链第一个
+    （targets[0]），而非实际命中的模型；故障转移时必然与 provider/credential 列打架
+    （例：显示 kimi-k3 但实际走了 StepFun）。`scheduler._final_meta` 已改为
+    `candidate.model.id`。回归测试 `tests/test_api.py::test_resolved_model_reflects_the_served_target`。
+  ②**ChatGPT 热切换原来不生效**——`zk-auto` 用 `strategy=capability`，targets 顺序
+    不决定首选，能力分最高的 kimi-k3 恒赢。新增 `ModelAliasConfig.pin_first`（默认 False），
+    `POST /admin/chatgpt` 切换时置 True，capability 策略检测到 pin 就把 targets[0]
+    钉在首位、其余仍按能力分排。回归测试
+    `tests/test_router.py::test_capability_strategy_pin_first_overrides_the_score_ranking`
+    + `tests/test_api.py::test_chatgpt_hot_swap_takes_effect_on_the_next_request`。
+
+- 2026-09-21（一键换机）：新增 `scripts/migrate.py`（export/import）+ 双击入口
+  `scripts\export_machine.cmd` / `scripts\import_machine.cmd`，README §20.1、
+  使用手册第 1 步均有说明。要搬的 = `.env`（全部 Key）+ `config/*.yaml` +
+  `data/zkai.db`（用量/会话/限额）+ `burn_state.json` / `rate_limits.json`。
+  **坑**：①迁移包和 `imports_backup/` 含明文 Key，`.gitignore` 已收
+  `exports/` 与 `imports_backup/`；②加密只用标准库（XOR + PBKDF2 + 内嵌
+  SHA-256），不为换机引入 `cryptography`/7-Zip 依赖——新机器只有 `.venv`
+  可用；③`_snapshot_database` 走 sqlite3 backup API，网关在写也不会拿到
+  半提交页；④导入默认**拒绝覆盖**，`--overwrite` 才覆盖且先备份到
+  `imports_backup/<时间戳>/`。测试 `tests/test_migrate.py`（6 例：载荷清单、
+  密文无明文 Key、往返、错密码 fail-closed、拒覆盖、备份优先）。

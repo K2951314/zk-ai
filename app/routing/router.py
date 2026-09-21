@@ -212,7 +212,7 @@ class Router:
 
         strategy_name = alias.strategy if alias else None
         strategy = get_strategy(strategy_name)
-        ordered = strategy.order(candidates, requirement)
+        ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
 
         reason_parts = [
             f"requested={requested}",

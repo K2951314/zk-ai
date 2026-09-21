@@ -11,14 +11,17 @@ import pytest
 
 from app.api.chat import _watch_disconnect
 from app.main import create_app
+from app.models.provider import AliasStrategy
 from app.models.request import ChatCompletionRequest
 from tests.conftest import (
     Behavior,
+    FakeAdapter,
     Harness,
     build_harness,
     make_alias,
     make_config,
     make_model,
+    make_provider,
 )
 
 
@@ -232,6 +235,54 @@ async def test_429_fails_over_to_the_next_key(api) -> None:
     assert response.json()["choices"][0]["message"]["content"] == "second key served this"
     assert response.headers["x-zkai-fallback"] == "true"
     assert harness.pool.get("key-1").status.value == "cooldown"
+
+
+async def test_resolved_model_reflects_the_served_target(provider_config, fake_adapter) -> None:
+    """Regression: after failover, resolved_model must be the model that actually
+    answered (targets[1] here), not the alias plan head.
+
+    The console actual-model column read the plan head while the provider column
+    read the winning candidate, so every fallback row looked like a model/provider
+    mismatch (e.g. resolved_model=kimi-k3 paired with provider=StepFun)."""
+    from app.models.provider import AliasStrategy
+
+    provider_b = make_provider("fake-b", key_ids=("kb-1",))
+    adapter_b = FakeAdapter(provider_b)
+
+    config = make_config(
+        providers=[provider_config, provider_b],
+        models=[
+            make_model("fake-model", provider_id="fake"),
+            make_model("fake-smart", provider_id="fake-b"),
+        ],
+        aliases=[
+            make_alias("zk-test", ["fake-model", "fake-smart"], strategy=AliasStrategy.PRIORITY),
+        ],
+        admin_token="test-admin-token",
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter, "fake-b": adapter_b})
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
+            fake_adapter.queue(
+                Behavior(status=429),
+                Behavior(status=429),
+                Behavior(status=429),
+            )
+            adapter_b.queue(Behavior(text="served by the second target"))
+            response = await client.post(
+                "/v1/chat/completions", json={**CHAT_BODY, "model": "zk-test"}
+            )
+    finally:
+        await harness.container.shutdown()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["choices"][0]["message"]["content"] == "served by the second target"
+    assert body["zk_ai"]["resolved_model"] == "fake-smart"
+    assert body["zk_ai"]["resolved_model"] != body["zk_ai"]["requested_model"]
 
 
 async def test_all_providers_failing_returns_error_with_attempts(api) -> None:
@@ -903,3 +954,52 @@ async def test_backfill_reprices_zero_cost_usage_rows(api) -> None:
     # Idempotent: a second run touches nothing.
     again = await client.post("/admin/usage/backfill-cost", headers=ADMIN)
     assert again.json()["updated"] == 0
+# --------------------------------------------------------------------------- #
+# ChatGPT hot-swap: the pinned model must actually lead the attempt order
+# --------------------------------------------------------------------------- #
+async def test_chatgpt_hot_swap_takes_effect_on_the_next_request(provider_config, fake_adapter) -> None:
+    """End-to-end regression for the console's model hot-swap.
+
+    ``zk-auto`` uses ``strategy=capability``, so promoting a model to
+    ``targets[0]`` used to change nothing - the highest-scoring model kept winning
+    and the operator saw no effect at all.
+    """
+    provider_b = make_provider("fake-b", key_ids=("kb-1",))
+    adapter_b = FakeAdapter(provider_b)
+
+    config = make_config(
+        providers=[provider_config, provider_b],
+        models=[
+            # kimi-k3 scores highest, so it wins without a pin.
+            make_model("kimi-k3", provider_id="fake", capabilities={"coding": 9.5, "reasoning": 9.5}),
+            make_model("glm-5.3", provider_id="fake-b", capabilities={"coding": 8.0, "reasoning": 8.0}),
+        ],
+        aliases=[make_alias("zk-auto", ["kimi-k3", "glm-5.3"], strategy=AliasStrategy.CAPABILITY)],
+        admin_token="test-admin-token",
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter, "fake-b": adapter_b})
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
+            adapter_b.queue(Behavior(text="glm first"))
+            first = await client.post("/v1/chat/completions", json={**CHAT_BODY, "model": "zk-auto"})
+            assert first.status_code == 200
+            assert first.json()["zk_ai"]["resolved_model"] == "kimi-k3"  # highest score wins
+
+            # Now hot-swap to glm-5.3 through the console endpoint.
+            swapped = await client.post(
+                "/admin/chatgpt", json={"model": "glm-5.3"}, headers=ADMIN
+            )
+            assert swapped.status_code == 200
+            assert swapped.json()["model"] == "glm-5.3"
+
+            fake_adapter.queue(Behavior(status=500))
+            adapter_b.queue(Behavior(text="glm still leads"))
+            second = await client.post("/v1/chat/completions", json={**CHAT_BODY, "model": "zk-auto"})
+            assert second.status_code == 200
+            assert second.json()["zk_ai"]["resolved_model"] == "glm-5.3"
+            assert second.json()["zk_ai"]["provider"] == "fake-b"
+    finally:
+        await harness.container.shutdown()
