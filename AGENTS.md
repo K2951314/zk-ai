@@ -69,8 +69,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 - 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
 - `retry.max_credentials_per_deployment` 已从 6 提到 8（试满全部商汤账号，
-  **重启网关后生效**）；`*.mock.bak` 会话残留已清理，但 `data/*.stale` 与
-  `data/zkai.db.bak-*`（均为 9-12 遗留）仍在，属可删残留
+  **重启网关后生效**）；会话残留已清干净（`*.mock.bak` 于 9-19，`data/*.stale` 与
+  `data/zkai.db.bak-*` 于 2026-09-21）
 - 对抗审查（2026-09-12）：git 历史无密钥、鉴权常量时间比较且 None 安全、Docker
   不烤密钥（.dockerignore 已补）。**遗留决策（2026-09-20 已收紧）**：
   `ZKAI_HOST=0.0.0.0` 曾且未设 `ZKAI_API_TOKEN` → /v1/* 对局域网开放；现已设
@@ -261,5 +261,9 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   值得问 `--overwrite`）、`_EXIT_BAD_PASSPHRASE=2`（密码错/包损坏——原来直接甩
   ValueError traceback，手册却写着会给一句人话）、`_EXIT_ERROR=1`（含"网关在跑"拒绝）。
   改这几个码要同步 `import_machine.cmd` 的 `if errorlevel 3` 分支。
-  **本机数据现状**：`requests` / `usage_records` 两张表已因该损坏不可读（其余 7 表正常），
-  待用 22:13 的 `exports/zkai-machine-20260921-221207.zip` 重导恢复。
+  **本机数据现状（已恢复）**：操作员 23:47 用 `exports/zkai-machine-20260921-221207.zip`
+  重导，一致快照 `PRAGMA integrity_check -> ok`，9 张表全可读（requests 10402 /
+  usage_records 5420 / request_attempts 29520 行）；导入前的旧文件在
+  `imports_backup/20260921-234749/`，里面能看到被换掉的 `zkai.db-wal`(4.1MB)/`-shm`
+  ——即本节 ② 那条新代码在真实导入里确实跑了。23:48 双击 `start_gateway.cmd`
+  重启，新链路（托盘日志 + 前台等端口 + 自动开控制台）实测走通。
