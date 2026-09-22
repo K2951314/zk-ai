@@ -125,7 +125,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-22 起 503 passed）；`git push` 走本机代理
+- 门禁 ruff / mypy / pytest 全绿（2026-09-22 起 511 passed）；`git push` 走本机代理
   （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
@@ -305,5 +305,9 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   setx 修复路径。配套：`GET /admin/chatgpt` 增 `env_key_name/env_key_visible/
   env_key_matches_gateway` 字段；控制台状态条标红 + 「🔧 同步令牌到用户环境变量」按钮
   （`POST /admin/chatgpt/sync-env`，写后同样回读校验）。
-  测试：`tests/test_chatgpt_config.py` 38 例 + migrate 10 例 + test_api 11 例；门禁全绿。
+  测试：`tests/test_chatgpt_config.py` 44 例 + migrate 24 例 + test_api 11 例；门禁全绿。
+  09-22 深夜对抗审查又加固 `apply_config`（坏 TOML 不碰 / 落盘前 tomllib+re-plan
+  双验证 / 备份时间戳防同秒覆盖 / 替换行尾注释保留 / 标量字段禁换行）+
+  `_provision_chatgpt_env` 接住注册表 OSError；配 9 个对抗回归测试，
+  变异抽查 6/6 被抓（详见当日日志）。
 

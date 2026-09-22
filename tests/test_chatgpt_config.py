@@ -252,6 +252,88 @@ def test_empty_existing_file_is_populated(codex_dir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 对抗审查（2026-09-22）：文本手术绝不允许把桌面版的配置文件写坏
+# --------------------------------------------------------------------------- #
+def test_apply_refuses_a_corrupt_config_toml(codex_dir: Path) -> None:
+    """tomllib 都读不了的现状文件：不猜、不改，原样留着让人先修。"""
+    path = codex_dir / "config.toml"
+    broken = "model = [unclosed\n"
+    path.write_text(broken, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="不是合法的 TOML"):
+        cg.apply_config(path, _desired())
+
+    assert path.read_text(encoding="utf-8") == broken  # 一个字没动
+    assert not list(codex_dir.glob("config.toml.bak-*"))
+    assert not list(codex_dir.glob("config.toml.tmp"))
+
+
+def test_apply_aborts_when_line_surgery_would_diverge(codex_dir: Path) -> None:
+    """``model = ...`` 出现在顶层多行字符串里时，行级替换会改错对象——
+    语义 re-plan 抓到这个分歧就必须放弃写入，绝不静默改坏用户的文件。"""
+    path = codex_dir / "config.toml"
+    exotic = 'description = """\nmodel = "inside-string"\n"""\n'
+    path.write_text(exotic, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="仍有差异"):
+        cg.apply_config(path, _desired(model="glm-5.3"))
+
+    assert path.read_text(encoding="utf-8") == exotic
+    assert not list(codex_dir.glob("config.toml.bak-*"))
+    assert not list(codex_dir.glob("config.toml.tmp"))
+
+
+def test_apply_aborts_on_exotic_top_level_array(codex_dir: Path) -> None:
+    """顶层数组的续行以 ``[`` 开头会骗过段落边界判断——生成的文本必须过
+    tomllib 这一关，过不了就整体放弃。"""
+    path = codex_dir / "config.toml"
+    exotic = "some_array = [\n[1, 2],\n]\nmodel = \"old\"\n"
+    path.write_text(exotic, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="不合法"):
+        cg.apply_config(path, _desired())
+
+    assert path.read_text(encoding="utf-8") == exotic
+    assert not list(codex_dir.glob("config.toml.tmp"))
+
+
+def test_apply_keeps_trailing_comment_on_replaced_line(codex_dir: Path) -> None:
+    """被替换的是我们自己的键行，操作员留在行尾的注释要原样带回。"""
+    path = codex_dir / "config.toml"
+    path.write_text(
+        'model = "old" # 我改过这里，别动\n'
+        "model_provider = \"zkai\"\n\n"
+        "[model_providers.zkai]\n"
+        'base_url = "http://127.0.0.1:8317/v1" # 本地网关\n',
+        encoding="utf-8",
+    )
+
+    cg.apply_config(path, _desired(model="glm-5.3"))
+
+    text = path.read_text(encoding="utf-8")
+    assert 'model = "glm-5.3" # 我改过这里，别动' in text
+    assert 'base_url = "http://127.0.0.1:8317/v1" # 本地网关' in text
+
+
+def test_apply_backup_stamps_are_unique(codex_dir: Path) -> None:
+    """同一秒内连续两次写入：后一个备份不许盖掉前一个。"""
+    path = codex_dir / "config.toml"
+    path.write_text('model = "a"\nmodel_provider = "zkai"\n', encoding="utf-8")
+
+    cg.apply_config(path, _desired(model="b"))
+    cg.apply_config(path, _desired(model="c"))
+
+    backups = sorted(codex_dir.glob("config.toml.bak-*"))
+    assert len(backups) == 2
+    assert backups[0].read_text(encoding="utf-8") == 'model = "a"\nmodel_provider = "zkai"\n'
+
+
+def test_validate_rejects_newlines_in_scalar_fields() -> None:
+    errors = cg.validate(_desired(model='glm\nmodel_provider = "evil"'))
+    assert any("model" in e and "换行" in e for e in errors)
+
+
+# --------------------------------------------------------------------------- #
 # validation
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(

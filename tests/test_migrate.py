@@ -279,12 +279,46 @@ def test_gateway_port_comes_from_env_file(tmp_path: Path, monkeypatch) -> None:
     assert probed == [8418]
 
 
+def test_provision_survives_a_registry_write_failure(tmp_path, isolated_codex_home,
+                                                     monkeypatch, capsys) -> None:
+    """注册表写失败（权限/被锁）不该让恢复完文件的导入带上 traceback。"""
+    root = tmp_path / "root"
+    _populate(root)
+
+    def boom(name: str, value: str):
+        raise OSError("registry is locked")
+
+    monkeypatch.setattr(chatgpt_service, "write_user_env_var", boom)
+    monkeypatch.setattr(migrate, "_ROOT", root)
+
+    migrate._provision_chatgpt_env(root, [".env"])  # 不抛异常即通过
+
+    out = capsys.readouterr().out
+    assert "写用户级环境变量 ZKAI_API_TOKEN 失败" in out
+    assert "setx ZKAI_API_TOKEN" in out  # 给出可手动执行的修复
+
+
 # --------------------------------------------------------------------------- #
 # ChatGPT / Codex client auto-configuration on the new machine
 # --------------------------------------------------------------------------- #
 def _forbid_env_write(*_args):
     """Guard: provisioning must not touch the real user environment in tests."""
     raise AssertionError("write_user_env_var must not run here")
+
+
+def test_apply_chatgpt_client_skips_an_unparseable_config(tmp_path, isolated_codex_home,
+                                                           capsys) -> None:
+    """桌面版自己的 config.toml 坏了（tomllib 都读不了）：告警跳过，
+    绝不猜着改，更不让整个导入崩掉。"""
+    src = tmp_path / "src"
+    _populate(src)
+    broken = "model = [unclosed\n"
+    (isolated_codex_home / "config.toml").write_text(broken, encoding="utf-8")
+
+    migrate._apply_chatgpt_client(src, ["config/chatgpt.yaml", ".env"])
+
+    assert (isolated_codex_home / "config.toml").read_text(encoding="utf-8") == broken
+    assert "未写入客户端配置" in capsys.readouterr().out
 
 
 _APP_OWNED_CODEX_CONFIG = """\

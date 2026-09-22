@@ -147,6 +147,10 @@ def validate(cfg: ChatGptConfig) -> list[str]:
         errors.append(f"思考强度只能是 {EFFORTS[1:]} 之一，或留空不写这一行")
     if not cfg.provider_display.strip():
         errors.append("provider_display（config.toml 里的显示名）不能为空")
+    # 换行会让写出的 TOML 直接非法——这些字段都是单行标量
+    for field in ("model", "official_model", "provider_display", "base_url"):
+        if "\n" in getattr(cfg, field) or "\r" in getattr(cfg, field):
+            errors.append(f"{field} 不能包含换行")
     return errors
 
 
@@ -313,6 +317,22 @@ def _toml_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _trailing_comment(line: str) -> str:
+    """行尾的行内注释（``#`` 起、且不在引号内）；没有返回 ""。
+
+    被替换的是我们自己的键行，行尾注释是操作员留下的字——原样带回。
+    """
+    in_basic = in_literal = False
+    for index, ch in enumerate(line):
+        if ch == '"' and not in_literal:
+            in_basic = not in_basic
+        elif ch == "'" and not in_basic:
+            in_literal = not in_literal
+        elif ch == "#" and not in_basic and not in_literal:
+            return line[index:].rstrip()
+    return ""
+
+
 def _kv_pattern(key: str) -> re.Pattern[str]:
     return re.compile(rf"^\s*{re.escape(key)}\s*=")
 
@@ -326,14 +346,16 @@ def _section_start(lines: list[str]) -> int:
 
 
 def _set_kv(lines: list[str], start: int, end: int, key: str, value: str) -> None:
-    """在 lines[start:end] 里设 ``key = "value"``：原地替换，否则插到本段最后
-    一个非空行之后。只认本段内的键——顶层段在第一个 ``[`` 之前，不会误伤
-    ``[table]`` 里同名的键。"""
+    """在 lines[start:end] 里设 ``key = "value"``：原地替换（行尾注释原样带回），
+    否则插到本段最后一个非空行之后。只认本段内的键——顶层段在第一个 ``[``
+    之前，不会误伤 ``[table]`` 里同名的键。"""
     pattern = _kv_pattern(key)
     upper = min(end, len(lines))
     for index in range(start, upper):
         if pattern.match(lines[index]):
-            lines[index] = f"{key} = {_toml_quote(value)}"
+            comment = _trailing_comment(lines[index])
+            suffix = f" {comment}" if comment else ""
+            lines[index] = f"{key} = {_toml_quote(value)}{suffix}"
             return
     insert_at = start
     for index in range(start, upper):
@@ -429,8 +451,23 @@ class ApplyResult:
 
 
 def apply_config(config_file: Path, desired: ChatGptConfig) -> ApplyResult:
-    """把期望配置写进 ``config.toml``（无变更则不动文件、不建备份）。"""
-    data = read_config_toml(config_file)
+    """把期望配置写进 ``config.toml``（无变更则不动文件、不建备份）。
+
+    两层防护保证「绝不会把桌面版的配置文件写坏」：
+
+    1. **坏文件不碰**：现状文件 tomllib 都读不了 → 直接报错退出，原文件
+       一个字不动（桌面版自己都读不了的东西，不该由我们猜着改）。
+    2. **落盘前验证**：文本手术的结果先过 tomllib 解析、再 re-plan 必须零差异
+       ——行级正则和语义视图在极端配置下会分歧（比如 ``model = ...`` 出现在
+       多行字符串里），验证不过就放弃写入并明说，绝不静默写出错文件。
+    """
+    try:
+        data = read_config_toml(config_file)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"{config_file} 不是合法的 TOML（{exc}）——桌面版自己也读不了它。"
+            "请先手工修复，或删掉该文件让本工具重建，再试。"
+        ) from exc
     changes = plan_changes(data, desired)
     if not changes:
         return ApplyResult(path=config_file, changes=[], backup=None, no_op=True)
@@ -442,13 +479,31 @@ def apply_config(config_file: Path, desired: ChatGptConfig) -> ApplyResult:
             text = fh.read()
     new_text = patch_text(text, changes, desired.model_provider)
     config_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = config_file.with_name(config_file.name + ".tmp")
+    tmp.write_text(new_text, encoding="utf-8", newline="")
+    try:
+        reparsed = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(
+            f"生成的 config.toml 不合法（已放弃写入，原文件未动）：{exc}"
+        ) from exc
+    if plan_changes(reparsed, desired):
+        tmp.unlink(missing_ok=True)
+        raise ValueError(
+            "生成的 config.toml 与期望配置仍有差异（已放弃写入，原文件未动）。"
+            "这通常意味着现状文件里有和顶层键同形的多行字符串等极端结构——"
+            "请把该文件发给开发者加规则。"
+        )
     backup: Path | None = None
     if config_file.exists():
         stamp = time.strftime("%Y%m%d-%H%M%S")
         backup = config_file.with_name(f"{config_file.name}.bak-{stamp}")
+        serial = 2  # 同一秒内二次写入：不让后一个备份盖掉前一个
+        while backup.exists():
+            backup = config_file.with_name(f"{config_file.name}.bak-{stamp}-{serial}")
+            serial += 1
         shutil.copy2(config_file, backup)  # 先拷贝后替换：写失败原文件还在
-    tmp = config_file.with_name(config_file.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8", newline="")
     os.replace(tmp, config_file)
     return ApplyResult(path=config_file, changes=changes, backup=backup)
 

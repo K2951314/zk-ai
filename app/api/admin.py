@@ -1380,6 +1380,9 @@ def _apply_desired(
 ) -> dict[str, Any]:
     try:
         applied = chatgpt_service.apply_config(config_file, desired)
+    except ValueError as exc:
+        # 坏 TOML / 手术验证不过：chatgpt_service 保证原文件未动，原样转述
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}}) from exc
     except OSError as exc:
         raise _file_write_failed(exc) from exc
     return {

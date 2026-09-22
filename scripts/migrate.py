@@ -292,6 +292,10 @@ def _apply_chatgpt_client(root: Path, restored: list[str]) -> None:
     cfg_file = chatgpt_service.config_toml_path()
     try:
         applied = chatgpt_service.apply_config(cfg_file, desired)
+    except ValueError as exc:
+        # 坏文件/手术验证不过：chatgpt_service 已保证原文件未动，告知后继续导入
+        print(f"  [警告] 未写入客户端配置：{exc}")
+        return
     except OSError as exc:
         print(f"  [警告] 写 {cfg_file} 失败（不影响网关本身）：{exc}")
         return
@@ -438,7 +442,13 @@ def _provision_chatgpt_env(root: Path, restored: list[str]) -> None:
         print(f"    a) 在 .env 里加 {name}=<网关令牌>（和 ZKAI_API_TOKEN 同值）后重跑导入")
         print(f'    b) 手动 setx {name} "<令牌>"，然后重启桌面版')
         return
-    written, old, note = chatgpt_service.write_user_env_var(name, token)
+    try:
+        written, old, note = chatgpt_service.write_user_env_var(name, token)
+    except OSError as exc:
+        # 注册表写失败不该让整个导入带上 traceback（文件已恢复完了）
+        print(f"  [警告] 写用户级环境变量 {name} 失败（不影响网关本身）：{exc}")
+        print(f'    手动修复：setx {name} "<令牌>"，然后重启 ChatGPT 桌面版')
+        return
     if not written:
         if note:
             print(f"  （{note}）")
