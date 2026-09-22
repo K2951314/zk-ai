@@ -59,3 +59,9 @@ desktop.ini
 logs/
 config/*.bak*
 .zcode/
+
+# --- agent / 调试产物（非交付物）---------------------------------------------
+# WorkBuddy 项目数据（会话记忆等），各机器本地生成，不进仓库
+.workbuddy/
+# 诊断会话留下的临时调试脚本（自带 ruff/mypy 历史错误，去留未定，先排除出提交）
+scripts/probe_upstream_path.py

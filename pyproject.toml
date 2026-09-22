@@ -57,7 +57,9 @@ filterwarnings = ["ignore::DeprecationWarning"]
 [tool.ruff]
 line-length = 110
 target-version = "py312"
-exclude = [".venv", "data"]
+# scripts/probe_upstream_path.py 是诊断会话留下的未跟踪调试脚本（自带历史
+# lint/类型错误，未决定去留），从门禁中排除；.gitignore 同样排除它。
+exclude = [".venv", "data", "scripts/probe_upstream_path.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "ASYNC", "S", "RUF"]
@@ -90,4 +92,4 @@ plugins = ["pydantic.mypy"]
 # (StubRequest, optional pool lookups) that strict analysis rejects, and adding
 # casts there would hide nothing about `app/` correctness. Type checking targets
 # the shipped code: `mypy app scripts`.
-exclude = ["^\\.venv", "^data", "^tests"]
+exclude = ["^\\.venv", "^data", "^tests", "^scripts/probe_upstream_path\\.py"]
