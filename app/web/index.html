@@ -1512,60 +1512,247 @@ async function deleteAlias(name) {
 }
 
 /* ================= ChatGPT / Codex 桌面版 ================= */
+let cgState = null; // GET /admin/chatgpt 的快照
+
 async function openChatGptModal() {
   const modal = $("#chatgpt-modal");
   modal.innerHTML = `<div class="card">
     <h3>🤖 ChatGPT / Codex 桌面版</h3>
     <div id="cg-loading" class="small muted">读取中…</div>
     <div id="cg-body" style="display:none">
-      <div class="small muted" style="margin-bottom:10px">
-        桌面版发送的模型是 <code>zk-auto</code>，这里换模型 = 把所选模型提到
-        <code>zk-auto</code> 兜底链的最前面。<strong>立即生效</strong>，不用重启桌面版。
+      <div class="card" style="padding:10px 12px;margin-bottom:12px;background:var(--bg)">
+        <div class="small" id="cg-status"></div>
+        <div class="small muted" id="cg-path" style="margin-top:4px;word-break:break-all"></div>
       </div>
+
+      <h4 class="sec">客户端配置（写入 ~/.codex/config.toml，写入前自动备份）</h4>
       <div class="formgrid">
-        <label>当前首选模型
-          <select id="cg-model"></select>
+        <label>接入方式
+          <select id="cg-mode">
+            <option value="zk-ai">走 ZK-AI 网关</option>
+            <option value="official">切回 ChatGPT 官方</option>
+          </select>
+        </label>
+        <label>模型 <input id="cg-model" list="cg-model-list" placeholder="zk-auto"></label>
+        <datalist id="cg-model-list"></datalist>
+        <label>官方模型名<input id="cg-official-model" placeholder="gpt-5.6-terra"></label>
+        <label>provider 表名<input id="cg-provider" placeholder="zkai"></label>
+        <label>表内显示名<input id="cg-display" placeholder="ZK-AI"></label>
+        <label>base_url<input id="cg-baseurl" placeholder="http://127.0.0.1:8317/v1"></label>
+        <label>wire_api
+          <select id="cg-wire"><option value="responses">responses</option><option value="chat">chat</option></select>
+        </label>
+        <label>env_key<input id="cg-envkey" placeholder="ZKAI_API_TOKEN"></label>
+        <label>思考强度
+          <select id="cg-effort">
+            <option value="">（不写这一行）</option>
+            <option>minimal</option><option>low</option><option>medium</option><option>high</option><option>max</option>
+          </select>
         </label>
       </div>
-      <div class="small muted" id="cg-chain" style="margin-top:8px"></div>
+      <div id="cg-official-note" class="small muted" style="display:none;margin-top:8px">
+        切回官方 = 删掉 config.toml 里的 <code>model_provider</code> 行、把 <code>model</code> 改成官方模型名；
+        provider 表保留不删，随时可以切回网关。
+      </div>
+
+      <div id="cg-preview" style="display:none;margin-top:12px"></div>
+
       <div class="row-flex" style="margin-top:14px">
-        <button class="primary" id="cg-save">💾 保存</button>
+        <button id="cg-btn-preview">🔍 预览变更</button>
+        <button class="primary" id="cg-btn-save">💾 保存并写入</button>
+        <button id="cg-btn-reapply" style="display:none">↻ 重新写入本机</button>
         <button id="cg-cancel">取消</button>
       </div>
+
+      <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
+      <div class="small muted" style="margin-bottom:8px">
+        桌面版发的模型是 <code>zk-auto</code>；下面换模型 = 把所选模型提到 <code>zk-auto</code>
+        兜底链最前面，<strong>立即生效</strong>，不用重启桌面版。
+      </div>
+      <div class="formgrid">
+        <label>当前首选模型 <select id="cg-hot-model"></select></label>
+      </div>
+      <div class="row-flex" style="margin-top:10px">
+        <button id="cg-hot-save">热切换</button>
+      </div>
+      <div class="small muted" id="cg-chain" style="margin-top:8px"></div>
     </div>
   </div>`;
   modal.classList.add("show");
   $("#cg-cancel").onclick = () => modal.classList.remove("show");
+  $("#cg-mode").onchange = cgToggleMode;
+  $("#cg-btn-preview").onclick = cgPreview;
+  $("#cg-btn-save").onclick = cgSave;
+  $("#cg-btn-reapply").onclick = cgReapply;
+  $("#cg-hot-save").onclick = cgHotSwap;
   try {
     const r = await api("/admin/chatgpt");
-    if (!r.ok) {
-      $("#cg-loading").textContent = r.detail || "读取失败";
-      return;
-    }
+    cgState = r;
     $("#cg-loading").style.display = "none";
     $("#cg-body").style.display = "";
-    const sel = $("#cg-model");
-    const current = r.effective_model || "";
-    const options = (r.choices || []).map(c =>
-      `<option value="${esc(c)}" ${c === current ? "selected" : ""}>${esc(c)}</option>`
-    ).join("");
-    const currentOpt = current && !(r.choices || []).includes(current)
-      ? `<option value="${esc(current)}" selected>${esc(current)} (当前)</option>` : "";
-    sel.innerHTML = currentOpt + options;
-    $("#cg-chain").textContent = "zk-auto 兜底链: " + (r.targets || []).join(" → ");
-    $("#cg-save").onclick = async () => {
-      const model = sel.value.trim();
-      if (!model) { toast("模型不能为空", "err"); return; }
-      try {
-        const r2 = await api("/admin/chatgpt", { method: "POST", json: { model } });
-        if (r2.error) { toast(r2.error.message || "保存失败", "err"); return; }
-        toast(`已切换为 ${model}，下一条消息生效`, "ok");
-        modal.classList.remove("show");
-      } catch (err) { toast(err.message, "err"); }
-    };
+    cgFill(r);
   } catch (err) {
     $("#cg-loading").textContent = "读取失败: " + err.message;
   }
+}
+
+function cgFill(r) {
+  const disk = r.disk || {};
+  const d = r.desired || {};
+  const gw = r.gateway || { port: 8317 };
+  // 优先用已保存的期望配置；没保存过就按磁盘现状预填（首次打开 = 当前工作状态）
+  const val = (want, fallback) => (want || fallback || "");
+  $("#cg-mode").value = val(d.mode, "zk-ai");
+  $("#cg-model").value = val(d.model, disk.model || "zk-auto");
+  $("#cg-official-model").value = val(d.official_model, "gpt-5.6-terra");
+  $("#cg-provider").value = val(d.model_provider, disk.model_provider || "zkai");
+  $("#cg-display").value = val(d.provider_display, "ZK-AI");
+  $("#cg-baseurl").value = val(d.base_url, disk.base_url || ("http://127.0.0.1:" + gw.port + "/v1"));
+  $("#cg-wire").value = val(d.wire_api, disk.wire_api || "responses");
+  $("#cg-envkey").value = val(d.env_key, disk.env_key || "ZKAI_API_TOKEN");
+  $("#cg-effort").value = val(d.model_reasoning_effort, disk.model_reasoning_effort || "max");
+  cgToggleMode();
+
+  $("#cg-model-list").innerHTML = (r.choices || []).map(c =>
+    `<option value="${esc(c)}">`).join("");
+
+  const bits = [];
+  bits.push(r.config_exists ? "config.toml：存在" : "config.toml：不存在（保存后将新建）");
+  bits.push(r.desired ? "期望配置：已保存" : "期望配置：未保存");
+  const drift = (r.drift || []).length;
+  bits.push(drift ? `本机与期望配置有 <strong style="color:var(--red)">${drift}</strong> 处不一致` : "本机与期望配置一致");
+  if (r.config_parse_error) bits.push(`<span style="color:var(--red)">config.toml 解析失败：${esc(r.config_parse_error)}</span>`);
+  const auth = r.auth || {};
+  bits.push(auth.exists ? "auth.json：存在（只读，不写）" : "auth.json：不存在");
+  bits.push(gw.api_token_set ? "ZKAI_API_TOKEN：已设置" : "ZKAI_API_TOKEN：未设置（/v1/* 开放，不设也能用）");
+  $("#cg-status").innerHTML = bits.join(" · ");
+  $("#cg-path").textContent =
+    r.path + (r.desired_path ? ("    期望配置：" + r.desired_path) : "");
+  $("#cg-btn-reapply").style.display = (r.desired && drift) ? "" : "none";
+
+  // 热切换区
+  const current = r.effective_model || "";
+  const opts = (r.choices || []).map(c =>
+    `<option value="${esc(c)}" ${c === current ? "selected" : ""}>${esc(c)}</option>`).join("");
+  const cur = current && !(r.choices || []).includes(current)
+    ? `<option value="${esc(current)}" selected>${esc(current)} (当前)</option>` : "";
+  $("#cg-hot-model").innerHTML = cur + opts;
+  $("#cg-chain").textContent = "zk-auto 兜底链: " + (r.targets || []).join(" → ");
+}
+
+function cgToggleMode() {
+  const official = $("#cg-mode").value === "official";
+  $("#cg-official-note").style.display = official ? "" : "none";
+  for (const id of ["#cg-model", "#cg-provider", "#cg-display", "#cg-baseurl", "#cg-wire", "#cg-envkey", "#cg-effort"]) {
+    $(id).disabled = official;
+  }
+  $("#cg-official-model").disabled = !official;
+  $("#cg-preview").style.display = "none";
+}
+
+function cgFormValues() {
+  if ($("#cg-mode").value === "official") {
+    return { mode: "official", model: $("#cg-official-model").value.trim() };
+  }
+  return {
+    mode: "zk-ai",
+    model: $("#cg-model").value.trim(),
+    model_provider: $("#cg-provider").value.trim() || "zkai",
+    provider_display: $("#cg-display").value.trim() || "ZK-AI",
+    base_url: $("#cg-baseurl").value.trim(),
+    wire_api: $("#cg-wire").value,
+    env_key: $("#cg-envkey").value.trim() || "ZKAI_API_TOKEN",
+    model_reasoning_effort: $("#cg-effort").value,
+    official_model: $("#cg-official-model").value.trim(),
+  };
+}
+
+/** 表单值 vs 磁盘现状的键级差异（预览用；后端才是权威）。 */
+function cgDiff(v) {
+  const disk = (cgState && cgState.disk) || {};
+  const rows = [];
+  const cmp = (label, key, nv) => {
+    const ov = disk[key] || "";
+    if ((nv || "") !== ov) {
+      rows.push({ label, old: ov || "（无）", new: nv || "（删除该行）" });
+    }
+  };
+  cmp("model", "model", v.model);
+  cmp("model_provider", "model_provider", v.mode === "official" ? "" : v.model_provider);
+  if (v.mode !== "official") {
+    cmp("base_url", "base_url", v.base_url);
+    cmp("wire_api", "wire_api", v.wire_api);
+    cmp("env_key", "env_key", v.env_key);
+    cmp("model_reasoning_effort", "model_reasoning_effort", v.model_reasoning_effort);
+  }
+  return rows;
+}
+
+function cgPreview() {
+  const v = cgFormValues();
+  if (!v.model) { toast("模型不能为空", "err"); return; }
+  const rows = cgDiff(v);
+  const box = $("#cg-preview");
+  let html = `<div class="card" style="padding:10px 12px;background:var(--bg)">
+    <div class="small" style="margin-bottom:6px"><strong>将要写入 ${esc(cgState ? cgState.path : "~/.codex/config.toml")}</strong>`
+    + `（旧文件先备份为 config.toml.bak-时间戳；mcp_servers / plugins / projects 等 app 自己的段落原样保留）</div>`;
+  if (!rows.length) {
+    html += `<div class="small muted">与磁盘现状一致，写入是无变化（不会新建备份）。</div>`;
+  } else {
+    html += `<table style="width:100%;font-size:12px;border-collapse:collapse">
+      <tr class="small muted"><td style="padding:2px 8px 2px 0">键</td><td>现值</td><td>改成</td></tr>`
+      + rows.map(r2 =>
+        `<tr><td style="padding:2px 8px 2px 0"><code>${esc(r2.label)}</code></td>`
+        + `<td style="color:var(--muted)">${esc(r2.old)}</td><td><strong>${esc(r2.new)}</strong></td></tr>`).join("")
+      + `</table>`;
+  }
+  html += `</div>`;
+  box.innerHTML = html;
+  box.style.display = "";
+}
+
+async function cgRefresh() {
+  try {
+    cgState = await api("/admin/chatgpt");
+    cgFill(cgState);
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function cgSave() {
+  const v = cgFormValues();
+  if (!v.model) { toast("模型不能为空", "err"); return; }
+  const rows = cgDiff(v);
+  if (!confirm(`确认写入？\n\n${rows.length ? rows.map(r2 => `${r2.label}: ${r2.old} → ${r2.new}`).join("\n") : "（与磁盘一致，无变化）"}`)) return;
+  try {
+    const r = await api("/admin/chatgpt/client", { method: "PUT", json: { ...v, apply: true } });
+    const parts = [`期望配置已保存 ${r.saved}`];
+    if (r.applied) {
+      parts.push(r.no_op ? "config.toml 无变化" :
+        `config.toml 已更新 ${r.apply_result.changes.length} 处（备份：${r.apply_result.backup || "无"}）`);
+    }
+    toast(parts.join("；"), "ok");
+    (r.warnings || []).forEach(w => toast("提醒：" + w, "err"));
+    await cgRefresh();
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function cgReapply() {
+  try {
+    const r = await api("/admin/chatgpt/apply", { method: "POST" });
+    toast(r.no_op ? "config.toml 已是最新" :
+      `已按期望配置重写 config.toml（${r.apply_result.changes.length} 处）`, "ok");
+    await cgRefresh();
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function cgHotSwap() {
+  const model = $("#cg-hot-model").value.trim();
+  if (!model) { toast("模型不能为空", "err"); return; }
+  try {
+    await api("/admin/chatgpt", { method: "POST", json: { model } });
+    toast(`已切换为 ${model}，下一条消息生效`, "ok");
+    await cgRefresh();
+  } catch (err) { toast(err.message, "err"); }
 }
 
 /* ================= 令牌 / 启动 ================= */

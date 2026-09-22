@@ -64,6 +64,15 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `import_package` 先把 side-car 备份进 `imports_backup/<时间戳>/` 再删除，CLI 侧只要
   端口有人听就直接拒绝。验证损坏库要用 sqlite3 backup API 取一致快照再 `PRAGMA
   integrity_check`——直接 `cp` 正在写的库必然报假阳性
+- **`~/.codex/config.toml` 归 ChatGPT app 所有，只能外科手术式 patch**（2026-09-22）：
+  整文件重写会毁掉 app 的 mcp_servers/plugins/projects/desktop 段落（真实文件上百行）。
+  `chatgpt_service.patch_text` 只增改我们的键：顶层键只可能在第一个 `[section]` 前动，
+  provider 表只在其表体内动；`apply_config` 读文件必须 `newline=""`（`read_text()` 会把
+  CRLF 归一化成 LF，悄悄改掉 app 的换行风格）；`auth.json` **永远不写**（运营决策）。
+  改 `env_key`/`ZKAI_API_TOKEN` 后记得桌面版要重启才读到新环境变量；换机导入时
+  `migrate._provision_chatgpt_env` 会把它写进 HKCU\Environment 并广播，别在测试里
+  直接跑那个函数（会碰真实用户环境，测试要 patch `write_user_env_var`）。
+  配置目录可用 `ZKAI_CODEX_HOME` 覆盖（多开用户 / 测试隔离），默认 `~/.codex`。
 
 ## 当前状态（2026-09-19）
 
@@ -113,7 +122,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-21 起 445 passed）；`git push` 走本机代理
+- 门禁 ruff / mypy / pytest 全绿（2026-09-22 起 495 passed）；`git push` 走本机代理
   （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
@@ -267,3 +276,24 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `imports_backup/20260921-234749/`，里面能看到被换掉的 `zkai.db-wal`(4.1MB)/`-shm`
   ——即本节 ② 那条新代码在真实导入里确实跑了。23:48 双击 `start_gateway.cmd`
   重启，新链路（托盘日志 + 前台等端口 + 自动开控制台）实测走通。
+
+- 2026-09-22（ChatGPT 客户端配置修改 + 换机自动配置）：原来控制台「🤖 ChatGPT」只能把
+  模型提到 `zk-auto` 链首热切换，`~/.codex/config.toml` 全程只读。现在：
+  ①**期望配置落 `config/chatgpt.yaml`**（gitignore，模板 `chatgpt.example.yaml` 可提交；
+  密钥不进去，值永远取 `.env` 的 `ZKAI_API_TOKEN`）。②**`app/services/chatgpt_service.py`**
+  （纯 stdlib+pyyaml，migrate 也复用）：tomllib 读、**文本级外科手术写**——只动
+  `model`/`model_provider`/`model_reasoning_effort` 三个顶层键和 `[model_providers.<名>]`
+  表内的 `name/base_url/wire_api/env_key`，app 自管的 mcp_servers/plugins/projects/
+  desktop 段落**字节级保留**；写前 `config.toml.bak-<时间戳>`；无变更=不写不备份（幂等）；
+  保留 CRLF；支持 `mode: official` 一键切回官方（删 model_provider 行、provider 表留着
+  随时切回）。**auth.json 永远不写**（操作员 2026-09-22 明确决定）。③控制台端点：
+  `GET /admin/chatgpt`（desired/disk/drift/auth/gateway 全量状态）、
+  `PUT /admin/chatgpt/client`（保存期望配置，`apply=true` 同时落盘）、
+  `POST /admin/chatgpt/apply`（按期望配置重写本机）；`POST /admin/chatgpt` 热切换语义不变。
+  ④**换机**：`config/chatgpt.yaml` 进迁移包；`import_package` 恢复后自动 patch 新机
+  `~/.codex/config.toml`（新机器无 app 也先建最小配置）；`main()` 再把 `env_key` 指向的
+  令牌写进 **Windows 用户级环境变量 HKCU\Environment**（winreg + 广播
+  WM_SETTINGCHANGE，旧值备份进 `imports_backup/<stamp>/chatgpt_user_env.json` 并打印还原
+  命令）——explorer 启动的桌面版读不到 shell/.env 变量，这是「上来就能用」最后一环。
+  测试：`tests/test_chatgpt_config.py` 36 例 + migrate 6 例 + test_api 8 例；门禁全绿。
+

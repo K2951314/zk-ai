@@ -1003,3 +1003,197 @@ async def test_chatgpt_hot_swap_takes_effect_on_the_next_request(provider_config
             assert second.json()["zk_ai"]["provider"] == "fake-b"
     finally:
         await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# ChatGPT client config: console writes ~/.codex/config.toml surgically
+# --------------------------------------------------------------------------- #
+_APP_OWNED_CODEX_CONFIG = """\
+model = "zk-auto"
+model_provider = "zkai"
+model_reasoning_effort = "max"
+
+[model_providers.zkai]
+name = "ZK-AI"
+base_url = "http://127.0.0.1:8317/v1"
+wire_api = "responses"
+env_key = "ZKAI_API_TOKEN"
+
+[mcp_servers.node_repl]
+command = 'C:\\Users\\me\\.codex\\node_repl.exe'
+startup_timeout_sec = 120
+
+[projects.'d:\\work\\zk-ai']
+trust_level = "trusted"
+
+[features]
+memories = true
+"""
+
+
+async def _chatgpt_env(tmp_path, monkeypatch):
+    """Real app-owned config.toml + isolated codex home and config dir."""
+    codex = tmp_path / "codex-home"
+    codex.mkdir()
+    (codex / "config.toml").write_text(_APP_OWNED_CODEX_CONFIG, encoding="utf-8")
+    monkeypatch.setenv("ZKAI_CODEX_HOME", str(codex))
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+
+    config = make_config(
+        models=[make_model("fake-model"), make_model("glm-5.3")],
+        aliases=[make_alias("zk-auto", ["fake-model", "glm-5.3"])],
+        admin_token="test-admin-token",
+    )
+    config.settings.config_dir = cfg_dir
+    harness = await build_harness(config)
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://zkai.test")
+    return client, harness, codex, cfg_dir
+
+
+async def test_chatgpt_get_state_shape(tmp_path, monkeypatch) -> None:
+    client, harness, codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        response = await client.get("/admin/chatgpt", headers=ADMIN)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["path"] == str(codex / "config.toml")
+        assert body["config_exists"] is True
+        assert body["config_model"] == "zk-auto"  # hot-swap fields survive
+        assert body["effective_model"] == "fake-model"
+        assert "glm-5.3" in body["choices"]
+        # new client-config surface
+        assert body["desired"] is None  # never saved yet
+        assert body["disk"]["base_url"] == "http://127.0.0.1:8317/v1"
+        assert body["auth"] == {"exists": False, "has_openai_key": False}
+        assert body["drift"] == []
+        assert body["gateway"]["port"] == 8317
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_save_and_apply_writes_config_toml(tmp_path, monkeypatch) -> None:
+    client, harness, codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        saved = await client.put(
+            "/admin/chatgpt/client",
+            json={"model": "glm-5.3", "model_reasoning_effort": "low", "apply": True},
+            headers=ADMIN,
+        )
+        assert saved.status_code == 200
+        body = saved.json()
+        assert body["applied"] is True
+        assert (cfg_dir / "chatgpt.yaml").exists()
+
+        text = (codex / "config.toml").read_text(encoding="utf-8")
+        # our keys moved...
+        assert text.splitlines()[0] == 'model = "glm-5.3"'
+        assert 'model_reasoning_effort = "low"' in text
+        # ...app-owned sections byte-preserved
+        assert "[mcp_servers.node_repl]" in text
+        assert '[projects.\'d:\\work\\zk-ai\']' in text
+        assert "memories = true" in text
+        # backup of the pre-write file exists
+        assert len(list(codex.glob("config.toml.bak-*"))) == 1
+
+        # a second identical save is a no-op on disk (no new backup)
+        again = await client.put(
+            "/admin/chatgpt/client",
+            json={"model": "glm-5.3", "model_reasoning_effort": "low", "apply": True},
+            headers=ADMIN,
+        )
+        assert again.json()["apply_result"]["no_op"] is True
+        assert len(list(codex.glob("config.toml.bak-*"))) == 1
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_save_rejects_invalid_config(tmp_path, monkeypatch) -> None:
+    client, harness, codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        bad = await client.put(
+            "/admin/chatgpt/client",
+            json={"model": "zk-auto", "base_url": "not-a-url", "apply": False},
+            headers=ADMIN,
+        )
+        assert bad.status_code == 400
+        assert "base_url" in bad.json()["detail"]["error"]["message"]
+        assert not (cfg_dir / "chatgpt.yaml").exists()  # nothing persisted
+        # the machine's config.toml was not touched either
+        assert '"zk-auto"' in (codex / "config.toml").read_text(encoding="utf-8")
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_warns_about_unknown_model(tmp_path, monkeypatch) -> None:
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        saved = await client.put(
+            "/admin/chatgpt/client",
+            json={"model": "not-a-real-model", "apply": False},
+            headers=ADMIN,
+        )
+        assert saved.status_code == 200
+        assert any("not-a-real-model" in w for w in saved.json()["warnings"])
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_apply_endpoint_rewrites_from_saved_yaml(tmp_path, monkeypatch) -> None:
+    client, harness, codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        from app.services import chatgpt_service
+
+        chatgpt_service.save_desired(
+            cfg_dir / "chatgpt.yaml",
+            chatgpt_service.ChatGptConfig(model="fake-model", wire_api="chat"),
+        )
+        # the desktop app regenerated its file: back to defaults on disk
+        (codex / "config.toml").write_text("model = \"zk-auto\"\n", encoding="utf-8")
+
+        applied = await client.post("/admin/chatgpt/apply", headers=ADMIN)
+        assert applied.status_code == 200
+        assert applied.json()["no_op"] is False
+
+        text = (codex / "config.toml").read_text(encoding="utf-8")
+        assert 'model = "fake-model"' in text
+        assert 'wire_api = "chat"' in text
+        assert "[model_providers.zkai]" in text  # table created from scratch
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_apply_without_saved_config_is_404(tmp_path, monkeypatch) -> None:
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        applied = await client.post("/admin/chatgpt/apply", headers=ADMIN)
+        assert applied.status_code == 404
+        assert "还没有保存过" in applied.json()["detail"]["error"]["message"]
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_port_mismatch_warns(tmp_path, monkeypatch) -> None:
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        saved = await client.put(
+            "/admin/chatgpt/client",
+            json={"model": "zk-auto", "base_url": "http://127.0.0.1:9999/v1", "apply": False},
+            headers=ADMIN,
+        )
+        assert saved.status_code == 200
+        assert any("9999" in w and "8317" in w for w in saved.json()["warnings"])
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+

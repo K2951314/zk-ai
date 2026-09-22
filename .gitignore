@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# ChatGPT / Codex 桌面版期望配置（本地现役，模板 .example.yaml 可提交）
+config/chatgpt.yaml
 # 一键换机产物：迁移包与导入前备份都可能含全部 Key，绝不进仓库
 exports/
 imports_backup/

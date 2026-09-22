@@ -210,7 +210,7 @@ python scripts/smoke_test.py
 
 ---
 
-## 3.6 在本地客户端里调用（ZCode / Claude Code / 任意 OpenAI SDK）
+## 3.6 在本地客户端里调用（ZCode / Claude Code / ChatGPT 桌面版 / 任意 OpenAI SDK）
 
 网关起来之后，客户端只需要一个 `base_url` 和一个 API Key（网关**不校验**客户端凭据，
 填任意非空串即可——真正的密钥由网关按凭据池轮换）。
@@ -221,6 +221,7 @@ python scripts/smoke_test.py
 | curl | `http://127.0.0.1:8317/v1/chat/completions` |
 | ZCode（`D:\ZCode\ZCode.exe`） | 见下方一键脚本；`kind: openai-compatible` |
 | Claude Code | ⚠ 见下方「关于 Anthropic 协议」 |
+| ChatGPT / Codex 桌面版 | 控制台「🤖 ChatGPT」面板维护 `~/.codex/config.toml`，见 §3.6.3 |
 
 ### 3.6.1 ZCode
 
@@ -267,6 +268,35 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
   `{"type":"error","error":{...}}`。
 * 鉴权与 `/v1/chat/completions` 一致（`ZKAI_API_TOKEN`），额外接受
   Anthropic 风格的 `x-api-key` 头。
+
+### 3.6.3 ChatGPT / Codex 桌面版（配置修改 + 换机自动配置）
+
+`~/.codex/config.toml` 归 ChatGPT app 自己所有（mcp_servers / plugins / projects /
+桌面偏好全在里面），所以网关**只做外科手术式 patch**：控制台「🤖 ChatGPT」面板
+（`GET/PUT/POST /admin/chatgpt*`）能改的全部内容——
+
+| 配置项 | 说明 |
+|---|---|
+| `model` / 官方模型名 | 桌面版发的模型名；别名 `zk-auto` 或具体模型名 |
+| `model_provider` + `[model_providers.*]` | provider 表名、显示名、`base_url`、`wire_api`（responses/chat）、`env_key` |
+| `model_reasoning_effort` | minimal / low / medium / high / max / 不写 |
+| 接入方式 | `zk-ai`（走网关）/ `official`（一键切回官方：删 `model_provider` 行，表保留随时切回） |
+
+要点：
+
+- **期望配置 = `config/chatgpt.yaml`**（gitignore，模板 `config/chatgpt.example.yaml`）。
+  控制台「保存并写入」先存这份文件、再 patch 本机 config.toml（写前自动
+  `config.toml.bak-时间戳`，app 段落字节级保留，无变更不写）。
+  **auth.json 永不写入**——桌面版从 `env_key` 指向的环境变量取 Key。
+- **`ZKAI_CODEX_HOME` 环境变量**可覆盖 `~/.codex` 的位置（多开用户 / 测试隔离用）；
+  不设就是标准的 `~/.codex`。
+- **换机自动配置**：`config/chatgpt.yaml` 随迁移包同行；新机器导入后自动 patch
+  `~/.codex/config.toml`，并把 `.env` 的 `ZKAI_API_TOKEN` 写进 Windows 用户级环境变量
+  （旧值备份 + 打印还原命令）。装好 app 打开即用。
+- **热切换不用改文件**：桌面版本来就发 `model = "zk-auto"`，控制台把目标模型提到
+  `zk-auto` 链首（下一条消息生效，不用重启 app）；`zk-auto` 是能力分排序，切换会顺手
+  置 `pin_first` 才能盖过分数。
+- 模型选择器：这个版本的桌面版没有模型下拉，模型只由 config 的 `model = ...` 决定。
 
 ---
 
@@ -519,16 +549,18 @@ ZK-AI/
 │   ├── providers/        # base, openai, anthropic, gemini, openrouter, ollama, factory
 │   ├── retry/            # backoff, classifier(错误分类), policy
 │   ├── routing/          # aliases, capability, router, scheduler, strategy
-│   ├── services/         # health_service, model_service, request_service, usage_service
+│   ├── services/         # health_service, model_service, request_service, usage_service,
+│   │                     # chatgpt_service（ChatGPT/Codex 客户端配置，见 §3.6.3）
 │   └── main.py           # create_app 工厂
 ├── config/               # *.example.yaml（可提交）+ *.yaml（本地，已忽略）
 │                         # 另有 providers.real.example.yaml / models.real.example.yaml
 │                         # —— 商汤日日新 + NVIDIA + Kimi 的可复制模板，见 §3.5
+│                         # chatgpt.yaml / chatgpt.example.yaml —— 桌面版期望配置，见 §3.6.3
 ├── scripts/              # init_db, health_check, benchmark, mock_upstream, smoke_test,
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 22 个测试模块，445 个用例，全部 Mock
+├── tests/                # conftest + 23 个测试模块，495 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -536,7 +568,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 52 个文件约 10,270 行，`tests/` 约 2,720 行，`scripts/` 约 750 行。
+规模：`app/` 66 个文件约 15,300 行，`tests/` 约 7,200 行，`scripts/` 约 3,500 行。
 
 ---
 
@@ -603,6 +635,7 @@ security:
 `ZKAI_HEALTH_CHECK_MODE` `ZKAI_HEALTH_CHECK_INTERVAL` `ZKAI_ALLOW_INLINE_SECRETS`
 `ZKAI_CREDENTIAL_ROTATION` `ZKAI_ENVIRONMENT`
 `ZKAI_RATE_LIMIT_BASE` `ZKAI_RATE_LIMIT_MAX` `ZKAI_QUOTA_COOLDOWN` `ZKAI_QUOTA_COOLDOWN_MAX`
+`ZKAI_CODEX_HOME`（覆盖 `~/.codex` 位置，见 §3.6.3）
 
 ### 6.3 `providers.yaml`
 
@@ -1030,6 +1063,10 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 | `GET` | `/admin/requests` | 请求日志：状态/供应商/别名/模型/错误 筛选 + 分页 |
 | `GET` | `/admin/requests/{id}` | 单请求详情 + 全部 attempt（含上游错误原文） |
 | `POST` | `/admin/config/reload` | 重读 YAML，热替换别名与适配器 |
+| `GET` | `/admin/chatgpt` | ChatGPT/Codex 桌面版全量状态（期望配置 / 磁盘现状 / 漂移 / auth.json / 网关端口） |
+| `PUT` | `/admin/chatgpt/client` | 保存期望客户端配置到 `config/chatgpt.yaml`（`apply=true` 同时 patch `~/.codex/config.toml`） |
+| `POST` | `/admin/chatgpt/apply` | 按期望配置重写本机 `~/.codex/config.toml`（写前备份） |
+| `POST` | `/admin/chatgpt` | 热切换：把模型提到 `zk-auto` 链首（不重启桌面版） |
 
 **控制台的写操作都是「文件即真相」**：模型/别名/供应商/Key/限额的改动直接回写
 `config/*.yaml`（ruamel 保注释往返），删掉的条目重启/reload 不会复活；
@@ -1183,7 +1220,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**445 个用例，全部通过，零网络、零真实配额。**
+**495 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1303,7 +1340,7 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
 
 ```bash
 uv run ruff check app tests scripts   # All checks passed!
-uv run mypy app scripts               # Success: no issues found in 65 source files
+uv run mypy app scripts               # Success: no issues found in 66 source files
 ```
 
 > `mypy` 只检查交付代码（`app/`、`scripts/`）。`tests/` 在 `pyproject.toml` 中显式排除：
@@ -1341,6 +1378,13 @@ docker run --rm -p 8317:8317 \
 - **搬文件**：zip 拷到新电脑（任意方式）。
 - **新电脑**：装 uv → 跑一次 `scripts/start_gateway.cmd`（建 `.venv`）→
   双击 `scripts/import_machine.cmd` → 拖入 zip → 输密码 → 再启动即可。
+
+**ChatGPT / Codex 桌面版也跟着搬**：期望配置 `config/chatgpt.yaml` 在包里。导入时自动
+patch 新机的 `~/.codex/config.toml`（只动 `model`/`model_provider`/`model_reasoning_effort`
+和 `[model_providers.zkai]` 表，app 自管段落原样保留；旧文件备份为 `.bak-时间戳`；新机器
+没装 app 也会先生成最小配置），并把 `.env` 里的 `ZKAI_API_TOKEN` 写进 **Windows 用户级
+环境变量**（HKCU\Environment + 广播，explorer 启动的桌面版读得到）——装好 app 打开即用，
+不用再手工抄三处配置。
 
 等价命令行（可脚本化）：
 

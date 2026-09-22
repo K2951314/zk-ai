@@ -96,6 +96,9 @@ def _config_files() -> list[Path]:
         Path("config/config.yaml"),
         Path("config/providers.yaml"),
         Path("config/models.yaml"),
+        # ChatGPT / Codex 桌面版期望配置：导入后自动写入新机 ~/.codex，
+        # 「换机后上来就能用」的客户端一环（见 _apply_chatgpt_client）。
+        Path("config/chatgpt.yaml"),
     ]
 
 
@@ -260,6 +263,51 @@ def _backup_existing(root: Path, targets: list[Path]) -> Path:
     return backup
 
 
+def _apply_chatgpt_client(root: Path, restored: list[str]) -> None:
+    """Reconfigure the ChatGPT/Codex client on the NEW machine.
+
+    The point of a machine move is "it just works when you sit down": the
+    package carries ``config/chatgpt.yaml`` (the *desired* client config, never
+    the app-owned file itself), and we re-materialise it here as a surgical
+    patch of ``~/.codex/config.toml`` - old file backed up as ``.bak-<stamp>``,
+    mcp_servers/plugins/projects sections untouched. On a machine without the
+    app installed yet, the minimal config is created so the first app start
+    already points at this gateway.
+    """
+    if "config/chatgpt.yaml" not in restored:
+        return
+    from app.services import chatgpt_service
+
+    try:
+        desired = chatgpt_service.load_desired(root / "config" / "chatgpt.yaml")
+    except ValueError as exc:
+        print(f"  [警告] config/chatgpt.yaml 读不了，跳过客户端自动配置：{exc}")
+        return
+    if desired is None:  # pragma: no cover - the file was in the manifest
+        return
+    errors = chatgpt_service.validate(desired)
+    if errors:
+        print("  [警告] chatgpt.yaml 期望配置有问题，未写入客户端：" + "；".join(errors))
+        return
+    cfg_file = chatgpt_service.config_toml_path()
+    try:
+        applied = chatgpt_service.apply_config(cfg_file, desired)
+    except OSError as exc:
+        print(f"  [警告] 写 {cfg_file} 失败（不影响网关本身）：{exc}")
+        return
+    if applied.no_op:
+        print(f"  ChatGPT/Codex 客户端配置已是最新：{cfg_file}")
+        return
+    print(f"  ChatGPT/Codex 客户端已自动配置：{cfg_file}")
+    if desired.mode == "official":
+        print(f"    mode=official model={desired.effective_model()}（已切回官方模型）")
+    else:
+        print(f"    model={desired.effective_model()} base_url={desired.base_url}")
+        print(f"    wire_api={desired.wire_api}")
+    if applied.backup:
+        print(f"    旧文件已备份：{applied.backup}")
+
+
 def import_package(
     archive: Path,
     passphrase: str,
@@ -331,6 +379,10 @@ def import_package(
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(zf.read(rel.as_posix()))
                 restored.append(str(rel))
+            # New machine: the ChatGPT/Codex client is configured from the
+            # package's desired config (file-level only - the OS env var is the
+            # CLI layer's job, see _provision_chatgpt_env).
+            _apply_chatgpt_client(root, [r.replace("\\", "/") for r in restored])
             return restored, backup
     finally:
         for junk in tmp.glob("*"):
@@ -338,6 +390,47 @@ def import_package(
                 junk.unlink()
         with contextlib.suppress(OSError):
             tmp.rmdir()
+
+
+def _provision_chatgpt_env(root: Path, restored: list[str]) -> None:
+    """Provision the user-level env var the ChatGPT desktop app reads.
+
+    The desktop app launches from explorer: it inherits neither shell variables
+    nor ``.env``, so the ``env_key`` named in chatgpt.yaml must exist in the
+    *user* environment (HKCU\\Environment) or the client cannot authenticate.
+    This is the last link of "it just works after a machine move". The old
+    value is backed up and the restore command is printed - nothing silent.
+    """
+    if "config/chatgpt.yaml" not in restored:
+        return
+    from app.services import chatgpt_service
+
+    try:
+        desired = chatgpt_service.load_desired(root / "config" / "chatgpt.yaml")
+    except ValueError:
+        return  # already warned about by _apply_chatgpt_client
+    name = (desired.env_key if desired else "") or "ZKAI_API_TOKEN"
+    token = _env_value(name, root=root)
+    if not token:
+        print(f"  （.env 里没有 {name}，跳过用户级环境变量写入）")
+        return
+    written, old, note = chatgpt_service.write_user_env_var(name, token)
+    if not written:
+        if note:
+            print(f"  （{note}）")
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_dir = root / "imports_backup" / stamp
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "chatgpt_user_env.json").write_text(
+        json.dumps({name: old}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    if old == token:
+        print(f"  用户级环境变量 {name} 已是目标值，未改动")
+        return
+    print(f"  已写入用户级环境变量 {name}（HKCU\\Environment，explorer 启动的桌面版也读得到）")
+    print(f"    旧值备份：{backup_dir / 'chatgpt_user_env.json'}")
+    print(f"    还原命令：{chatgpt_service.env_restore_hint(name, old)}")
 
 
 # --------------------------------------------------------------------------
@@ -481,6 +574,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    + {name}")
         if backup:
             print(f"  被覆盖的旧文件已备份到: {backup}")
+        _provision_chatgpt_env(_ROOT, [name.replace("\\", "/") for name in restored])
+        if any("chatgpt.yaml" in name for name in restored):
+            print()
+            print("  ChatGPT / Codex 桌面版已指向本机网关——装好 app 打开即用。")
         print()
         print("下一步：")
         print("  1. 双击 scripts\\start_gateway.cmd 启动（缺 .venv 会自动重建）")

@@ -10,6 +10,8 @@ Credential responses never contain secret material - only a masked fingerprint.
 from __future__ import annotations
 
 import os
+import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,7 @@ from app.models.provider import (
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.routing.aliases import AliasRegistry
 from app.routing.limits import RateLimitRule
+from app.services import chatgpt_service
 
 logger = get_logger("api.admin")
 
@@ -1061,45 +1064,66 @@ async def backfill_cost(container: ContainerDep) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# ChatGPT / Codex desktop (~/.codex/config.toml + the zk-auto alias)
+# ChatGPT / Codex desktop (~/.codex/config.toml + config/chatgpt.yaml)
 #
 # The desktop app reads config.toml once at startup and never reloads it, so
 # rewriting ``model = ...`` there only applies after an app restart. But the
 # app already sends ``model = "zk-auto"`` and the router resolves aliases
-# per-request. The console therefore hot-swaps zk-auto's target list - the
-# next message in a running conversation already uses the new model.
-# config.toml is never rewritten.
+# per-request. The console therefore has two levels:
+#
+# * **hot swap** (``POST /admin/chatgpt``) - reorders zk-auto's target chain;
+#   the next message in a running conversation already uses the new model;
+# * **client config** (``PUT /admin/chatgpt/client`` / ``POST
+#   /admin/chatgpt/apply``) - rewrites the *file* itself (base_url, wire_api,
+#   env_key, reasoning effort, official-model switch) through the surgical
+#   patcher in :mod:`app.services.chatgpt_service`. config.toml is owned by
+#   the app, so only our keys are touched and a ``.bak-<stamp>`` is kept.
+#
+# The desired config lives in ``config/chatgpt.yaml`` (single source of truth,
+# travels inside the migration package - importing on a new machine
+# reconfigures the client automatically, see scripts/migrate.py).
 # --------------------------------------------------------------------------- #
-
-_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 
 #: The alias the desktop app already sends.
 CHATGPT_ALIAS = "zk-auto"
 
 
-def _codex_config_path() -> Path:
-    return _CODEX_CONFIG
+class ChatGptClientPayload(BaseModel):
+    """Console form → desired client config. Empty/blank = fall back to defaults."""
+
+    mode: str = "zk-ai"
+    model: str = ""
+    model_provider: str = "zkai"
+    provider_display: str = "ZK-AI"
+    base_url: str = ""
+    wire_api: str = "responses"
+    env_key: str = "ZKAI_API_TOKEN"
+    model_reasoning_effort: str = ""
+    official_model: str = ""
+    apply: bool = True
 
 
-def _read_codex_config() -> dict[str, str] | None:
-    """Parse model / model_provider from config.toml (top-level keys only)."""
-    path = _codex_config_path()
-    if not path.exists():
-        return None
-    text = path.read_text(encoding="utf-8", errors="replace")
-    result: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip(chr(34)).strip(chr(39)).strip()
-        if key in ("model", "model_provider"):
-            result[key] = value
-        if len(result) == 2:
-            break
-    return result if result else None
+def _desired_config_path(container: ContainerDep) -> Path:
+    return container.settings.resolved_config_dir / "chatgpt.yaml"
+
+
+def _load_desired_or_400(container: ContainerDep) -> chatgpt_service.ChatGptConfig | None:
+    """Load config/chatgpt.yaml; None when it was never saved."""
+    try:
+        return chatgpt_service.load_desired(_desired_config_path(container))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail={"error": {"message": str(exc)}}
+        ) from exc
+
+
+def _validate_or_400(desired: chatgpt_service.ChatGptConfig) -> None:
+    errors = chatgpt_service.validate(desired)
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "；".join(errors), "type": "invalid_chatgpt_config"}},
+        )
 
 
 def _chatgpt_choices(container: ContainerDep) -> list[str]:
@@ -1113,31 +1137,46 @@ def _chatgpt_choices(container: ContainerDep) -> list[str]:
     return aliases + models
 
 
-def _chatgpt_state(container: ContainerDep) -> dict[str, Any]:
-    """Current effective model = zk-auto's first target; plus config.toml state."""
-    cfg = _read_codex_config() or {}
-    config_model = cfg.get("model", "")
+@router.get("/chatgpt", summary="ChatGPT/Codex desktop: model + client config state")
+async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
+    """Everything the console panel needs: alias state, desired config,
+    on-disk state (auth.json is read-only info), and key-level drift."""
+    cfg_path = chatgpt_service.config_toml_path()
+    desired = _load_desired_or_400(container)
+    disk = chatgpt_service.read_disk_state(cfg_path)
+    drift: list[dict[str, Any]] = []
+    if desired is not None and not disk.parse_error:
+        drift = [
+            c.as_dict()
+            for c in chatgpt_service.plan_changes(
+                chatgpt_service.read_config_toml(cfg_path), desired
+            )
+        ]
     alias = container.config.aliases.get(CHATGPT_ALIAS)
-    effective = alias.targets[0] if alias and alias.targets else ""
     return {
         "ok": True,
-        "path": str(_codex_config_path()),
+        "path": str(cfg_path),
         "alias": CHATGPT_ALIAS,
         "alias_exists": alias is not None,
-        "effective_model": effective,
-        "config_model": config_model,
-        "config_provider": cfg.get("model_provider", ""),
-        "pinned": config_model == CHATGPT_ALIAS,
+        "effective_model": alias.targets[0] if alias and alias.targets else "",
+        "targets": list(alias.targets) if alias else [],
+        "config_exists": disk.exists,
+        "config_model": disk.model,
+        "config_provider": disk.model_provider,
+        "config_parse_error": disk.parse_error,
+        "pinned": disk.model == CHATGPT_ALIAS,
         "choices": _chatgpt_choices(container),
+        "desired": asdict(desired) if desired else None,
+        "desired_path": str(_desired_config_path(container)),
+        "disk": asdict(disk),
+        "auth": chatgpt_service.read_auth_info(cfg_path.parent),
+        "drift": drift,
+        "gateway": {
+            "port": container.settings.port,
+            "host": container.settings.host,
+            "api_token_set": bool(container.settings.api_token),
+        },
     }
-
-
-@router.get("/chatgpt", summary="ChatGPT/Codex desktop: current model")
-async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
-    cfg_path = _codex_config_path()
-    if not cfg_path.exists():
-        return {"ok": False, "detail": f"not found: {cfg_path}"}
-    return _chatgpt_state(container)
 
 
 @router.post("/chatgpt", summary="ChatGPT/Codex desktop: switch model (hot)")
@@ -1203,5 +1242,96 @@ async def set_chatgpt_model(
         "restart_required": False,
         "targets": new_targets,
         "synced": synced,
-        "path": str(_codex_config_path()),
+        "path": str(chatgpt_service.config_toml_path()),
+    }
+
+
+@router.put("/chatgpt/client", summary="Save the desired ChatGPT client config (optionally apply)")
+async def put_chatgpt_client(
+    container: ContainerDep, payload: ChatGptClientPayload
+) -> dict[str, Any]:
+    """Save ``config/chatgpt.yaml``; with ``apply=true`` (default) also rewrite
+    ``~/.codex/config.toml`` right away (backup first, app sections untouched)."""
+    desired = chatgpt_service.ChatGptConfig(
+        mode=payload.mode.strip() or "zk-ai",
+        model=payload.model.strip(),
+        model_provider=payload.model_provider.strip() or "zkai",
+        provider_display=payload.provider_display.strip() or "ZK-AI",
+        # blank base_url means "this machine's gateway" - fill in the live port
+        base_url=payload.base_url.strip()
+        or f"http://127.0.0.1:{container.settings.port}/v1",
+        wire_api=payload.wire_api.strip() or "responses",
+        env_key=payload.env_key.strip() or "ZKAI_API_TOKEN",
+        model_reasoning_effort=payload.model_reasoning_effort.strip(),
+        official_model=payload.official_model.strip(),
+    )
+    _validate_or_400(desired)
+
+    warnings: list[str] = []
+    if desired.mode == "zk-ai" and desired.model and desired.model not in container.config.known_names():
+        warnings.append(
+            f"模型 '{desired.model}' 不在网关已知的模型/别名里——客户端发这个名字会 404"
+        )
+    port_note = _base_url_port_note(desired.base_url, container)
+    if port_note:
+        warnings.append(port_note)
+
+    desired_path = _desired_config_path(container)
+    try:
+        chatgpt_service.save_desired(desired_path, desired)
+    except OSError as exc:
+        raise _file_write_failed(exc) from exc
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "saved": str(desired_path),
+        "config_path": str(chatgpt_service.config_toml_path()),
+        "warnings": warnings,
+        "applied": False,
+    }
+    if payload.apply:
+        result.update(_apply_desired(chatgpt_service.config_toml_path(), desired))
+    return result
+
+
+@router.post("/chatgpt/apply", summary="(Re)write ~/.codex/config.toml from the saved config")
+async def apply_chatgpt_client(container: ContainerDep) -> dict[str, Any]:
+    """Re-materialise the client config from ``config/chatgpt.yaml`` - e.g. the
+    desktop app regenerated its file, or this is a fresh machine."""
+    desired = _load_desired_or_400(container)
+    if desired is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "message": "还没有保存过客户端配置——先在控制台「🤖 ChatGPT」面板保存一份"
+                }
+            },
+        )
+    _validate_or_400(desired)
+    return {"ok": True, **_apply_desired(chatgpt_service.config_toml_path(), desired)}
+
+
+def _base_url_port_note(base_url: str, container: ContainerDep) -> str | None:
+    """Warn when the client would talk to a port the gateway is not listening on."""
+    match = re.search(r":(\d{1,5})(?:/|$)", base_url)
+    if match and int(match.group(1)) != container.settings.port:
+        return (
+            f"base_url 端口 {match.group(1)} 与网关当前端口 {container.settings.port} 不一致"
+            "——换机后如改过端口，在这里改回來"
+        )
+    return None
+
+
+def _apply_desired(
+    config_file: Path, desired: chatgpt_service.ChatGptConfig
+) -> dict[str, Any]:
+    try:
+        applied = chatgpt_service.apply_config(config_file, desired)
+    except OSError as exc:
+        raise _file_write_failed(exc) from exc
+    return {
+        "applied": True,
+        "no_op": applied.no_op,
+        "apply_result": applied.as_dict(),
     }

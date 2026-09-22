@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------------
+# ChatGPT / Codex 桌面版期望配置（复制为 config/chatgpt.yaml 后按需修改）
+#
+# mode: zk-ai     走 ZK-AI 网关（本机 base_url，Key 用 env_key 指向的环境变量）
+#       official  切回 ChatGPT 官方（删 model_provider 行，model 改官方模型名）
+# 密钥不在这里：令牌值永远取 .env 的 ZKAI_API_TOKEN。
+# 本文件随一键换机迁移包同行，导入后自动写入新机 ~/.codex/config.toml。
+# 维护入口：网关控制台「🤖 ChatGPT」面板（PUT /admin/chatgpt/client）。
+# ---------------------------------------------------------------------------
+
+mode: zk-ai                # zk-ai | official
+model: zk-auto             # 桌面版请求的模型：别名或具体模型名
+model_provider: zkai       # config.toml 里的 provider 表名
+provider_display: ZK-AI    # 表内显示名
+base_url: http://127.0.0.1:8317/v1
+wire_api: responses        # responses | chat
+env_key: ZKAI_API_TOKEN    # 桌面版从哪个环境变量读 Key
+model_reasoning_effort: max  # minimal | low | medium | high | max | 留空
+official_model: gpt-5.6-terra  # official 模式下写回 config.toml 的模型名
