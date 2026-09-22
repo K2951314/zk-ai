@@ -70,8 +70,11 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   provider 表只在其表体内动；`apply_config` 读文件必须 `newline=""`（`read_text()` 会把
   CRLF 归一化成 LF，悄悄改掉 app 的换行风格）；`auth.json` **永远不写**（运营决策）。
   改 `env_key`/`ZKAI_API_TOKEN` 后记得桌面版要重启才读到新环境变量；换机导入时
-  `migrate._provision_chatgpt_env` 会把它写进 HKCU\Environment 并广播，别在测试里
+  `migrate._provision_chatgpt_env` 会把它写进 HKCU\Environment 并广播+回读校验，别在测试里
   直接跑那个函数（会碰真实用户环境，测试要 patch `write_user_env_var`）。
+  桌面版报 `Missing environment variable: X` = 用户级环境变量缺 X：诊断看
+  `GET /admin/chatgpt` 的 `env_key_visible`/`env_key_matches_gateway`（陈旧令牌会 401），
+  一键修复 `POST /admin/chatgpt/sync-env`（或导入输出的 setx 命令），然后重启桌面版。
   配置目录可用 `ZKAI_CODEX_HOME` 覆盖（多开用户 / 测试隔离），默认 `~/.codex`。
 
 ## 当前状态（2026-09-19）
@@ -122,7 +125,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-22 起 495 passed）；`git push` 走本机代理
+- 门禁 ruff / mypy / pytest 全绿（2026-09-22 起 503 passed）；`git push` 走本机代理
   （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
@@ -295,5 +298,12 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   令牌写进 **Windows 用户级环境变量 HKCU\Environment**（winreg + 广播
   WM_SETTINGCHANGE，旧值备份进 `imports_backup/<stamp>/chatgpt_user_env.json` 并打印还原
   命令）——explorer 启动的桌面版读不到 shell/.env 变量，这是「上来就能用」最后一环。
-  测试：`tests/test_chatgpt_config.py` 36 例 + migrate 6 例 + test_api 8 例；门禁全绿。
+  **09-22 晚事故修正**：provision 原本被 chatgpt.yaml 门控，漏掉「源机没存过它 +
+  操作员手抄 ~/.codex」这条真实换机路径（桌面版报 Missing environment variable）。
+  现改为 `.env` 门控；变量名按「磁盘 config.toml → chatgpt.yaml → 默认」解析
+  （`_resolve_env_key_name`，磁盘是第一真相）；写后**回读校验**，`.env` 缺值时输出直接给
+  setx 修复路径。配套：`GET /admin/chatgpt` 增 `env_key_name/env_key_visible/
+  env_key_matches_gateway` 字段；控制台状态条标红 + 「🔧 同步令牌到用户环境变量」按钮
+  （`POST /admin/chatgpt/sync-env`，写后同样回读校验）。
+  测试：`tests/test_chatgpt_config.py` 38 例 + migrate 10 例 + test_api 11 例；门禁全绿。
 

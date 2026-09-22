@@ -1197,3 +1197,76 @@ async def test_chatgpt_port_mismatch_warns(tmp_path, monkeypatch) -> None:
         await client.aclose()
         await harness.container.shutdown()
 
+
+# --------------------------------------------------------------------------- #
+# 2026-09-22 换机事故回归：桌面版读不到 env_key 环境变量的可见性与一键同步
+# --------------------------------------------------------------------------- #
+async def test_chatgpt_get_reports_env_key_visibility(tmp_path, monkeypatch) -> None:
+    """桌面版从 explorer 启动，只认用户级环境变量——GET 必须说清它能不能读到。"""
+    from app.services import chatgpt_service
+
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    harness.container.config.settings.api_token = "tok-1"
+    try:
+        monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: None)
+        body = (await client.get("/admin/chatgpt", headers=ADMIN)).json()
+        assert body["env_key_name"] == "ZKAI_API_TOKEN"
+        assert body["env_key_visible"] is False
+        assert body["env_key_matches_gateway"] is None
+
+        monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "tok-1")
+        body = (await client.get("/admin/chatgpt", headers=ADMIN)).json()
+        assert body["env_key_visible"] is True
+        assert body["env_key_matches_gateway"] is True
+
+        monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "stale-token")
+        body = (await client.get("/admin/chatgpt", headers=ADMIN)).json()
+        assert body["env_key_matches_gateway"] is False  # 陈旧令牌：桌面版会 401
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_sync_env_writes_and_verifies(tmp_path, monkeypatch) -> None:
+    from app.services import chatgpt_service
+
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    harness.container.config.settings.api_token = "tok-2"
+    writes: list[tuple[str, str]] = []
+
+    def fake_write(name: str, value: str):
+        writes.append((name, value))
+        return True, "old", ""
+
+    monkeypatch.setattr(chatgpt_service, "write_user_env_var", fake_write)
+    monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "tok-2")
+    try:
+        response = await client.post("/admin/chatgpt/sync-env", headers=ADMIN)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["name"] == "ZKAI_API_TOKEN"
+        assert body["verified"] is True
+        assert writes == [("ZKAI_API_TOKEN", "tok-2")]
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_sync_env_without_gateway_token_is_400(tmp_path, monkeypatch) -> None:
+    from app.services import chatgpt_service
+
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(chatgpt_service, "write_user_env_var", _forbid_write)
+    try:
+        response = await client.post("/admin/chatgpt/sync-env", headers=ADMIN)
+        assert response.status_code == 400
+        assert "ZKAI_API_TOKEN" in response.json()["detail"]["error"]["message"]
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+def _forbid_write(*_args):
+    raise AssertionError("write_user_env_var must not run here")
+

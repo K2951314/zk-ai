@@ -412,12 +412,14 @@ def test_provision_chatgpt_env_writes_user_env_with_backup(
         return True, "old-token", ""
 
     monkeypatch.setattr(chatgpt_service, "write_user_env_var", fake_write)
+    monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "t")
 
-    migrate._provision_chatgpt_env(root, ["config/chatgpt.yaml"])
+    migrate._provision_chatgpt_env(root, [".env", "config/chatgpt.yaml"])
 
     assert calls == [("ZKAI_API_TOKEN", "t")]
     out = capsys.readouterr().out
     assert "已写入用户级环境变量" in out and "还原命令" in out
+    assert "校验通过" in out
     backup = next(root.glob("imports_backup/*/chatgpt_user_env.json"))
     assert json.loads(backup.read_text(encoding="utf-8"))["ZKAI_API_TOKEN"] == "old-token"
 
@@ -429,16 +431,86 @@ def test_provision_chatgpt_env_skips_without_a_token(tmp_path, monkeypatch, caps
     monkeypatch.setattr(migrate, "_ROOT", root)
     monkeypatch.setattr(chatgpt_service, "write_user_env_var", _forbid_env_write)
 
-    migrate._provision_chatgpt_env(root, ["config/chatgpt.yaml"])
+    migrate._provision_chatgpt_env(root, [".env", "config/chatgpt.yaml"])
 
     out = capsys.readouterr().out  # readouterr() 会清空缓冲，只能读一次
     assert "ZKAI_API_TOKEN" in out
-    assert "跳过用户级环境变量写入" in out
+    # 新版不再静默跳过：把桌面版会看到的那句报错和两条修复路径原样给出
+    assert "Missing environment variable: ZKAI_API_TOKEN" in out
+    assert "setx ZKAI_API_TOKEN" in out
 
 
 def test_provision_chatgpt_env_noop_when_not_in_package(tmp_path, monkeypatch) -> None:
+    """没有 .env 的包（纯配置包）不动用户级环境变量。"""
     root = tmp_path / "root"
     _populate(root)
     monkeypatch.setattr(chatgpt_service, "write_user_env_var", _forbid_env_write)
+    migrate._provision_chatgpt_env(root, ["config/models.yaml", "config/providers.yaml"])
+
+
+def test_provision_chatgpt_env_works_without_chatgpt_yaml(tmp_path, isolated_codex_home,
+                                                          monkeypatch, capsys) -> None:
+    """2026-09-22 换机事故回归：源机没存过 chatgpt.yaml，操作员把旧机器的
+    ~/.codex 整个手抄过来——config.toml 里的 env_key 照样要 provision。
+    门控是 .env（不是 chatgpt.yaml），变量名以磁盘 config.toml 为第一真相。"""
+    root = tmp_path / "root"
+    _populate(root)
+    (root / ".env").write_text("ZKAI_API_TOKEN=t\nMY_CODEX_KEY=my-secret\n", encoding="utf-8")
+    (isolated_codex_home / "config.toml").write_text(
+        'model = "zk-auto"\nmodel_provider = "zkai"\n\n'
+        "[model_providers.zkai]\n"
+        'base_url = "http://127.0.0.1:8317/v1"\nwire_api = "responses"\n'
+        'env_key = "MY_CODEX_KEY"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(migrate, "_ROOT", root)
+    calls: list[tuple[str, str]] = []
+
+    def fake_write(name: str, value: str):
+        calls.append((name, value))
+        return True, None, ""
+
+    monkeypatch.setattr(chatgpt_service, "write_user_env_var", fake_write)
+    monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "my-secret")
+
     migrate._provision_chatgpt_env(root, [".env", "config/models.yaml"])
+
+    assert calls == [("MY_CODEX_KEY", "my-secret")]  # 认磁盘上的名字，不是默认名
+    out = capsys.readouterr().out
+    assert "已写入用户级环境变量 MY_CODEX_KEY" in out
+    assert "校验通过" in out
+
+
+def test_provision_chatgpt_env_verifies_by_reading_back(tmp_path, isolated_codex_home,
+                                                        monkeypatch, capsys) -> None:
+    """写成功但回读不一致=桌面版照样报错，必须大声 fail。"""
+    root = tmp_path / "root"
+    _populate(root)
+    monkeypatch.setattr(migrate, "_ROOT", root)
+    monkeypatch.setattr(
+        chatgpt_service, "write_user_env_var", lambda name, value: (True, "old", "")
+    )
+    monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "something-else")
+
+    migrate._provision_chatgpt_env(root, [".env"])
+
+    out = capsys.readouterr().out
+    assert "回读校验失败" in out
+    assert "setx ZKAI_API_TOKEN" in out  # 给出可执行的手动修复命令
+
+
+def test_provision_chatgpt_env_warns_when_token_missing(tmp_path, isolated_codex_home,
+                                                        monkeypatch, capsys) -> None:
+    """.env 里没有 env_key 指向的变量时，把桌面版会看到的那句报错原样给出。"""
+    root = tmp_path / "root"
+    _populate(root)
+    (root / ".env").write_text("SENSENOVA_API_KEY=sk-x\n", encoding="utf-8")
+    monkeypatch.setattr(migrate, "_ROOT", root)
+    monkeypatch.setattr(chatgpt_service, "write_user_env_var", _forbid_env_write)
+
+    migrate._provision_chatgpt_env(root, [".env"])
+
+    out = capsys.readouterr().out
+    assert "Missing environment variable: ZKAI_API_TOKEN" in out
+    assert "setx ZKAI_API_TOKEN" in out
 

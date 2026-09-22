@@ -1153,6 +1153,9 @@ async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
             )
         ]
     alias = container.config.aliases.get(CHATGPT_ALIAS)
+    env_key_name = disk.env_key or (desired.env_key if desired else "") or "ZKAI_API_TOKEN"
+    env_key_value = chatgpt_service.read_user_env_var(env_key_name)
+    gateway_token = container.settings.api_token
     return {
         "ok": True,
         "path": str(cfg_path),
@@ -1171,10 +1174,17 @@ async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
         "disk": asdict(disk),
         "auth": chatgpt_service.read_auth_info(cfg_path.parent),
         "drift": drift,
+        # 桌面版能否真正读到 Key：它从 explorer 启动，只认用户级环境变量——
+        # 缺它就报 "Missing environment variable: <NAME>"（2026-09-22 换机事故）
+        "env_key_name": env_key_name,
+        "env_key_visible": env_key_value is not None,
+        "env_key_matches_gateway": (
+            env_key_value == gateway_token if (gateway_token and env_key_value is not None) else None
+        ),
         "gateway": {
             "port": container.settings.port,
             "host": container.settings.host,
-            "api_token_set": bool(container.settings.api_token),
+            "api_token_set": bool(gateway_token),
         },
     }
 
@@ -1310,6 +1320,48 @@ async def apply_chatgpt_client(container: ContainerDep) -> dict[str, Any]:
         )
     _validate_or_400(desired)
     return {"ok": True, **_apply_desired(chatgpt_service.config_toml_path(), desired)}
+
+
+@router.post("/chatgpt/sync-env", summary="Sync the gateway token into the user-level env var")
+async def sync_chatgpt_env(container: ContainerDep) -> dict[str, Any]:
+    """One-click recovery from "Missing environment variable" / stale token.
+
+    The desktop app authenticates with the user-level (HKCU\\Environment)
+    variable named by ``env_key`` - it never reads ``.env``. Rotating
+    ``ZKAI_API_TOKEN`` in .env (or landing on a fresh machine) leaves the app
+    with a missing/old value; this writes the gateway's current token there
+    and verifies by reading it back.
+    """
+    disk = chatgpt_service.read_disk_state(chatgpt_service.config_toml_path())
+    try:
+        desired = _load_desired_or_400(container)
+    except HTTPException:
+        desired = None  # yaml 坏不该拦住同步——变量名以磁盘 config.toml 为准
+    name = disk.env_key or (desired.env_key if desired else "") or "ZKAI_API_TOKEN"
+    token = container.settings.api_token
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": "网关未设置 ZKAI_API_TOKEN（.env 里没有）——此时 /v1/* 开放，"
+                    "桌面版不需要它，无需同步"
+                }
+            },
+        )
+    try:
+        written, _old, note = chatgpt_service.write_user_env_var(name, token)
+    except OSError as exc:  # pragma: no cover - registry write failures
+        raise _file_write_failed(exc) from exc
+    if not written:
+        raise HTTPException(status_code=400, detail={"error": {"message": note or "写入失败"}})
+    verified = chatgpt_service.read_user_env_var(name) == token
+    return {
+        "ok": True,
+        "name": name,
+        "verified": verified,
+        "message": f"已同步 {name} 到用户级环境变量；重启 ChatGPT 桌面版（含托盘退出）后生效",
+    }
 
 
 def _base_url_port_note(base_url: str, container: ContainerDep) -> str | None:

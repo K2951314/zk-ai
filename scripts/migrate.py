@@ -392,45 +392,77 @@ def import_package(
             tmp.rmdir()
 
 
+def _resolve_env_key_name(root: Path) -> str:
+    """桌面版实际引用的环境变量名：磁盘 config.toml > chatgpt.yaml > 默认。
+
+    磁盘上的 ``~/.codex/config.toml`` 是真相——它可能是本工具 patch 的，也
+    可能是操作员从旧机器整个手抄过来的（没有 chatgpt.yaml 时唯一的事实来源，
+    2026-09-22 换机事故正是漏了这条路径：provision 被 chatgpt.yaml 门控，
+    源机没存过它，手抄配置的 env_key 就没人管）。
+    """
+    from app.services import chatgpt_service
+
+    disk = chatgpt_service.read_disk_state(chatgpt_service.config_toml_path())
+    if disk.env_key:
+        return disk.env_key
+    try:
+        desired = chatgpt_service.load_desired(root / "config" / "chatgpt.yaml")
+    except ValueError:
+        desired = None
+    if desired is not None and desired.env_key:
+        return desired.env_key
+    return "ZKAI_API_TOKEN"
+
+
 def _provision_chatgpt_env(root: Path, restored: list[str]) -> None:
     """Provision the user-level env var the ChatGPT desktop app reads.
 
     The desktop app launches from explorer: it inherits neither shell variables
-    nor ``.env``, so the ``env_key`` named in chatgpt.yaml must exist in the
-    *user* environment (HKCU\\Environment) or the client cannot authenticate.
-    This is the last link of "it just works after a machine move". The old
-    value is backed up and the restore command is printed - nothing silent.
+    nor ``.env``, so the ``env_key`` named in config.toml must exist in the
+    *user* environment (HKCU\\Environment) or the client fails with
+    "Missing environment variable: <NAME>". This is the last link of "it just
+    works after a machine move". The old value is backed up, the restore
+    command is printed, and the write is verified by reading it back - nothing
+    silent. Gated on ``.env`` (not chatgpt.yaml): a hand-copied ``~/.codex``
+    needs this just as much as a console-saved desired config does.
     """
-    if "config/chatgpt.yaml" not in restored:
+    if ".env" not in restored:
         return
     from app.services import chatgpt_service
 
-    try:
-        desired = chatgpt_service.load_desired(root / "config" / "chatgpt.yaml")
-    except ValueError:
-        return  # already warned about by _apply_chatgpt_client
-    name = (desired.env_key if desired else "") or "ZKAI_API_TOKEN"
+    name = _resolve_env_key_name(root)
     token = _env_value(name, root=root)
     if not token:
-        print(f"  （.env 里没有 {name}，跳过用户级环境变量写入）")
+        print(f'  [警告] .env 里没有 {name}——桌面版 config.toml 引用它，打开 app 会报')
+        print(f'  "Missing environment variable: {name}"。二选一：')
+        print(f"    a) 在 .env 里加 {name}=<网关令牌>（和 ZKAI_API_TOKEN 同值）后重跑导入")
+        print(f'    b) 手动 setx {name} "<令牌>"，然后重启桌面版')
         return
     written, old, note = chatgpt_service.write_user_env_var(name, token)
     if not written:
         if note:
             print(f"  （{note}）")
         return
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup_dir = root / "imports_backup" / stamp
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    (backup_dir / "chatgpt_user_env.json").write_text(
-        json.dumps({name: old}, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
     if old == token:
         print(f"  用户级环境变量 {name} 已是目标值，未改动")
-        return
-    print(f"  已写入用户级环境变量 {name}（HKCU\\Environment，explorer 启动的桌面版也读得到）")
-    print(f"    旧值备份：{backup_dir / 'chatgpt_user_env.json'}")
-    print(f"    还原命令：{chatgpt_service.env_restore_hint(name, old)}")
+    else:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_dir = root / "imports_backup" / stamp
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        (backup_dir / "chatgpt_user_env.json").write_text(
+            json.dumps({name: old}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"  已写入用户级环境变量 {name}（HKCU\\Environment，explorer 启动的桌面版也读得到）")
+        print(f"    旧值备份：{backup_dir / 'chatgpt_user_env.json'}")
+        print(f"    还原命令：{chatgpt_service.env_restore_hint(name, old)}")
+    # 回读校验：注册表里真的是这个值吗（写成功但读不到=桌面版照样报错）
+    visible = chatgpt_service.read_user_env_var(name)
+    if visible == token:
+        print(f"  校验通过：{name} 已可被 explorer 启动的新进程读到")
+    else:
+        print(f"  [警告] 回读校验失败：{name} 读出的值不符合预期")
+        print(f'    手动修复：setx {name} "<令牌>"，然后重启 ChatGPT 桌面版')
+    print(f"  注意：ChatGPT 桌面版若已经开着，退出（含托盘图标）后重开才会读到 {name}")
 
 
 # --------------------------------------------------------------------------
@@ -574,10 +606,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    + {name}")
         if backup:
             print(f"  被覆盖的旧文件已备份到: {backup}")
-        _provision_chatgpt_env(_ROOT, [name.replace("\\", "/") for name in restored])
-        if any("chatgpt.yaml" in name for name in restored):
+        names = [name.replace("\\", "/") for name in restored]
+        _provision_chatgpt_env(_ROOT, names)
+        if any("chatgpt.yaml" in name for name in names):
             print()
             print("  ChatGPT / Codex 桌面版已指向本机网关——装好 app 打开即用。")
+        else:
+            from app.services import chatgpt_service as _cg
+
+            if _cg.config_toml_path().exists():
+                print()
+                print("  包里没有 chatgpt.yaml：桌面版沿用你现有的 ~/.codex/config.toml；")
+                print("  若它是从旧机器手抄的，上面的用户级环境变量就是它缺的那一环。")
         print()
         print("下一步：")
         print("  1. 双击 scripts\\start_gateway.cmd 启动（缺 .venv 会自动重建）")

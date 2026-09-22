@@ -1561,6 +1561,7 @@ async function openChatGptModal() {
         <button id="cg-btn-preview">🔍 预览变更</button>
         <button class="primary" id="cg-btn-save">💾 保存并写入</button>
         <button id="cg-btn-reapply" style="display:none">↻ 重新写入本机</button>
+        <button id="cg-btn-syncenv" style="display:none" title="把网关 .env 里的令牌写进 Windows 用户级环境变量（桌面版从 explorer 启动只认这个）">🔧 同步令牌到用户环境变量</button>
         <button id="cg-cancel">取消</button>
       </div>
 
@@ -1584,6 +1585,7 @@ async function openChatGptModal() {
   $("#cg-btn-preview").onclick = cgPreview;
   $("#cg-btn-save").onclick = cgSave;
   $("#cg-btn-reapply").onclick = cgReapply;
+  $("#cg-btn-syncenv").onclick = cgSyncEnv;
   $("#cg-hot-save").onclick = cgHotSwap;
   try {
     const r = await api("/admin/chatgpt");
@@ -1624,11 +1626,21 @@ function cgFill(r) {
   if (r.config_parse_error) bits.push(`<span style="color:var(--red)">config.toml 解析失败：${esc(r.config_parse_error)}</span>`);
   const auth = r.auth || {};
   bits.push(auth.exists ? "auth.json：存在（只读，不写）" : "auth.json：不存在");
-  bits.push(gw.api_token_set ? "ZKAI_API_TOKEN：已设置" : "ZKAI_API_TOKEN：未设置（/v1/* 开放，不设也能用）");
+  // 桌面版从 explorer 启动，只认用户级环境变量——缺它就报 Missing environment variable
+  const envName = r.env_key_name || "ZKAI_API_TOKEN";
+  if (r.env_key_visible) {
+    bits.push(r.env_key_matches_gateway === false
+      ? `<span style="color:var(--red)">${esc(envName)}：已设置但与网关令牌不一致（桌面版会 401）</span>`
+      : `${esc(envName)}：桌面版可见`);
+  } else {
+    bits.push(`<span style="color:var(--red)">${esc(envName)}：桌面版读不到（打开 app 会报 Missing environment variable）</span>`);
+  }
   $("#cg-status").innerHTML = bits.join(" · ");
   $("#cg-path").textContent =
     r.path + (r.desired_path ? ("    期望配置：" + r.desired_path) : "");
   $("#cg-btn-reapply").style.display = (r.desired && drift) ? "" : "none";
+  $("#cg-btn-syncenv").style.display =
+    (r.env_key_visible && r.env_key_matches_gateway !== false) ? "none" : "";
 
   // 热切换区
   const current = r.effective_model || "";
@@ -1741,6 +1753,14 @@ async function cgReapply() {
     const r = await api("/admin/chatgpt/apply", { method: "POST" });
     toast(r.no_op ? "config.toml 已是最新" :
       `已按期望配置重写 config.toml（${r.apply_result.changes.length} 处）`, "ok");
+    await cgRefresh();
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function cgSyncEnv() {
+  try {
+    const r = await api("/admin/chatgpt/sync-env", { method: "POST" });
+    toast(r.message + (r.verified ? "" : "（回读校验未通过，请手动 setx）"), r.verified ? "ok" : "err");
     await cgRefresh();
   } catch (err) { toast(err.message, "err"); }
 }

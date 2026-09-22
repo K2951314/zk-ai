@@ -290,6 +290,12 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
   **auth.json 永不写入**——桌面版从 `env_key` 指向的环境变量取 Key。
 - **`ZKAI_CODEX_HOME` 环境变量**可覆盖 `~/.codex` 的位置（多开用户 / 测试隔离用）；
   不设就是标准的 `~/.codex`。
+- **桌面版的 Key 只认用户级环境变量**：`env_key` 指向的变量必须存在于 Windows 用户级
+  环境（HKCU\Environment）——桌面版从 explorer 启动，读不到 shell 变量也读不到 `.env`。
+  换机导入时会自动写入并**回读校验**；控制台状态条实时显示「可见 / 读不到 / 与网关令牌
+  不一致」，一键修复点「🔧 同步令牌到用户环境变量」（`POST /admin/chatgpt/sync-env`）。
+  改完必须**重启桌面版**（含托盘退出）才生效。桌面版报
+  `Missing environment variable: ZKAI_API_TOKEN` 就是这个变量没配。
 - **换机自动配置**：`config/chatgpt.yaml` 随迁移包同行；新机器导入后自动 patch
   `~/.codex/config.toml`，并把 `.env` 的 `ZKAI_API_TOKEN` 写进 Windows 用户级环境变量
   （旧值备份 + 打印还原命令）。装好 app 打开即用。
@@ -560,7 +566,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 23 个测试模块，495 个用例，全部 Mock
+├── tests/                # conftest + 23 个测试模块，503 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -1066,6 +1072,7 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 | `GET` | `/admin/chatgpt` | ChatGPT/Codex 桌面版全量状态（期望配置 / 磁盘现状 / 漂移 / auth.json / 网关端口） |
 | `PUT` | `/admin/chatgpt/client` | 保存期望客户端配置到 `config/chatgpt.yaml`（`apply=true` 同时 patch `~/.codex/config.toml`） |
 | `POST` | `/admin/chatgpt/apply` | 按期望配置重写本机 `~/.codex/config.toml`（写前备份） |
+| `POST` | `/admin/chatgpt/sync-env` | 把网关令牌写进用户级环境变量（修桌面版「Missing environment variable」/ 令牌陈旧） |
 | `POST` | `/admin/chatgpt` | 热切换：把模型提到 `zk-auto` 链首（不重启桌面版） |
 
 **控制台的写操作都是「文件即真相」**：模型/别名/供应商/Key/限额的改动直接回写
@@ -1220,7 +1227,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**495 个用例，全部通过，零网络、零真实配额。**
+**503 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1383,8 +1390,12 @@ docker run --rm -p 8317:8317 \
 patch 新机的 `~/.codex/config.toml`（只动 `model`/`model_provider`/`model_reasoning_effort`
 和 `[model_providers.zkai]` 表，app 自管段落原样保留；旧文件备份为 `.bak-时间戳`；新机器
 没装 app 也会先生成最小配置），并把 `.env` 里的 `ZKAI_API_TOKEN` 写进 **Windows 用户级
-环境变量**（HKCU\Environment + 广播，explorer 启动的桌面版读得到）——装好 app 打开即用，
-不用再手工抄三处配置。
+环境变量**（HKCU\Environment + 广播，写后**回读校验**，旧值备份 + 打印还原命令）——装好
+app 打开即用，不用再手工抄三处配置。用户级环境变量的写入**只以 `.env` 进门控**（不依赖
+chatgpt.yaml）：哪怕你的 `~/.codex` 是从旧机器整个手抄过来的（没有 chatgpt.yaml），也会按
+config.toml 里实际引用的 `env_key` 自动 provision；`.env` 里缺这个值时导入输出会直接给出
+`setx` 修复路径。**换机后桌面版报 `Missing environment variable` = 这步没成**，按导入输出
+的告警处理即可（或控制台「🤖 ChatGPT」面板一键同步）。
 
 等价命令行（可脚本化）：
 

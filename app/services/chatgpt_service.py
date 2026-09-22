@@ -499,6 +499,23 @@ def _broadcast_setting_change() -> None:
         )
 
 
+def read_user_env_var(name: str) -> str | None:
+    """读取用户级（HKCU\\Environment）环境变量的当前值；不存在返回 None。
+
+    桌面版从 explorer 启动，进程环境来自用户级注册表——这个函数回答的正是
+    「桌面版现在能不能看到 env_key 指向的变量」。非 Windows 返回 None。
+    """
+    if os.name != "nt":
+        return None
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ) as key:
+            return str(winreg.QueryValueEx(key, name)[0])
+    except OSError:
+        return None
+
+
 def env_restore_hint(name: str, old: str | None) -> str:
     """还原用户级环境变量的命令（打印给操作者，不自动执行）。"""
     if old is None:
@@ -523,6 +540,7 @@ __all__ = [
     "read_auth_info",
     "read_config_toml",
     "read_disk_state",
+    "read_user_env_var",
     "render_desired",
     "save_desired",
     "validate",

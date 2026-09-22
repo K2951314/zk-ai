@@ -406,6 +406,40 @@ def test_codex_home_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 # Windows user-level environment variable
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only user env")
+def test_read_user_env_var_reflects_the_registry() -> None:
+    """桌面版能不能读到 Key，取决于用户级注册表——读函数就是这件事的答案。"""
+    import winreg
+
+    name = "ZKAI_TEST_CHATGPT_READ"
+    original: str | None = None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ) as key:
+            try:
+                original = str(winreg.QueryValueEx(key, name)[0])
+            except FileNotFoundError:
+                original = None
+
+        assert cg.read_user_env_var(name) is None
+        written, _, _ = cg.write_user_env_var(name, "read-me-123")
+        assert written
+        assert cg.read_user_env_var(name) == "read-me-123"
+    finally:
+        with (
+            contextlib.suppress(FileNotFoundError),
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_WRITE) as key,
+        ):
+            winreg.DeleteValue(key, name)
+        if original is not None:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_WRITE) as key:
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, original)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only user env")
+def test_read_user_env_var_missing_is_none() -> None:
+    assert cg.read_user_env_var("ZKAI_TEST_DEFINITELY_NOT_SET_9F3A") is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only user env")
 def test_write_user_env_var_round_trip_and_restore_hint() -> None:
     import winreg
 
