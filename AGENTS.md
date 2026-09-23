@@ -81,6 +81,14 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `ModelNotFoundError` 文案会带相近名（前缀优先 + difflib 兜底）。
   配置目录可用 `ZKAI_CODEX_HOME` 覆盖（多开用户 / 测试隔离），默认 `~/.codex`。
 
+## Agent 工作方式（2026-09-23，防半途而废）
+- **本机 shell 是 PowerShell，here-string 会把中文和转义写坏**：写含中文的临时脚本时
+  先用 Python 以 ASCII + `chr()` / `\uXXXX` 生成文件再执行，别直接把 here-string
+  粘进命令行；多行一次性命令还可能被策略整段拒绝，表现为「做到一半停了」
+- **回复全程用中文**：文件路径、命令、字段名保留原文，但叙述不用英文；用户把「回复夹英文」
+  列为明确不满，动手写每句话前先确认这一点
+- 临时脚本统一放 `exports/_*.py`，跑完即删；不要把审计脚本留在工作区
+
 ## 当前状态（2026-09-19）
 
 - 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
