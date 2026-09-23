@@ -1133,15 +1133,18 @@ async def test_chatgpt_save_rejects_invalid_config(tmp_path, monkeypatch) -> Non
 
 
 async def test_chatgpt_warns_about_unknown_model(tmp_path, monkeypatch) -> None:
-    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    """2026-09-23 起从「警告放行」升级为「400 拦截」：网关路由不了的模型名
+    写进 config.toml，桌面版每条消息都是 404（换机事故同款）。"""
+    client, harness, _codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         saved = await client.put(
             "/admin/chatgpt/client",
             json={"model": "not-a-real-model", "apply": False},
             headers=ADMIN,
         )
-        assert saved.status_code == 200
-        assert any("not-a-real-model" in w for w in saved.json()["warnings"])
+        assert saved.status_code == 400
+        assert "not-a-real-model" in saved.json()["detail"]["error"]["message"]
+        assert not (cfg_dir / "chatgpt.yaml").exists()
     finally:
         await client.aclose()
         await harness.container.shutdown()
@@ -1178,6 +1181,43 @@ async def test_chatgpt_apply_without_saved_config_is_404(tmp_path, monkeypatch) 
         applied = await client.post("/admin/chatgpt/apply", headers=ADMIN)
         assert applied.status_code == 404
         assert "还没有保存过" in applied.json()["detail"]["error"]["message"]
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_client_rejects_a_model_the_gateway_cannot_route(tmp_path, monkeypatch) -> None:
+    """换机事故复盘：model 写成 'zk' 这种网关没有的名字，桌面版每条消息都 404。
+    PUT 必须在保存前就拦下来，并附上可用清单。"""
+    client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        response = await client.put(
+            "/admin/chatgpt/client",
+            json={"model": "zk", "apply": False},
+            headers=ADMIN,
+        )
+        assert response.status_code == 400
+        message = response.json()["detail"]["error"]["message"]
+        assert "'zk'" in message and "zk-auto" in message
+        assert not (_cfg / "chatgpt.yaml").exists()  # 没有落盘
+    finally:
+        await client.aclose()
+        await harness.container.shutdown()
+
+
+async def test_chatgpt_client_rejects_a_model_the_gateway_cannot_route_official_ok(
+    tmp_path, monkeypatch
+) -> None:
+    """official 模式写的是 OpenAI 官方模型名，网关不认识是应该的——不拦。"""
+    client, harness, codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
+    try:
+        response = await client.put(
+            "/admin/chatgpt/client",
+            json={"mode": "official", "official_model": "gpt-5.6-terra", "apply": True},
+            headers=ADMIN,
+        )
+        assert response.status_code == 200
+        assert 'model = "gpt-5.6-terra"' in (codex / "config.toml").read_text(encoding="utf-8")
     finally:
         await client.aclose()
         await harness.container.shutdown()

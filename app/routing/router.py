@@ -18,6 +18,7 @@ failover are the scheduler's job, which keeps routing unit-testable.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,6 +43,25 @@ logger = get_logger("routing.router")
 
 # Strong refs to in-flight adapter close tasks (see _close_in_background).
 _PENDING_CLOSES: set[asyncio.Task[None]] = set()
+
+
+def _unknown_model_message(
+    requested: str, models: dict[str, ModelConfig] | Any, alias_names: list[str]
+) -> str:
+    """404 文案带上相近的可用名——客户端把 model 写错时能自己改对。
+
+    换机后桌面版报 ``model 'zk' is not configured`` 就是这么发现的：
+    config.toml 里的 model 不是网关有的别名/模型。前缀匹配优先
+    （``zk`` → zk-auto/zk-k3/zk-vision），再退 difflib 模糊匹配。
+    """
+    base = f"model '{requested}' is not configured (no such model or alias)"
+    known = sorted(set(models) | set(alias_names))
+    close = [name for name in known if requested and name.startswith(requested)]
+    if not close:
+        close = difflib.get_close_matches(requested, known, n=5, cutoff=0.6)
+    if close:
+        base += "。网关里有这些相近的：" + "、".join(close[:6])
+    return base
 
 
 @dataclass(slots=True)
@@ -156,7 +176,8 @@ class Router:
                 )
             return model_ids, requested
         raise ModelNotFoundError(
-            f"model '{requested}' is not configured (no such model or alias)", model=requested
+            _unknown_model_message(requested, self.config.models, self.aliases.names()),
+            model=requested,
         )
 
     def requirement_for(

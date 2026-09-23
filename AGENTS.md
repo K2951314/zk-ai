@@ -75,6 +75,10 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   桌面版报 `Missing environment variable: X` = 用户级环境变量缺 X：诊断看
   `GET /admin/chatgpt` 的 `env_key_visible`/`env_key_matches_gateway`（陈旧令牌会 401），
   一键修复 `POST /admin/chatgpt/sync-env`（或导入输出的 setx 命令），然后重启桌面版。
+  **客户端 `model` 写错（如 'zk'）桌面版每条消息 404**：`PUT /admin/chatgpt/client`
+  在 zk-ai 模式下按 `config.known_names()`（全部模型+别名，即路由器准入口径）
+  硬拦截未知模型并附可用清单（09-23 从警告升级为 400）；路由器的
+  `ModelNotFoundError` 文案会带相近名（前缀优先 + difflib 兜底）。
   配置目录可用 `ZKAI_CODEX_HOME` 覆盖（多开用户 / 测试隔离），默认 `~/.codex`。
 
 ## 当前状态（2026-09-19）
@@ -125,7 +129,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-22 起 511 passed）；`git push` 走本机代理
+- 门禁 ruff / mypy / pytest 全绿（2026-09-23 起 514 passed）；`git push` 走本机代理
   （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`

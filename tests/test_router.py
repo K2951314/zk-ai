@@ -131,6 +131,19 @@ def test_unknown_model_raises_model_not_found() -> None:
     assert excinfo.value.http_status == 404
 
 
+def test_unknown_model_message_suggests_close_names() -> None:
+    """换机事故复盘：桌面版发 'zk'（config.toml 的 model 写错了）——404 文案
+    要把相近的可用名列出来，让用户能自己改对，而不是只有一句 not configured。"""
+    router = build_router()
+    with pytest.raises(ModelNotFoundError) as excinfo:
+        router.plan(request_for("zk"))
+    message = str(excinfo.value)
+    assert "zk-all" in message and "zk-code" in message  # 前缀匹配
+    with pytest.raises(ModelNotFoundError) as excinfo:
+        router.plan(request_for("zk-visionn"))  # 拼错一个字母：模糊匹配兜底
+    assert "zk-vision" in str(excinfo.value)
+
+
 def test_alias_with_no_usable_target_raises_alias_not_found() -> None:
     config = make_config(
         providers=[make_provider("fake", key_ids=("k1",))],

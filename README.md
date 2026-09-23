@@ -288,6 +288,10 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
   控制台「保存并写入」先存这份文件、再 patch 本机 config.toml（写前自动
   `config.toml.bak-时间戳`，app 段落字节级保留，无变更不写）。
   **auth.json 永不写入**——桌面版从 `env_key` 指向的环境变量取 Key。
+- **模型必须是网关真有的名字**：`model` 只能是网关配置里的别名（`zk-auto` /
+  `zk-k3` / `zk-vision`）或具体模型名——控制台保存前会校验，不在清单里的值
+  直接 400 并列出可用项（写进去桌面版每条消息都会 404）。万一客户端还是发错
+  了名字，网关的 404 文案会带上相近可用名（前缀 + 模糊匹配），能自己改对。
 - **`ZKAI_CODEX_HOME` 环境变量**可覆盖 `~/.codex` 的位置（多开用户 / 测试隔离用）；
   不设就是标准的 `~/.codex`。
 - **桌面版的 Key 只认用户级环境变量**：`env_key` 指向的变量必须存在于 Windows 用户级
@@ -566,7 +570,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 23 个测试模块，511 个用例，全部 Mock
+├── tests/                # conftest + 23 个测试模块，514 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -1227,7 +1231,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**511 个用例，全部通过，零网络、零真实配额。**
+**514 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

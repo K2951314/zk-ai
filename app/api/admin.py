@@ -1278,10 +1278,21 @@ async def put_chatgpt_client(
     _validate_or_400(desired)
 
     warnings: list[str] = []
-    if desired.mode == "zk-ai" and desired.model and desired.model not in container.config.known_names():
-        warnings.append(
-            f"模型 '{desired.model}' 不在网关已知的模型/别名里——客户端发这个名字会 404"
-        )
+    if desired.mode == "zk-ai" and desired.model:
+        # 换机事故复盘：config.toml 的 model 写成一个网关没有的名字（如 'zk'），
+        # 桌面版每条消息都是 404。这里的名单就是路由器的准入集（全部模型+别名），
+        # 不在里面的值写进去也不可能work——直接拦，附上可选清单。
+        known = container.config.known_names()
+        if desired.model not in known:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "message": f"模型 '{desired.model}' 不在网关配置里——桌面版发这个名字会 404。"
+                        f"可用的别名/模型：{', '.join(known)}"
+                    }
+                },
+            )
     port_note = _base_url_port_note(desired.base_url, container)
     if port_note:
         warnings.append(port_note)
