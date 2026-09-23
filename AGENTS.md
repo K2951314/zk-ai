@@ -129,7 +129,24 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
   坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
   「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-23 起 514 passed）；`git push` 走本机代理
+- 2026-09-23（全站汉化 + 控制台视觉重构）：**界面、接口报错、脚本输出全部中文**。
+  - `app/web/index.html` 重做为「**左侧导航 + 内容区**」：侧栏分组（监控 / 配置）、
+    顶栏只留连接状态 + 令牌 / ChatGPT / 主题 / 刷新；KPI 改大数字卡（`.kpi`），
+    供应商卡 `.prov-card`，「需要处理」面板改 `.attention` 分级列表，弹窗统一
+    `.modal-actions` / `.modal-sub` / `.facts-card`；深浅双主题、窄屏侧栏降级为
+    顶部横滑。**JS 一行未改**，DOM id / `data-*` 钩子 / 函数名全部保留——
+    重构靠 `tests/test_console_zh.py` 守住契约（视图/弹窗/导航/顶栏 id 与
+    `data-view` 逐项断言）+ 无残留英文 UI 文案。
+  - `app/web/agent.html` 视觉对齐（同一套 CSS 变量与组件语言），交互逻辑未动；
+    会话状态码加了 `AGENT_STATUS_ZH` 中文映射（pending/执行中/待批准/…）。
+  - 接口报错 message 全中文（`app/api/*.py`、`app/routing/router.py`），
+    **`error.type` 机器码与 HTTP 状态码一律不变**；`summary=` / `Query(description=)`
+    （`/docs` 里给人看的）也一并汉化。
+  - 脚本输出汉化：`launch_hidden.py` / `open_console.py` / `health_check.py` /
+    `tray_launcher.py`。`.cmd` 仍保持纯 ASCII + CRLF，中文只放 Python 侧。
+  - 测试断言同步更新（`test_launch_helpers.py` 的两处英文提示）；门禁
+    ruff / mypy / **523 passed**。
+- 门禁 ruff / mypy / pytest 全绿（2026-09-23 全站汉化与控制台重构后 **525 passed**，含 `tests/test_console_zh.py` 11 例守卫）；`git push` 走本机代理
   （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
 - 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
   111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`

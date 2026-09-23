@@ -94,7 +94,7 @@ async def require_anthropic_auth(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
                 "type": "error",
-                "error": {"type": "authentication_error", "message": "invalid or missing api key"},
+                "error": {"type": "authentication_error", "message": "API Key 缺失或无效"},
             },
         )
 
@@ -276,7 +276,7 @@ class _StreamAssembler:
         return index, [start]
 
 
-@router.post("/v1/messages", summary="Create an Anthropic Messages response")
+@router.post("/v1/messages", summary="创建一条 Anthropic Messages 响应")
 async def create_message(
     payload: AnthropicMessagesRequest,
     container: ContainerDep,
@@ -298,7 +298,7 @@ async def create_message(
 
 @router.post(
     "/v1/messages/count_tokens",
-    summary="Estimate input tokens for a Messages payload",
+    summary="估算 Messages 请求的输入 token 数",
 )
 async def count_tokens(payload: AnthropicMessagesRequest, container: ContainerDep) -> dict[str, int]:
     """Cheap heuristic count; exact upstream tokenisation is never consulted."""

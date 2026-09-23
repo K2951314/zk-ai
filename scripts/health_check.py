@@ -69,15 +69,15 @@ async def main() -> int:
         print(json.dumps(report, indent=2, default=str))
         return 0
 
-    print(f"health check ({report.get('kind', 'manual')}): "
-          f"{report.get('ok', 0)} ok / {report.get('failed', 0)} failed "
-          f"in {report.get('duration_ms', 0):.0f}ms\n")
+    print(f"健康检查（{report.get('kind', '手动')}）："
+          f"{report.get('ok', 0)} 正常 / {report.get('failed', 0)} 失败，"
+          f"耗时 {report.get('duration_ms', 0):.0f}ms\n")
     for result in report.get("results", []):
-        flag = "OK  " if result["ok"] else "FAIL"
-        detail = result.get("error_type") or f"{len(result.get('models') or [])} models"
+        flag = "正常" if result["ok"] else "失败"
+        detail = result.get("error_type") or f"{len(result.get('models') or [])} 个模型"
         print(
             f"  [{flag}] {result['provider_id']:<14} "
-            f"cred={result.get('credential_id') or '-':<16} "
+            f"Key={result.get('credential_id') or '-':<16} "
             f"{result.get('latency_ms', 0):>8.1f}ms  {detail}"
         )
     return 0 if report.get("failed", 0) == 0 else 1

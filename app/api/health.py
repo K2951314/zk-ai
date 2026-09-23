@@ -9,7 +9,7 @@ from app.api.deps import ContainerDep
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health", summary="Gateway health")
+@router.get("/health", summary="网关健康状态")
 async def health(container: ContainerDep) -> dict:
     """Return overall status, provider/credential availability and DB state."""
     database_ok = await container.database.health()

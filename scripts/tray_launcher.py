@@ -369,7 +369,7 @@ class TrayLauncher:
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else "gateway"
     if mode not in {"gateway", "burner"}:
-        print("usage: tray_launcher.py [gateway|burner] [extra args]", file=sys.stderr)
+        print("用法：tray_launcher.py [gateway|burner] [额外参数]", file=sys.stderr)
         return 2
     return TrayLauncher(mode, argv[1:]).run()
 

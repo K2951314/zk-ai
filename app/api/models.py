@@ -9,13 +9,13 @@ from app.api.deps import ContainerDep
 router = APIRouter(tags=["models"])
 
 
-@router.get("/v1/models", summary="List models and aliases")
+@router.get("/v1/models", summary="列出模型与别名")
 async def list_models(container: ContainerDep) -> dict:
     """Every configured model plus every alias, in OpenAI's list envelope."""
     return container.model_service.list_openai_models()
 
 
-@router.get("/v1/models/{model_id:path}", summary="Retrieve one model")
+@router.get("/v1/models/{model_id:path}", summary="查询单个模型/别名")
 async def retrieve_model(model_id: str, container: ContainerDep) -> dict:
     """Return a single model (or alias) descriptor."""
     if container.config.is_alias(model_id):
@@ -38,7 +38,7 @@ async def retrieve_model(model_id: str, container: ContainerDep) -> dict:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "error": {
-                    "message": f"model '{model_id}' not found",
+                    "message": f"模型 '{model_id}' 不存在",
                     "type": "model_not_found",
                     "code": 404,
                 }

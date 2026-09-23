@@ -54,7 +54,7 @@ def _unknown_model_message(
     config.toml 里的 model 不是网关有的别名/模型。前缀匹配优先
     （``zk`` → zk-auto/zk-k3/zk-vision），再退 difflib 模糊匹配。
     """
-    base = f"model '{requested}' is not configured (no such model or alias)"
+    base = f"模型 '{requested}' 不存在（网关里没有这个模型或别名）"
     known = sorted(set(models) | set(alias_names))
     close = [name for name in known if requested and name.startswith(requested)]
     if not close:
@@ -228,7 +228,7 @@ class Router:
 
         if not candidates:
             raise ModelNotFoundError(
-                f"model '{requested}' has no usable deployment", model=requested
+                f"模型 '{requested}' 下没有任何可用的部署", model=requested
             )
 
         strategy_name = alias.strategy if alias else None

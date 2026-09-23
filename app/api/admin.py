@@ -137,7 +137,7 @@ def _write_limits_file(container: ContainerDep, provider_id: str, rules: list[di
 # --------------------------------------------------------------------------- #
 # Catalogue views
 # --------------------------------------------------------------------------- #
-@router.get("/providers", summary="List providers")
+@router.get("/providers", summary="列出供应商")
 async def list_providers(container: ContainerDep) -> dict[str, Any]:
     """Configured providers, their credentials and live availability."""
     availability = container.pool.provider_availability()
@@ -171,7 +171,7 @@ async def list_providers(container: ContainerDep) -> dict[str, Any]:
     return {"object": "list", "data": providers}
 
 
-@router.get("/providers/{provider_id}/models", summary="List a provider's upstream models")
+@router.get("/providers/{provider_id}/models", summary="列出供应商的上游模型")
 async def provider_models(provider_id: str, container: ContainerDep) -> dict[str, Any]:
     """Probe a provider's native model list and match each id against the curated presets.
 
@@ -184,7 +184,7 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
     if provider is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
     if not provider.enabled:
         return {
@@ -277,7 +277,7 @@ def _suggest_model_id(upstream: str) -> str:
     return upstream.split("/")[-1].strip()
 
 
-@router.get("/models", summary="List models with capabilities")
+@router.get("/models", summary="列出模型（含能力评分）")
 async def list_models(container: ContainerDep) -> dict[str, Any]:
     """Models plus their deployments, capabilities and aliases."""
     models = [
@@ -292,10 +292,10 @@ async def list_models(container: ContainerDep) -> dict[str, Any]:
     }
 
 
-@router.get("/credentials", summary="List credentials (secrets masked)")
+@router.get("/credentials", summary="列出凭据（密钥已脱敏）")
 async def list_credentials(
     container: ContainerDep,
-    provider_id: str | None = Query(default=None, description="Filter by provider"),
+    provider_id: str | None = Query(default=None, description="按供应商筛选"),
 ) -> dict[str, Any]:
     """Credential pool snapshot: status, counters, cooldowns, masked fingerprints.
 
@@ -318,7 +318,7 @@ async def list_credentials(
     }
 
 
-@router.get("/aliases", summary="List model aliases")
+@router.get("/aliases", summary="列出模型别名")
 async def list_aliases(container: ContainerDep) -> dict[str, Any]:
     return {
         "object": "list",
@@ -333,7 +333,7 @@ async def list_aliases(container: ContainerDep) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Health
 # --------------------------------------------------------------------------- #
-@router.get("/health", summary="Detailed health report")
+@router.get("/health", summary="详细健康报告")
 async def health_report(container: ContainerDep) -> dict[str, Any]:
     """Pool state, provider availability and recent probe history."""
     report = container.health_service.status()
@@ -348,12 +348,12 @@ class HealthCheckRequest(BaseModel):
     """Body for a manual health check."""
 
     providers: list[str] | None = Field(
-        default=None, description="Provider ids to probe; omit for all enabled providers"
+        default=None, description="要探测的供应商 ID；留空 = 所有已启用的供应商"
     )
-    credentials: bool = Field(default=True, description="Probe each credential separately")
+    credentials: bool = Field(default=True, description="是否逐把 Key 单独探测")
 
 
-@router.post("/health/check", summary="Run a health check now")
+@router.post("/health/check", summary="立即执行健康检查")
 async def run_health_check(
     container: ContainerDep, payload: HealthCheckRequest | None = Body(default=None)
 ) -> dict[str, Any]:
@@ -370,7 +370,7 @@ class ProviderLimitsRequest(BaseModel):
     rules: list[dict[str, Any]] = Field(default_factory=list)
 
 
-@router.put("/providers/{provider_id}/limits", summary="Set a provider's quota rules")
+@router.put("/providers/{provider_id}/limits", summary="设置供应商的配额规则")
 async def set_provider_limits(
     provider_id: str, payload: ProviderLimitsRequest, container: ContainerDep
 ) -> dict[str, Any]:
@@ -383,7 +383,7 @@ async def set_provider_limits(
     if provider is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
     cleaned: list[dict[str, Any]] = []
     for entry in payload.rules:
@@ -393,9 +393,9 @@ async def set_provider_limits(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "error": {
-                        "message": f"invalid rule: {entry!r} (need window_seconds and "
-                        "at least one of max_requests / max_tokens; scope in "
-                        "credential|account|provider)",
+                        "message": f"限额规则不合法：{entry!r}（需要 window_seconds，以及 "
+                        "max_requests 或 max_tokens 至少一项；scope 取值 "
+                        "credential|account|provider）",
                         "type": "invalid_rate_limit",
                     }
                 },
@@ -437,7 +437,7 @@ def _env_file() -> Path:
     return PROJECT_ROOT / ".env"
 
 
-@router.post("/providers/{provider_id}/credentials", summary="Add a credential to a provider")
+@router.post("/providers/{provider_id}/credentials", summary="给供应商添加凭据")
 async def add_credential(
     provider_id: str, payload: AddCredentialRequest, container: ContainerDep
 ) -> dict[str, Any]:
@@ -453,7 +453,7 @@ async def add_credential(
     if provider is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
     if looks_like_secret(payload.id):
         raise HTTPException(
@@ -473,8 +473,8 @@ async def add_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": {
-                    "message": "either env_var or value must be set (env_var preferred - "
-                    "store the key in .env and reference its name here)",
+                    "message": "必须提供 env_var 或 value（推荐 env_var："
+                    "把 Key 写进 .env，这里只填变量名）",
                     "type": "invalid_credential",
                 }
             },
@@ -484,7 +484,7 @@ async def add_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": {
-                    "message": "write_env needs the key itself in 'value'",
+                    "message": "要把 Key 写进 .env，必须在 value 里填上 Key 本身",
                     "type": "invalid_credential",
                 }
             },
@@ -494,7 +494,7 @@ async def add_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": {
-                    "message": "write_env needs 'env_var' - the name to store the key under in .env",
+                    "message": "要把 Key 写进 .env，必须在 env_var 里填上变量名（Key 在 .env 里的名字）",
                     "type": "invalid_credential",
                 }
             },
@@ -545,7 +545,7 @@ async def add_credential(
     }
 
 
-@router.delete("/providers/{provider_id}/credentials/{credential_id}", summary="Remove a credential")
+@router.delete("/providers/{provider_id}/credentials/{credential_id}", summary="删除凭据")
 async def delete_credential(
     provider_id: str, credential_id: str, container: ContainerDep
 ) -> dict[str, Any]:
@@ -554,12 +554,12 @@ async def delete_credential(
     if provider is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
     if not any(c.id == credential_id for c in provider.credentials):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"credential '{credential_id}' not found"}},
+            detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
     synced = None
     path = _source_file(container, "providers")
@@ -571,14 +571,14 @@ async def delete_credential(
     return {"deleted": credential_id, "provider_id": provider_id, "synced": synced}
 
 
-@router.delete("/providers/{provider_id}/limits", summary="Reset quota rules to YAML")
+@router.delete("/providers/{provider_id}/limits", summary="恢复 YAML 里的配额规则")
 async def reset_provider_limits(provider_id: str, container: ContainerDep) -> dict[str, Any]:
     """Drop the console override and re-read the provider's YAML-defined rules."""
     provider = container.config.providers.get(provider_id)
     if provider is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
     yaml_config = load_app_config(container.settings)
     yaml_provider = yaml_config.providers.get(provider_id)
@@ -605,7 +605,7 @@ class ProviderUpsertRequest(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
-@router.post("/providers", summary="Create or replace a provider")
+@router.post("/providers", summary="新建或替换供应商")
 async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDep) -> dict[str, Any]:
     """Add or edit a provider (endpoint + protocol type); persists across restarts.
 
@@ -624,7 +624,12 @@ async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDe
     if provider.type is ProviderType.OLLAMA and not provider.base_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": {"message": "ollama providers need a base_url", "type": "invalid_provider"}},
+            detail={
+                "error": {
+                    "message": "Ollama 本地服务必须填写接入地址 base_url",
+                    "type": "invalid_provider",
+                }
+            },
         )
     existing = container.config.providers.get(provider.id)
     if existing is not None:
@@ -656,13 +661,13 @@ async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDe
     }
 
 
-@router.delete("/providers/{provider_id}", summary="Delete a provider")
+@router.delete("/providers/{provider_id}", summary="删除供应商")
 async def delete_provider(provider_id: str, container: ContainerDep) -> dict[str, Any]:
     """Remove a provider and its credentials; refuses while models still deploy on it."""
     if provider_id not in container.config.providers:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"provider '{provider_id}' not found"}},
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
     referenced = [
         model.id
@@ -675,8 +680,8 @@ async def delete_provider(provider_id: str, container: ContainerDep) -> dict[str
             detail={
                 "error": {
                     "message": (
-                        f"provider '{provider_id}' still serves models: "
-                        f"{', '.join(sorted(referenced))} - delete or move those deployments first"
+                        f"供应商 '{provider_id}' 上还有模型部署："
+                        f"{"'、'".join(sorted(referenced))}——先删掉或改走这些部署，再删供应商"
                     ),
                     "type": "provider_in_use",
                 }
@@ -698,13 +703,13 @@ async def delete_provider(provider_id: str, container: ContainerDep) -> dict[str
 # --------------------------------------------------------------------------- #
 # Credential administration
 # --------------------------------------------------------------------------- #
-@router.post("/credentials/{credential_id}/enable", summary="Enable a credential")
+@router.post("/credentials/{credential_id}/enable", summary="启用凭据")
 async def enable_credential(credential_id: str, container: ContainerDep) -> dict[str, Any]:
     transition = container.pool.enable(credential_id)
     if transition is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"credential '{credential_id}' not found"}},
+            detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
     await container.config_repository.set_credential_enabled(credential_id, True)
     return {
@@ -715,17 +720,17 @@ async def enable_credential(credential_id: str, container: ContainerDep) -> dict
     }
 
 
-@router.post("/credentials/{credential_id}/disable", summary="Disable a credential")
+@router.post("/credentials/{credential_id}/disable", summary="禁用凭据")
 async def disable_credential(
     credential_id: str,
     container: ContainerDep,
-    reason: str = Query(default="disabled by operator"),
+    reason: str = Query(default="操作员手动禁用"),
 ) -> dict[str, Any]:
     transition = container.pool.disable(credential_id, reason)
     if transition is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"credential '{credential_id}' not found"}},
+            detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
     await container.config_repository.set_credential_enabled(credential_id, False, reason)
     return {
@@ -736,7 +741,7 @@ async def disable_credential(
     }
 
 
-@router.post("/credentials/cooldowns/clear", summary="Clear cooldowns")
+@router.post("/credentials/cooldowns/clear", summary="清空全部冷却")
 async def clear_cooldowns(
     container: ContainerDep, provider_id: str | None = Query(default=None)
 ) -> dict[str, Any]:
@@ -761,7 +766,7 @@ class ModelUpsertRequest(BaseModel):
     deployments: list[DeploymentConfig] = Field(default_factory=list)
 
 
-@router.post("/models", summary="Create or replace a model")
+@router.post("/models", summary="新建或替换模型")
 async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> dict[str, Any]:
     """Hot-add/edit a model; takes effect immediately and survives restarts."""
     try:
@@ -782,7 +787,7 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": {
-                    "message": f"unknown providers: {', '.join(sorted(set(unknown_providers)))}",
+                    "message": f"未知的供应商：{'、'.join(sorted(set(unknown_providers)))}",
                     "type": "invalid_model",
                     "known_providers": sorted(container.config.providers),
                 }
@@ -792,7 +797,7 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
     if len(deployment_ids) != len(set(deployment_ids)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": {"message": "duplicate deployment ids", "type": "invalid_model"}},
+            detail={"error": {"message": "部署 ID 重复", "type": "invalid_model"}},
         )
 
     # File first: if the YAML cannot be written we abort with no partial state,
@@ -807,12 +812,12 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
     }
 
 
-@router.delete("/models/{model_id}", summary="Delete a model")
+@router.delete("/models/{model_id}", summary="删除模型")
 async def delete_model(model_id: str, container: ContainerDep) -> dict[str, Any]:
     if model_id not in container.config.models:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"model '{model_id}' not found"}},
+            detail={"error": {"message": f"模型 '{model_id}' 不存在"}},
         )
     referenced_by = [
         name
@@ -825,8 +830,8 @@ async def delete_model(model_id: str, container: ContainerDep) -> dict[str, Any]
             detail={
                 "error": {
                     "message": (
-                        f"model '{model_id}' is still referenced by aliases: "
-                        f"{', '.join(sorted(referenced_by))} - edit those first"
+                        f"模型 '{model_id}' 还被这些别名引用："
+                        f"{"'、'".join(sorted(referenced_by))}——先改这些别名，再删模型"
                     ),
                     "type": "model_in_use",
                 }
@@ -841,13 +846,13 @@ async def delete_model(model_id: str, container: ContainerDep) -> dict[str, Any]
 # --------------------------------------------------------------------------- #
 # Routing
 # --------------------------------------------------------------------------- #
-@router.get("/router/preview", summary="Explain a routing decision")
+@router.get("/router/preview", summary="解释一次路由决策（不真正调用）")
 async def router_preview(
     container: ContainerDep,
-    model: str = Query(description="Model id or alias, e.g. zk-coding"),
-    prompt: str = Query(default="", description="Prompt used for capability inference"),
-    tools: int = Query(default=0, description="Number of tools the request declares"),
-    json_mode: bool = Query(default=False, description="Simulate response_format=json_object"),
+    model: str = Query(description="模型 ID 或别名，如 zk-coding"),
+    prompt: str = Query(default="", description="用于能力推断的提示词"),
+    tools: int = Query(default=0, description="请求声明的工具数量"),
+    json_mode: bool = Query(default=False, description="模拟 response_format=json_object"),
     max_tokens: int | None = Query(default=None),
 ) -> dict[str, Any]:
     """Show how the router would order candidates for a request."""
@@ -893,7 +898,7 @@ class AliasUpsertRequest(BaseModel):
     requires: dict[str, float] = Field(default_factory=dict)
 
 
-@router.post("/aliases", summary="Create or replace an alias")
+@router.post("/aliases", summary="新建或替换别名")
 async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> dict[str, Any]:
     """Hot-swap an alias - clients keep sending the same model name."""
     try:
@@ -915,7 +920,7 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": {
-                    "message": f"unknown targets: {', '.join(unknown)}",
+                    "message": f"未知的目标模型/别名：{'、'.join(unknown)}",
                     "type": "invalid_alias",
                     "known_models": container.config.public_model_ids(),
                 }
@@ -941,13 +946,13 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
     }
 
 
-@router.delete("/aliases/{name}", summary="Delete an alias")
+@router.delete("/aliases/{name}", summary="删除别名")
 async def delete_alias(name: str, container: ContainerDep) -> dict[str, Any]:
     removed = container.router.aliases.remove(name)
     if not removed:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"alias '{name}' not found"}},
+            detail={"error": {"message": f"别名 '{name}' 不存在"}},
         )
     synced = _delete_file_entry(container, "aliases", "name", name)
     container.config.aliases.pop(name, None)
@@ -955,7 +960,7 @@ async def delete_alias(name: str, container: ContainerDep) -> dict[str, Any]:
     return {"deleted": name, "synced": synced}
 
 
-@router.post("/config/reload", summary="Reload YAML configuration")
+@router.post("/config/reload", summary="重载 YAML 配置")
 async def reload_config(container: ContainerDep) -> dict[str, Any]:
     """Re-read the YAML files and rebuild aliases + adapters (no restart needed)."""
     try:
@@ -998,11 +1003,11 @@ async def reload_config(container: ContainerDep) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Statistics
 # --------------------------------------------------------------------------- #
-@router.get("/stats", summary="Traffic, token and error statistics")
+@router.get("/stats", summary="流量、Token 与错误统计")
 async def stats(
     container: ContainerDep,
-    days: int = Query(default=7, ge=1, le=90, description="Aggregation window in days"),
-    recent: int = Query(default=20, ge=0, le=200, description="Recent requests to include"),
+    days: int = Query(default=7, ge=1, le=90, description="统计窗口（天）"),
+    recent: int = Query(default=20, ge=0, le=200, description="附带返回最近多少条请求"),
 ) -> dict[str, Any]:
     """Token usage, cost estimate, error rates and recent request history."""
     usage = await container.usage_service.summary(days=days)
@@ -1017,16 +1022,16 @@ async def stats(
     }
 
 
-@router.get("/requests", summary="List requests with filters and paging")
+@router.get("/requests", summary="按条件筛选请求记录并分页")
 async def list_requests(
     container: ContainerDep,
     status: str | None = Query(default=None, description="success | error | cancelled | pending"),
-    alias: str | None = Query(default=None, description="Exact alias name"),
-    provider: str | None = Query(default=None, description="Exact provider id"),
-    credential: str | None = Query(default=None, description="Exact credential id"),
-    model: str | None = Query(default=None, description="Substring of requested/resolved model"),
-    error_type: str | None = Query(default=None, description="Exact error type"),
-    q: str | None = Query(default=None, description="Free text over id/model/credential/error"),
+    alias: str | None = Query(default=None, description="精确的别名"),
+    provider: str | None = Query(default=None, description="精确的供应商 ID"),
+    credential: str | None = Query(default=None, description="精确的凭据 ID"),
+    model: str | None = Query(default=None, description="请求/实际模型名的子串"),
+    error_type: str | None = Query(default=None, description="精确的错误类型"),
+    q: str | None = Query(default=None, description="关键字：覆盖 ID / 模型 / 凭据 / 错误"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -1045,19 +1050,19 @@ async def list_requests(
     return {"object": "list", "total": total, "limit": limit, "offset": offset, "data": rows}
 
 
-@router.get("/requests/{request_id}", summary="Request detail with attempts")
+@router.get("/requests/{request_id}", summary="请求详情（含每次尝试）")
 async def request_detail(request_id: str, container: ContainerDep) -> dict[str, Any]:
     attempts = await container.request_repository.attempts_for(request_id)
     row = await container.request_repository.get_request(request_id)
     if row is None and not attempts:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": {"message": f"request '{request_id}' not found"}},
+            detail={"error": {"message": f"请求记录 '{request_id}' 不存在"}},
         )
     return {"request_id": request_id, "request": row, "attempts": attempts}
 
 
-@router.post("/usage/backfill-cost", summary="Backfill equivalent cost on zero-cost rows")
+@router.post("/usage/backfill-cost", summary="为没有成本的历史记录补算等价成本")
 async def backfill_cost(container: ContainerDep) -> dict[str, Any]:
     """Reprice usage rows recorded before list prices existed (console button)."""
     return await container.usage_service.backfill_zero_cost()
@@ -1137,7 +1142,7 @@ def _chatgpt_choices(container: ContainerDep) -> list[str]:
     return aliases + models
 
 
-@router.get("/chatgpt", summary="ChatGPT/Codex desktop: model + client config state")
+@router.get("/chatgpt", summary="ChatGPT / Codex 桌面版：模型与客户端配置状态")
 async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
     """Everything the console panel needs: alias state, desired config,
     on-disk state (auth.json is read-only info), and key-level drift."""
@@ -1189,7 +1194,7 @@ async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
     }
 
 
-@router.post("/chatgpt", summary="ChatGPT/Codex desktop: switch model (hot)")
+@router.post("/chatgpt", summary="ChatGPT / Codex 桌面版：热切换模型")
 async def set_chatgpt_model(
     container: ContainerDep, payload: dict[str, str] = Body(...)
 ) -> dict[str, Any]:
@@ -1199,20 +1204,20 @@ async def set_chatgpt_model(
     model = payload.get("model", "").strip()
     if not model:
         raise HTTPException(
-            status_code=400, detail={"error": {"message": "model is required"}}
+            status_code=400, detail={"error": {"message": "必须填写模型名"}}
         )
     known = _chatgpt_choices(container)
     if model not in known:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": f"unknown model or alias: {model}"}},
+            detail={"error": {"message": f"未知的模型或别名：{model}"}},
         )
 
     existing = container.config.aliases.get(CHATGPT_ALIAS)
     if existing is None:
         raise HTTPException(
             status_code=404,
-            detail={"error": {"message": f"alias '{CHATGPT_ALIAS}' not found"}},
+            detail={"error": {"message": f"别名 '{CHATGPT_ALIAS}' 不存在"}},
         )
 
     # Build the new target chain: chosen model first, then the rest unchanged.
@@ -1256,7 +1261,7 @@ async def set_chatgpt_model(
     }
 
 
-@router.put("/chatgpt/client", summary="Save the desired ChatGPT client config (optionally apply)")
+@router.put("/chatgpt/client", summary="保存期望的客户端配置（可选同时写入本机）")
 async def put_chatgpt_client(
     container: ContainerDep, payload: ChatGptClientPayload
 ) -> dict[str, Any]:
@@ -1315,7 +1320,7 @@ async def put_chatgpt_client(
     return result
 
 
-@router.post("/chatgpt/apply", summary="(Re)write ~/.codex/config.toml from the saved config")
+@router.post("/chatgpt/apply", summary="按已保存的期望配置重写 ~/.codex/config.toml")
 async def apply_chatgpt_client(container: ContainerDep) -> dict[str, Any]:
     """Re-materialise the client config from ``config/chatgpt.yaml`` - e.g. the
     desktop app regenerated its file, or this is a fresh machine."""
@@ -1333,7 +1338,7 @@ async def apply_chatgpt_client(container: ContainerDep) -> dict[str, Any]:
     return {"ok": True, **_apply_desired(chatgpt_service.config_toml_path(), desired)}
 
 
-@router.post("/chatgpt/sync-env", summary="Sync the gateway token into the user-level env var")
+@router.post("/chatgpt/sync-env", summary="把网关令牌同步进用户级环境变量")
 async def sync_chatgpt_env(container: ContainerDep) -> dict[str, Any]:
     """One-click recovery from "Missing environment variable" / stale token.
 

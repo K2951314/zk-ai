@@ -5,162 +5,517 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZK-AI 控制台</title>
 <style>
+  /* ==========================================================================
+     ZK-AI 控制台 · 浅色设计系统
+     配色：中性灰底 + 白卡片 + 单一蓝色主色 + 语义色（绿/琥珀/红/灰）
+     版式：中文优先，13 / 14 / 16 三档字号，4 / 8 / 12 / 16 间距栅格
+     ========================================================================== */
   :root {
-    /* 浅色主题：对齐 菱华/提取器、自动录订单 的 qfluent 观感 */
-    --bg: #f4f5f7; --panel: #ffffff; --panel2: #f1f3f4; --border: #e4e7ec;
-    --text: #1e293b; --muted: #64748b; --accent: #1a73e8;
-    --green: #1e8e3e; --amber: #b45309; --red: #d93025; --gray: #94a3b8;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f1f3f5;
+    --panel-3: #e9edf2;
+    --border: #e3e8ee;
+    --border-strong: #d3dae3;
+    --text: #1a2230;
+    --text-2: #4a5666;
+    --muted: #7a8798;
+    --accent: #2563eb;
+    --accent-hover: #1d4fd7;
+    --accent-soft: #eff4ff;
+    --ok: #15803d;
+    --ok-soft: #ecfdf3;
+    --ok-border: #bbf7d0;
+    --warn: #b45309;
+    --warn-soft: #fffbeb;
+    --warn-border: #fde68a;
+    --err: #b91c1c;
+    --err-soft: #fef2f2;
+    --err-border: #fecaca;
+    --neutral: #64748b;
+    --neutral-soft: #f1f5f9;
+    --neutral-border: #e2e8f0;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
+    --shadow-md: 0 4px 16px rgba(16, 24, 40, .10);
+    --shadow-lg: 0 12px 32px rgba(16, 24, 40, .16);
   }
   :root[data-theme="dark"] {
-    /* 暗色：之前的 GitHub Dark 观感，主题切换按钮一键切回 */
-    --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --border: #2d333b;
-    --text: #e6edf3; --muted: #8b949e; --accent: #4da3ff;
-    --green: #3fb950; --amber: #d29922; --red: #f85149; --gray: #6e7681;
+    --bg: #0e1218;
+    --panel: #161b24;
+    --panel-2: #1d232e;
+    --panel-3: #232b38;
+    --border: #2a323f;
+    --border-strong: #3a4453;
+    --text: #e7edf4;
+    --text-2: #b8c3d1;
+    --muted: #8794a6;
+    --accent: #5b9cff;
+    --accent-hover: #7cb0ff;
+    --accent-soft: rgba(91, 156, 255, .12);
+    --ok: #4ade80;
+    --ok-soft: rgba(74, 222, 128, .10);
+    --ok-border: rgba(74, 222, 128, .35);
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, .10);
+    --warn-border: rgba(251, 191, 36, .35);
+    --err: #f87171;
+    --err-soft: rgba(248, 113, 113, .10);
+    --err-border: rgba(248, 113, 113, .35);
+    --neutral: #94a3b8;
+    --neutral-soft: rgba(148, 163, 184, .12);
+    --neutral-border: #3a4453;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .30);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, .40);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, .50);
   }
-  :root[data-theme="dark"] .pill.green { color: #3fb950; border-color: #3fb950; background: rgba(63,185,80,.08); }
-  :root[data-theme="dark"] .pill.red { color: #f85149; border-color: #f85149; background: rgba(248,81,73,.08); }
-  :root[data-theme="dark"] .pill.amber { color: #d29922; border-color: #d29922; background: rgba(210,153,34,.08); }
-  :root[data-theme="dark"] .pill.gray { color: #8b949e; border-color: #6e7681; background: rgba(110,118,129,.08); }
-  :root[data-theme="dark"] .pill.blue { color: #4da3ff; border-color: #4da3ff; background: rgba(77,163,255,.08); }
-  :root[data-theme="dark"] button { color: var(--text); }
-  :root[data-theme="dark"] .card, :root[data-theme="dark"] .tablewrap,
-  :root[data-theme="dark"] .filters { box-shadow: none; }
-  :root[data-theme="dark"] .toast { box-shadow: 0 6px 20px rgba(0,0,0,.4); }
-  :root[data-theme="dark"] #auth { background: rgba(13,17,23,.92); backdrop-filter: none; }
+  :root[data-theme="dark"] .card,
+  :root[data-theme="dark"] .tablewrap,
+  :root[data-theme="dark"] .filters,
+  :root[data-theme="dark"] .kpi,
+  :root[data-theme="dark"] .sidebar { box-shadow: none; }
+  :root[data-theme="dark"] .modal-mask,
+  :root[data-theme="dark"] #auth { background: rgba(6, 9, 14, .78); backdrop-filter: blur(2px); }
+  :root[data-theme="dark"] .toast { box-shadow: var(--shadow-md); }
+  :root[data-theme="dark"] .nav-item.active { background: var(--accent-soft); }
+
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-         font: 13px/1.5 "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif; }
-  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-           padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
-           position: sticky; top: 0; z-index: 10; }
-  .brand { font-size: 18px; font-weight: 700; letter-spacing: .2px; color: #0f172a; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .dot.off { background: var(--red); }
-  .grow { flex: 1; }
-  input[type=text], input[type=number], select, textarea {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 9px; font: inherit; }
-  input[type=text]:focus, select:focus { outline: 1px solid var(--accent); }
-  button { background: var(--panel2); color: #45505f; border: 1px solid var(--border);
-           border-radius: 6px; padding: 6px 12px; font: inherit; font-weight: 600; cursor: pointer;
-           transition: background .15s, border-color .15s, color .15s; }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
-  button.primary:hover { background: #1557b0; border-color: #1557b0; color: #fff; }
-  button.mini { padding: 2px 8px; font-size: 12px; }
-  nav { display: flex; gap: 2px; padding: 12px 20px 0; max-width: 1360px; margin: 0 auto; }
-  nav button { border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; border: none;
-               padding: 8px 16px; background: transparent; color: var(--muted); font-weight: 600; }
-  nav button:hover { color: var(--accent); border-color: transparent; }
-  nav button.active { color: var(--accent); border-bottom-color: var(--accent); background: transparent; }
-  main { padding: 16px 20px 60px; max-width: 1360px; margin: 0 auto; }
-  section.view { display: none; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+          "Segoe UI", system-ui, sans-serif;
+  }
+  h1, h2, h3, h4 { margin: 0; font-weight: 600; }
+  button { font: inherit; cursor: pointer; }
+  code, pre, .mono { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
+
+  /* ---------- 应用骨架：左侧导航 + 内容区 ---------- */
+  .app { display: flex; min-height: 100vh; align-items: stretch; }
+  .sidebar {
+    width: 208px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    box-shadow: var(--shadow-sm);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 9px;
+    padding: 16px 16px 14px; border-bottom: 1px solid var(--border);
+  }
+  .brand .mark {
+    width: 28px; height: 28px; border-radius: 7px; flex: none;
+    background: linear-gradient(135deg, var(--accent), #4f8cff);
+    display: grid; place-items: center; color: #fff; font-size: 15px;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, .32);
+  }
+  .brand .name { font-size: 15px; font-weight: 700; letter-spacing: .2px; color: var(--text); }
+  .brand .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .nav { padding: 10px 10px 6px; display: flex; flex-direction: column; gap: 2px; }
+  .nav-label {
+    font-size: 11px; color: var(--muted); font-weight: 600;
+    letter-spacing: .4px; padding: 10px 8px 4px;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 10px; border: none; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-2);
+    font-size: 13px; font-weight: 500; text-align: left; width: 100%;
+    transition: background .14s, color .14s;
+  }
+  .nav-item:hover { background: var(--panel-2); color: var(--text); }
+  .nav-item.active {
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  }
+  .nav-item .ico { width: 16px; text-align: center; flex: none; opacity: .9; }
+  .nav-item .badge {
+    margin-left: auto; font-size: 11px; font-weight: 600;
+    background: var(--err); color: #fff; border-radius: 999px;
+    min-width: 17px; height: 17px; padding: 0 5px;
+    display: none; place-items: center;
+  }
+  .nav-item .badge.show { display: grid; }
+  .sidebar-foot {
+    margin-top: auto; padding: 12px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--muted); line-height: 1.7;
+  }
+  .sidebar-foot .ver { color: var(--text-2); font-weight: 600; }
+
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  /* ---------- 顶栏 ---------- */
+  .topbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 30;
+  }
+  .conn {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-2);
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 11px 3px 9px; max-width: 100%;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+  .dot.off { background: var(--err); box-shadow: 0 0 0 3px var(--err-soft); }
+  .conn .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .grow { flex: 1; }
+
+  .field-label { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
+
+  /* ---------- 表单控件 ---------- */
+  input[type=text], input[type=number], input[type=password], select, textarea {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 5px 9px; font: inherit; transition: border-color .14s, box-shadow .14s;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  input::placeholder, textarea::placeholder { color: var(--muted); }
+
+  /* ---------- 按钮 ---------- */
+  button, .btn {
+    background: var(--panel); color: var(--text-2);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 6px 12px; font-weight: 500; font-size: 13px;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+    transition: background .14s, border-color .14s, color .14s;
+  }
+  button:hover:not(:disabled), .btn:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  button.danger { color: var(--err); border-color: var(--err-border); }
+  button.danger:hover:not(:disabled) { background: var(--err-soft); color: var(--err); border-color: var(--err); }
+  button.mini { padding: 2px 9px; font-size: 12px; border-radius: 5px; }
+  button.ghost { border-color: transparent; background: transparent; }
+  button.ghost:hover:not(:disabled) { background: var(--panel-2); }
+
+  /* ---------- 视图容器 ---------- */
+  main { flex: 1; padding: 16px 18px 56px; width: 100%; }
+  section.view { display: none; max-width: 1480px; margin: 0 auto; }
   section.view.active { display: block; }
+
+  /* ---------- 页头 / 工具条 ---------- */
+  .view-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .view-head h2 { font-size: 16px; }
+  .view-head .desc { font-size: 12px; color: var(--muted); }
+  .toolbar { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .filters {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  /* ---------- 卡片 / KPI ---------- */
   .grid { display: grid; gap: 12px; }
-  .kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-  .cards { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-          padding: 14px; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
-  .card h3 { margin: 0 0 8px; font-size: 11px; color: var(--muted); font-weight: 600;
-             text-transform: uppercase; letter-spacing: .3px; }
-  .kpi-value { font-size: 24px; font-weight: 650; }
-  .kpi-sub { color: var(--muted); font-size: 12px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); margin-bottom: 16px; }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm);
+  }
+  .kpi .k-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .kpi .k-value { font-size: 24px; font-weight: 650; line-height: 1.25; letter-spacing: -.2px; }
+  .kpi .k-sub { font-size: 12px; color: var(--muted); margin-top: 5px; }
+  .kpi.is-ok .k-value { color: var(--ok); }
+  .kpi.is-warn .k-value { color: var(--warn); }
+  .kpi.is-err .k-value { color: var(--err); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm);
+  }
+  .card > h3 { font-size: 13px; margin-bottom: 8px; }
+  .cards { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); margin-bottom: 16px; }
+  .prov-card .p-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .prov-card .p-name { font-weight: 650; font-size: 13px; }
+  .prov-card .p-url {
+    font-size: 11px; color: var(--muted); word-break: break-all;
+    margin-bottom: 8px; line-height: 1.5;
+  }
+  .prov-card .p-models { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+
+  h4.sec {
+    margin: 20px 0 9px; font-size: 13px; color: var(--text-2); font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  h4.sec::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  /* ---------- 徽章 / 标签 ---------- */
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .pill.green { color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft); }
+  .pill.red { color: var(--err); border-color: var(--err-border); background: var(--err-soft); }
+  .pill.amber { color: var(--warn); border-color: var(--warn-border); background: var(--warn-soft); }
+  .pill.gray { color: var(--neutral); border-color: var(--neutral-border); background: var(--neutral-soft); }
+  .pill.blue { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .chip {
+    display: inline-block; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0 7px; font-size: 11px; color: var(--text-2); margin: 1px 3px 1px 0;
+  }
+
+  /* ---------- 表格 ---------- */
+  .tablewrap {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: auto; max-height: 68vh;
+    box-shadow: var(--shadow-sm);
+  }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border);
-           white-space: nowrap; }
-  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
-  tbody tr:hover { background: var(--panel2); }
+  thead th {
+    text-align: left; padding: 9px 12px; color: var(--muted);
+    font-weight: 600; font-size: 12px; white-space: nowrap;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--panel); position: sticky; top: 0; z-index: 1;
+  }
+  tbody td {
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    white-space: nowrap; vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--panel-2); }
   tbody.clickable { cursor: pointer; }
-  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-               overflow: auto; max-height: 66vh; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
-  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 6px;
-          font-size: 12px; font-weight: 600; border: 1px solid transparent; }
-  .pill.green { color: #15803d; border-color: #bbf7d0; background: #f0fdf4; }
-  .pill.red { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
-  .pill.amber { color: #b45309; border-color: #fde68a; background: #fffbeb; }
-  .pill.gray { color: #64748b; border-color: #e2e8f0; background: #f1f5f9; }
-  .pill.blue { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
-  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
-          border-radius: 5px; padding: 0 6px; font-size: 12px; color: var(--muted); margin: 1px 2px 1px 0; }
-  .muted { color: var(--muted); } .small { font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .ell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
-  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-  .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-             background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-             padding: 10px 12px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
-  .bar { height: 7px; background: var(--panel2); border-radius: 4px; overflow: hidden; min-width: 60px; }
-  .bar i { display: block; height: 100%; background: var(--accent); }
-  #drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(680px, 92vw);
-            background: var(--panel); border-left: 1px solid var(--border);
-            transform: translateX(105%); transition: transform .18s ease;
-            z-index: 40; overflow: auto; padding: 18px; }
+  /* 主键列（模型 / 别名 / 凭据名）允许换行，别为它撑出横向滚动 */
+  td.name { white-space: normal; word-break: break-all; min-width: 168px; }
+  td.name .sub { display: block; font-size: 11.5px; color: var(--muted);
+                 margin-top: 3px; line-height: 1.6; }
+  /* 操作列固定在最左侧：宽表右滑时按钮永远在手边，不用先滚到底 */
+  th.acts, td.acts {
+    position: sticky; left: 0; z-index: 2;
+    background: var(--panel); border-right: 1px solid var(--border);
+    text-align: right; white-space: nowrap;
+  }
+  thead th.acts { z-index: 3; }
+  tbody tr:hover td.acts { background: var(--panel-2); }
+  td.acts .row-flex { justify-content: flex-end; gap: 4px; }
+  td.acts .cell-id { display: inline-flex; align-items: center; gap: 5px; }
+  td.acts .cell-id b { font-weight: 600; }
+  td.cell-sub { color: var(--muted); font-size: 11.5px; max-width: 150px;
+                overflow: hidden; text-overflow: ellipsis; }
+  td.acts button { margin: 0; }
+  /* 次要操作列（删除）钉在最右侧，和左側编辑形成一组 */
+  th.acts-end, td.acts-end {
+    position: sticky; right: 0; z-index: 2;
+    background: var(--panel); border-left: 1px solid var(--border);
+    text-align: center;
+  }
+  td.acts-end:empty { padding: 0; border-left: none; width: 0; }
+  thead th.acts-end { z-index: 3; }
+  tbody tr:hover td.acts-end { background: var(--panel-2); }
+
+  /* ---------- 需要处理 ---------- */
+  .attention {
+    border: 1px solid var(--warn-border); border-left: 3px solid var(--warn);
+    background: var(--warn-soft); border-radius: var(--radius);
+    padding: 12px 14px; margin-bottom: 16px;
+  }
+  .attention.is-err { border-color: var(--err-border); border-left-color: var(--err); background: var(--err-soft); }
+  .attention h3 {
+    font-size: 13px; margin-bottom: 9px; display: flex; align-items: center; gap: 7px;
+  }
+  .attention .att-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 7px 0; border-top: 1px solid var(--border);
+    font-size: 12.5px;
+  }
+  .attention .att-row:first-of-type { border-top: none; }
+  .attention .att-msg { flex: 1; min-width: 220px; }
+  .attention .att-ico { flex: none; }
+  .attention .empty { font-size: 12.5px; color: var(--text-2); }
+
+  /* ---------- 抽屉 ---------- */
+  #drawer {
+    position: fixed; top: 0; right: 0; height: 100vh; width: min(700px, 94vw);
+    background: var(--panel); border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(105%); transition: transform .2s ease;
+    z-index: 40; overflow: auto; padding: 18px 20px 40px;
+  }
   #drawer.open { transform: none; }
-  #drawer h2 { margin: 0 0 10px; font-size: 16px; }
-  dl.detail { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; font-size: 13px; margin: 0 0 14px; }
-  dl.detail dt { color: var(--muted); } dl.detail dd { margin: 0; word-break: break-all; white-space: normal; }
-  #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
-  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
-           border-radius: 8px; padding: 10px 14px; max-width: 420px; font-size: 13px;
-           box-shadow: 0 6px 20px rgba(16,24,40,.15); }
-  .toast.err { border-left-color: var(--red); } .toast.ok { border-left-color: var(--green); }
-  #auth { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: none;
-          align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(2px); }
-  #auth.show { display: flex; }
-  #auth .card { width: 420px; }
-  #auth input { width: 100%; margin: 10px 0; }
-  .row-flex { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  h4.sec { margin: 22px 0 8px; font-size: 14px; color: var(--muted); }
-  details.raw { font-size: 12px; color: var(--muted); }
-  details.raw pre { white-space: pre-wrap; word-break: break-all; }
-  .modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: none;
-                align-items: flex-start; justify-content: center; z-index: 55;
-                backdrop-filter: blur(2px); overflow: auto; padding: 40px 12px; }
+  #drawer .dr-head {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+    position: sticky; top: -18px; background: var(--panel);
+    padding: 12px 0 10px; margin-top: -18px; z-index: 2;
+    border-bottom: 1px solid var(--border);
+  }
+  #drawer .dr-head h2 { font-size: 15px; flex: 1; }
+  dl.detail {
+    display: grid; grid-template-columns: 118px 1fr; gap: 6px 12px;
+    font-size: 13px; margin: 0 0 16px;
+  }
+  dl.detail dt { color: var(--muted); }
+  dl.detail dd { margin: 0; word-break: break-all; white-space: normal; }
+  .bar { height: 7px; background: var(--panel-3); border-radius: 4px; overflow: hidden; min-width: 60px; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+
+  /* ---------- Toast ---------- */
+  #toasts {
+    position: fixed; right: 18px; bottom: 18px; display: flex;
+    flex-direction: column; gap: 8px; z-index: 60; max-width: calc(100vw - 36px);
+  }
+  .toast {
+    background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: var(--radius);
+    padding: 10px 14px; max-width: 420px; font-size: 13px;
+    box-shadow: var(--shadow-md); animation: toast-in .18s ease;
+  }
+  .toast.err { border-left-color: var(--err); }
+  .toast.ok { border-left-color: var(--ok); }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ---------- 弹窗 ---------- */
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(15, 23, 42, .42);
+    display: none; align-items: flex-start; justify-content: center;
+    z-index: 55; backdrop-filter: blur(2px); overflow: auto; padding: 40px 14px;
+  }
   .modal-mask.show { display: flex; }
-  .modal-mask .card { width: min(760px, 94vw); }
-  .modal-mask h3 { margin: 0 0 12px; font-size: 15px; }
-  .formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
-  .formgrid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
-  .formgrid input, .formgrid select { width: 100%; }
-  .capgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 12px; }
-  .capgrid label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
-  .dep-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 8px;
-              background: var(--bg); }
-  .dep-card .row-flex { margin-bottom: 6px; }
+  .modal-mask .card { width: min(780px, 94vw); box-shadow: var(--shadow-lg); }
+  .modal-mask .card.wide { width: min(980px, 96vw); }
+  .modal-mask h3 {
+    font-size: 15px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
+  }
+  .modal-mask .modal-sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; line-height: 1.7; }
+  .formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 11px 14px; }
+  .formgrid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .formgrid label.wide { grid-column: 1 / -1; }
+  .formgrid input, .formgrid select, .formgrid textarea { width: 100%; }
+  .formgrid .hint { font-size: 11px; color: var(--muted); line-height: 1.6; }
+  .modal-actions {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
+  }
+  .capgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px 12px; }
+  .capgrid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+  .dep-card {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 11px 12px; margin-top: 9px; background: var(--panel-2);
+  }
+  .dep-card .row-flex { margin-bottom: 7px; }
+  .facts-card {
+    border: 1px solid var(--accent); border-radius: var(--radius-sm);
+    padding: 11px 13px; margin-bottom: 14px; background: var(--accent-soft);
+  }
+  .facts-card .f-title { font-size: 12.5px; font-weight: 600; margin-bottom: 8px; }
+
+  /* ---------- 令牌弹窗 ---------- */
+  #auth {
+    position: fixed; inset: 0; background: rgba(15, 23, 42, .42);
+    display: none; align-items: center; justify-content: center;
+    z-index: 50; backdrop-filter: blur(3px); padding: 20px;
+  }
+  #auth.show { display: flex; }
+  #auth .card { width: 440px; max-width: 94vw; box-shadow: var(--shadow-lg); }
+  #auth .card h3 { font-size: 15px; margin-bottom: 8px; }
+  #auth input { width: 100%; margin: 12px 0; }
+  #auth .row-flex { margin-top: 6px; }
+
+  .row-flex { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .tiny { font-size: 11px; }
+  .ok-text { color: var(--ok); }
+  .warn-text { color: var(--warn); }
+  .err-text { color: var(--err); }
+  .strong { font-weight: 600; }
+  .note-block {
+    font-size: 12px; color: var(--text-2); line-height: 1.8;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 10px 12px; margin-top: 12px;
+  }
+  details.raw { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  details.raw summary { cursor: pointer; user-select: none; }
+  details.raw pre {
+    white-space: pre-wrap; word-break: break-all; margin: 8px 0 0;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 10px 12px; max-height: 320px; overflow: auto;
+  }
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+  /* ---------- 窄屏：侧栏降级为顶部横滑 ---------- */
+  @media (max-width: 860px) {
+    .app { flex-direction: column; }
+    .sidebar {
+      width: 100%; height: auto; position: static;
+      flex-direction: row; align-items: center; overflow-x: auto;
+      border-right: none; border-bottom: 1px solid var(--border);
+    }
+    .brand { border-bottom: none; border-right: 1px solid var(--border); padding: 10px 14px; }
+    .brand .sub { display: none; }
+    .nav { flex-direction: row; padding: 8px; gap: 4px; }
+    .nav-label { display: none; }
+    .nav-item { white-space: nowrap; width: auto; }
+    .sidebar-foot { display: none; }
+    main { padding: 14px 12px 48px; }
+    .topbar { padding: 9px 12px; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <span class="brand">⚡ ZK-AI 控制台</span>
-  <span class="row-flex"><span class="dot off" id="server-dot"></span><span class="small muted" id="server-line">未连接</span></span>
-  <span class="grow"></span>
-  <label class="small muted">自动刷新
-    <select id="auto-interval">
-      <option value="0">关</option><option value="5">5 秒</option>
-      <option value="10" selected>10 秒</option><option value="30">30 秒</option>
-    </select>
-  </label>
-  <button id="btn-theme" title="切换浅色/暗色">🌙</button>
-  <button id="btn-refresh">⟳ 刷新</button>
-  <button id="btn-token">🔑 令牌</button>
-  <button id="btn-chatgpt" title="ChatGPT / Codex 桌面版设置">🤖 ChatGPT</button>
-</header>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="mark">⚡</span>
+      <span>
+        <div class="name">ZK-AI</div>
+        <div class="sub">本地 AI 网关控制台</div>
+      </span>
+    </div>
+    <nav class="nav" id="tabs">
+      <div class="nav-label">监控</div>
+      <button class="nav-item active" data-view="overview"><span class="ico">📊</span>总览</button>
+      <button class="nav-item" data-view="pool"><span class="ico">🔑</span>凭据池</button>
+      <button class="nav-item" data-view="requests"><span class="ico">📨</span>请求记录</button>
+      <button class="nav-item" data-view="usage"><span class="ico">📈</span>用量统计</button>
+      <div class="nav-label">配置</div>
+      <button class="nav-item" data-view="models"><span class="ico">🧩</span>模型与别名</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div>版本 <span class="ver" id="side-version">-</span></div>
+      <div id="side-uptime">-</div>
+    </div>
+  </aside>
 
-<nav id="tabs">
-  <button data-view="overview" class="active">总览</button>
-  <button data-view="pool">凭据池</button>
-  <button data-view="requests">请求记录</button>
-  <button data-view="usage">用量统计</button>
-  <button data-view="models">模型与别名</button>
-</nav>
+  <div class="content">
+    <header class="topbar">
+      <span class="conn">
+        <span class="dot off" id="server-dot"></span>
+        <span class="txt" id="server-line">未连接</span>
+      </span>
+      <span class="grow"></span>
+      <label class="field-label">自动刷新
+        <select id="auto-interval">
+          <option value="0">关</option><option value="5">5 秒</option>
+          <option value="10" selected>10 秒</option><option value="30">30 秒</option>
+        </select>
+      </label>
+      <button id="btn-theme" class="ghost" title="切换浅色 / 暗色">🌙</button>
+      <button id="btn-refresh">⟳ 刷新</button>
+      <button id="btn-token">🔑 令牌</button>
+      <button id="btn-chatgpt" title="ChatGPT / Codex 桌面版配置">🤖 ChatGPT</button>
+    </header>
 
-<main>
-  <section class="view active" id="view-overview"></section>
-  <section class="view" id="view-pool"></section>
-  <section class="view" id="view-requests"></section>
-  <section class="view" id="view-usage"></section>
-  <section class="view" id="view-models"></section>
-</main>
+    <main>
+      <section class="view active" id="view-overview"></section>
+      <section class="view" id="view-pool"></section>
+      <section class="view" id="view-requests"></section>
+      <section class="view" id="view-usage"></section>
+      <section class="view" id="view-models"></section>
+    </main>
+  </div>
+</div>
 
 <aside id="drawer"></aside>
 <div id="toasts"></div>
@@ -172,9 +527,10 @@
 <div class="modal-mask" id="providers-modal"></div>
 <div class="modal-mask" id="chatgpt-modal"></div>
 <div id="auth"><div class="card">
-  <h3>需要管理员令牌</h3>
-  <div class="small muted">把项目 <code>.env</code> 里 <code>ZKAI_ADMIN_TOKEN=</code> 后面那串原样粘进来（改过 <code>.env</code> 后令牌会变，浏览器里存的旧值需要重新粘）。令牌保存在本机 localStorage。</div>
-  <input type="text" id="auth-token" placeholder="粘贴 X-Admin-Token …">
+  <h3>🔑 需要管理令牌</h3>
+  <div class="small muted" style="line-height:1.7">把项目 <code>.env</code> 里 <code>ZKAI_ADMIN_TOKEN=</code> 后面那串原样粘进来。
+  改过 <code>.env</code> 后令牌会变，浏览器里存的旧值需要重新粘一次。令牌只保存在本机浏览器的 localStorage。</div>
+  <input type="text" id="auth-token" placeholder="粘贴管理令牌 …">
   <div class="row-flex"><button class="primary" id="auth-save">保存并连接</button>
   <button id="auth-cancel">取消</button></div>
 </div></div>
@@ -259,7 +615,7 @@ async function api(path, opts = {}) {
     opts.body = JSON.stringify(opts.json);
   }
   const resp = await fetch(path, Object.assign({}, opts, { headers }));
-  if (resp.status === 401) { showAuth(); throw new Error("管理令牌无效或缺失"); }
+  if (resp.status === 401) { showAuth(); throw new Error("管理令牌无效或缺失，请重新粘贴令牌"); }
   let data = null;
   try { data = await resp.json(); } catch { /* 无 body */ }
   if (!resp.ok) {
@@ -353,18 +709,18 @@ function attentionPanel(providers, warnings) {
   (warnings || []).forEach(w => rows.push({ level: "warn", msg: `配置警告：${esc(w)}` }));
   if (!rows.length) return "";
 
-  const tone = { err: "red", warn: "amber", ok: "green" }[rows[0].level] || "amber";
-  return `<div class="card" style="border-left:3px solid var(--${tone})">
-    <h3>⚠️ 需要处理（${rows.length}）</h3>
-    <div class="tablewrap"><table><tbody>
-      ${rows.map(r => `<tr>
-        <td class="small">${r.msg}</td>
-        <td style="text-align:right;white-space:nowrap">
-          ${r.fix === "warm"
-            ? `<button class="mini" data-fix="warm">🔥 清冷却</button>`
-            : `<button class="mini primary" data-fix="${r.fix}" data-pid="${esc(r.pid || "")}">${r.label}</button>`}
-        </td></tr>`).join("")}
-    </tbody></table></div>
+  const worst = rows.reduce((acc, r) =>
+    (acc === "err" || r.level === "err") ? "err" : acc, rows[0].level);
+  const ico = { err: "⛔", warn: "⚠️", ok: "✅" }[worst] || "⚠️";
+  return `<div class="attention${worst === "err" ? " is-err" : ""}">
+    <h3>${ico} 需要处理（${rows.length}）</h3>
+    ${rows.map(r => `<div class="att-row">
+      <span class="att-ico">${r.level === "err" ? "⛔" : "⚠️"}</span>
+      <span class="att-msg">${r.msg}</span>
+      ${r.fix === "warm"
+        ? `<button class="mini" data-fix="warm">🔥 清冷却</button>`
+        : `<button class="mini primary" data-fix="${r.fix}" data-pid="${esc(r.pid || "")}">${r.label}</button>`}
+    </div>`).join("")}
   </div>`;
 }
 
@@ -377,26 +733,37 @@ async function loadOverview() {
   state.providers = providers.data;
   $("#server-dot").className = "dot " + (health.status === "healthy" ? "on" : "off");
   $("#server-line").textContent =
-    `${health.app} v${health.version} · 数据库 ${health.database.ok ? "正常" : "异常"} · 运行 ${dur(health.uptime_seconds)}`;
+    `${health.app} v${health.version} · 数据库 ${health.database.ok ? "正常" : "异常"} · 已运行 ${dur(health.uptime_seconds)}`;
+  const sideVer = $("#side-version");
+  const sideUp = $("#side-uptime");
+  if (sideVer) sideVer.textContent = `v${health.version}`;
+  if (sideUp) sideUp.textContent = `已运行 ${dur(health.uptime_seconds)}`;
 
   const pool = stats.pool || {};
   const total60 = Object.values(stats.error_rates || {}).reduce((a, r) => a + r.attempts, 0);
   const fail60 = Object.values(stats.error_rates || {}).reduce((a, r) => a + r.failures, 0);
 
-  const kpi = (label, value, sub) => `<div class="card"><h3>${esc(label)}</h3>
-    <div class="kpi-value">${value}</div><div class="kpi-sub">${esc(sub || "")}</div></div>`;
+  const kpi = (label, value, sub, tone) => `<div class="kpi${tone ? " is-" + tone : ""}">
+    <div class="k-label">${esc(label)}</div>
+    <div class="k-value">${value}</div>
+    <div class="k-sub">${esc(sub || "")}</div></div>`;
 
   const providerCards = providers.data.map(p => {
     const byStatus = {};
     (p.credentials || []).forEach(c => byStatus[c.status] = (byStatus[c.status] || 0) + 1);
     const chips = Object.entries(byStatus)
       .map(([s, n]) => pill(s) + "×" + n).join(" ");
-    return `<div class="card">
-      <h3><span class="dot ${p.available ? "on" : "off"}"></span>
-        ${esc(p.id)} <span class="chip">${esc(p.type)}</span></h3>
-      <div class="small muted ell" title="${esc(p.base_url)}">${esc(p.base_url)}</div>
-      <div class="row-flex" style="margin:8px 0">${chips || '<span class="muted">无凭据</span>'}</div>
-      <div class="small muted">${(p.models || []).length ? "模型: " + (p.models || []).map(esc).join(" · ") : "（该供应商无挂载模型）"}</div>
+    return `<div class="card prov-card">
+      <div class="p-head">
+        <span class="dot ${p.available ? "on" : "off"}"></span>
+        <span class="p-name">${esc(p.id)}</span>
+        <span class="chip">${esc(p.type)}</span>
+        <span class="grow"></span>
+        ${p.available ? pill("healthy") : pill("disabled")}
+      </div>
+      <div class="p-url" title="${esc(p.base_url)}">${esc(p.base_url)}</div>
+      <div class="row-flex" style="margin-bottom:7px">${chips || '<span class="muted small">暂无凭据</span>'}</div>
+      <div class="p-models">${(p.models || []).length ? "挂载模型：" + (p.models || []).map(esc).join(" · ") : "（该供应商没有挂载任何模型）"}</div>
     </div>`;
   }).join("");
 
@@ -412,6 +779,10 @@ async function loadOverview() {
     </tr>`).join("");
 
   $("#view-overview").innerHTML = `
+    <div class="view-head">
+      <h2>总览</h2>
+      <span class="desc">一眼看清供应商可用性、Key 池健康度，以及还需要手动处理的配置问题</span>
+    </div>
     <div class="toolbar">
       <button class="primary" id="ov-health">▶ 立即健康检查</button>
       <button id="ov-reload">↻ 重载配置</button>
@@ -429,7 +800,7 @@ async function loadOverview() {
     <h4 class="sec">供应商</h4>
     <div class="grid cards">${providerCards}</div>
     <div id="ov-health-result"></div>
-    <h4 class="sec">最近请求（点击行看明细）</h4>
+    <h4 class="sec">最近请求（点击任意一行看完整明细）</h4>
     <div class="tablewrap"><table>
       <thead><tr><th>时间</th><th>请求模型</th><th>实际模型</th><th>供应商/凭据</th><th>状态</th><th>错误</th><th>延迟</th></tr></thead>
       <tbody class="clickable">${recent || '<tr><td colspan="7" class="muted">暂无记录</td></tr>'}</tbody>
@@ -593,8 +964,8 @@ async function loadPool() {
     else actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">启用</button>`);
     if (c.status === "cooldown" || c.status === "unhealthy")
       actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">解除冷却</button>`);
-    return `<tr>
-      <td><b>${esc(c.id)}</b>${pin}<div class="small muted">${c.tags.map(esc).join(" ")}</div></td>
+    return `<tr><td class="acts"><span class="cell-id"><b>${esc(c.id)}</b>${pin}</span></td>
+      <td class="cell-sub">${c.tags.map(esc).join(" ")}</td>
       <td>${esc(c.provider_id)}</td>
       <td>${pill(c.status)}</td>
       <td>${c.priority}</td>
@@ -606,12 +977,16 @@ async function loadPool() {
       <td class="muted ell" title="${esc(c.last_error_detail || "")}${esc(c.disabled_reason || "")}">
         ${esc(c.last_error_type ? zhErr(c.last_error_type, c.last_error_detail) : (c.disabled_reason ? zhDetail(c.disabled_reason) : "-"))}</td>
       <td class="muted small" title="${esc(c.secret_ref || "")}">${esc(c.secret_masked || c.secret_source)}</td>
-      <td class="row-flex">${actions.join("")}</td>
+      <td class="acts-end">${actions.length ? `<div class="row-flex">${actions.join("")}</div>` : ""}</td>
     </tr>`;
   }).join("");
   const s = resp.stats;
   const totalPins = Object.values(pinned).reduce((a, b) => a + b, 0);
   $("#view-pool").innerHTML = `
+    <div class="view-head">
+      <h2>凭据池</h2>
+      <span class="desc">每把 Key 的状态、优先级、配额用量与冷却倒计时；可逐把启用 / 禁用 / 解除冷却</span>
+    </div>
     <div class="toolbar">
       <span class="small muted">轮转策略：${esc(s.rotation)}</span>
       <span class="pill ${aff.enabled ? "green" : "gray"}">会话亲和 ${aff.enabled ? "开" : "关"}${aff.enabled ? ` · ${totalPins} 通会话 · TTL ${dur(aff.ttl_seconds || 0)}` : ""}</span>
@@ -626,13 +1001,13 @@ async function loadPool() {
       <button id="pool-clear-all">🧹 全部清冷却</button>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th>凭据</th><th>供应商</th><th>状态</th><th>优先级</th><th>配额用量</th><th>成功</th><th>失败</th>
-      <th>限流</th><th>冷却剩余</th><th>最后错误</th><th>密钥</th><th>操作</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="12" class="muted">无凭据</td></tr>'}</tbody>
+      <thead><tr><th class="acts">操作</th><th>凭据</th><th>供应商</th><th>状态</th><th>优先级</th><th>配额用量</th><th>成功</th><th>失败</th>
+      <th>限流</th><th>冷却剩余</th><th>最后错误</th><th>密钥</th><th class="acts-end">操作</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="13" class="muted">无凭据</td></tr>'}</tbody>
     </table></div>
-    <p class="small muted" style="margin-top:10px">📌 = 当前钉在该 Key 上的会话数。同一通对话会优先复用上一步成功的 Key
-    （命中供应商侧前缀缓存，历史不重算）；该 Key 冷却/故障时自动换下一把并在成功瞬间把锚点带过去。
-    冷却规则：分钟限流指数退避（60→900 秒），额度耗尽（token plan exhausted）平铺休 30 分钟。</p>`;
+    <div class="note-block">📌 = 当前钉在这把 Key 上的会话数。同一通对话会优先复用上一步成功的 Key
+    （命中供应商侧前缀缓存，历史不重算）；这把 Key 冷却 / 故障时自动换下一把，并在成功瞬间把锚点带过去。<br>
+    冷却规则：分钟限流走指数退避（60 → 900 秒）；额度耗尽（token plan exhausted）平铺休 30 分钟。</div>`;
   tickCountdowns();
   $("#pool-add-key").onclick = openAddKeyModal;
   $("#pool-providers").onclick = openProvidersModal;
@@ -704,11 +1079,11 @@ function renderLimitsModal() {
       ${rows || '<div class="small muted" style="margin-top:6px">未设限额（不限流）</div>'}
     </div>`;
   }).join("");
-  modal.innerHTML = `<div class="card">
-    <h3>主动配额限额（到线的 Key 直接跳过，不再发出注定 429 的请求）</h3>
-    <div class="small muted" style="margin-bottom:10px">改动保存后立即生效并写入数据库（优先于 YAML，重启不丢）；想改回 YAML 值点「恢复 YAML」。</div>
+  modal.innerHTML = `<div class="card wide">
+    <h3>主动配额限额</h3>
+    <div class="modal-sub">到线的 Key 会被直接跳过，不再发出注定 429 的请求。改动保存后立即生效并写入数据库（优先于 YAML，重启不丢）；想改回 YAML 里的值，点「↺ 恢复 YAML」。</div>
     ${cards}
-    <div class="row-flex" style="margin-top:14px"><span class="grow"></span><button id="lm-close">关闭</button></div>
+    <div class="modal-actions"><span class="grow"></span><button id="lm-close">关闭</button></div>
   </div>`;
   modal.classList.add("show");
   $("#lm-close").onclick = () => modal.classList.remove("show");
@@ -767,27 +1142,26 @@ function openProvidersModal() {
     const rows = providers.map(p => {
       const limits = (p.rate_limits || []).length ? "pill green" : "pill gray";
       const limitCount = (p.rate_limits || []).length;
-      return `<tr>
-        <td><b>${esc(p.id)}</b><div class="small muted">${esc(p.type)}</div></td>
-        <td class="small muted ell" title="${esc(p.base_url)}" style="max-width:200px">${esc(p.base_url)}</td>
+      return `<tr><td class="acts"><div class="row-flex"><button class="mini" data-edit-provider="${esc(p.id)}" title="编辑供应商 ${esc(p.id)}">编辑</button><button class="mini danger" data-del-provider="${esc(p.id)}" title="删除供应商 ${esc(p.id)}">删除</button></div></td>
+        <td class="name"><b>${esc(p.id)}</b><span class="sub">${esc(p.type)}</span></td>
+        <td class="small muted ell" title="${esc(p.base_url)}" style="max-width:220px">${esc(p.base_url)}</td>
         <td>${p.enabled ? pill("healthy") : pill("disabled")}</td>
         <td class="small">${p.timeout}s</td>
         <td>${limitCount ? `<span class="pill green" title="已设限额">${limitCount} 条限额</span>` : '<span class="muted">-</span>'}</td>
-        <td><button class="mini" data-edit-provider="${esc(p.id)}">编辑</button>
-            <button class="mini" data-del-provider="${esc(p.id)}">删除</button></td>
+
       </tr>`;
     }).join("");
-    modal.innerHTML = `<div class="card">
+    modal.innerHTML = `<div class="card wide">
       <h3>🏢 供应商管理</h3>
-      <div class="small muted" style="margin:-4px 0 10px">供应商 = 上游协议 + 接入地址。Key 在「凭据池」里单独加；改这里不会动已配的 Key。</div>
+      <div class="modal-sub">供应商 = 上游协议 + 接入地址。Key 在「➕ 加 Key」里单独添加；在这里改动不会碰到已配好的 Key。</div>
       <div class="row-flex" style="margin-bottom:10px">
         <button class="primary" id="pv-new">➕ 新建供应商</button>
         <span class="grow"></span>
         <button id="pv-close">关闭</button>
       </div>
       <div class="tablewrap" style="max-height:55vh"><table>
-        <thead><tr><th>供应商</th><th>接入地址</th><th>状态</th><th>超时</th><th>限额</th><th>操作</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6" class="muted">无供应商</td></tr>'}</tbody>
+        <thead><tr><th class="acts">操作</th><th>供应商</th><th>接入地址</th><th>状态</th><th>超时</th><th>限额</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" class="muted">无供应商</td></tr>'}</tbody>
       </table></div>
     </div>`;
     modal.classList.add("show");
@@ -815,6 +1189,7 @@ function openProviderForm(pid) {
   const modal = $("#providers-modal");
   modal.innerHTML = `<div class="card">
     <h3>${pid ? "编辑供应商" : "新建供应商"}</h3>
+    <div class="modal-sub">${pid ? "保存后立即生效，并同步写回 providers.yaml。" : "保存后立即生效、写回 providers.yaml，紧接着会弹出加 Key 的窗口。"}</div>
     <div class="formgrid">
       <label>供应商 ID（唯一，自己起）<input type="text" id="pf-id" value="${esc(p.id)}" ${pid ? "disabled" : ""} placeholder="如 my-openai"></label>
       <label>协议类型
@@ -828,7 +1203,7 @@ function openProviderForm(pid) {
         <option value="false" ${p.enabled === false ? "selected" : ""}>禁用</option></select></label>
     </div>
     <div class="small muted" style="margin-top:8px">Key 不在这里加——保存后去「凭据池 → ➕ 加 Key」。</div>
-    <div class="row-flex" style="margin-top:14px">
+    <div class="modal-actions">
       <button class="primary" id="pf-save">💾 保存</button>
       <button id="pf-cancel">取消</button>
     </div>
@@ -859,9 +1234,10 @@ async function openAddKeyModal(presetPid) {
   const providers = (resp.data || []).filter(p => p.requires_credential);
   if (!providers.length) { toast("没有可加 Key 的供应商（都要凭据）", "err"); return; }
   const modal = $("#addkey-modal");
-  modal.innerHTML = `<div class="card">
+  modal.innerHTML = `<div class="card wide">
     <h3>➕ 给供应商加 Key</h3>
-    <div class="small muted" style="margin:-6px 0 12px">Key 会写进 <code>.env</code>（已 gitignore），<code>providers.yaml</code> 里只记「变量名」——换机器、重建环境时不用重新配。选好供应商后 ID 和变量名会自动帮你起好。</div>
+    <div class="modal-sub">Key 会写进 <code>.env</code>（已被 gitignore），<code>providers.yaml</code> 里只记「变量名」——
+    换机器、重建环境时不用重新配。选好供应商后，ID 和变量名会自动帮你起好。</div>
     <div class="formgrid">
       <label>供应商
         <select id="ak-provider">${providers.map(p => `<option value="${esc(p.id)}" ${p.id === presetPid ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select>
@@ -875,7 +1251,7 @@ async function openAddKeyModal(presetPid) {
       <label>优先级（越小越优先，默认 100）
         <input type="number" id="ak-priority" value="100"></label>
     </div>
-    <div class="row-flex" style="margin-top:14px">
+    <div class="modal-actions">
       <button class="primary" id="ak-save">💾 保存</button>
       <button id="ak-cancel">取消</button>
     </div>
@@ -966,6 +1342,10 @@ async function loadRequests(keepFilters) {
   const page = Math.floor(state.req.offset / state.req.size) + 1;
   const pages = Math.max(1, Math.ceil(resp.total / state.req.size));
   $("#view-requests").innerHTML = `
+    <div class="view-head">
+      <h2>请求记录</h2>
+      <span class="desc">每一次请求的路由落点、每次尝试的上游错误原文；点击任意一行看完整明细</span>
+    </div>
     <div class="filters">
       <select id="f-status">${opts(["success","error","cancelled","pending"], keepFilters ? prev.status : "")}</select>
       <select id="f-provider">${opts(state.providers.map(x => x.id), keepFilters ? prev.provider : "")}</select>
@@ -1026,8 +1406,8 @@ async function openDrawer(requestId) {
       <td>${fmtK((a.input_tokens || 0) + (a.output_tokens || 0))}</td>
     </tr>`).join("");
     $("#drawer").innerHTML = `
-      <div class="row-flex" style="margin-bottom:10px">
-        <h2 class="grow">请求详情</h2><button id="dr-close">✕ 关闭</button></div>
+      <div class="dr-head">
+        <h2 class="grow">请求详情</h2><button class="mini" id="dr-close">✕ 关闭</button></div>
       <dl class="detail">
         <dt>请求 ID</dt><dd>${esc(r.id || requestId)}</dd>
         <dt>请求模型</dt><dd>${esc(r.requested_model || "-")}${r.alias ? `（别名 ${esc(r.alias)}）` : ""}</dd>
@@ -1042,7 +1422,7 @@ async function openDrawer(requestId) {
         <dt>时间</dt><dd>${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</dd>
       </dl>
       ${r.routing_reason ? `<details class="raw"><summary>路由决策</summary><pre>${esc(r.routing_reason)}</pre></details>` : ""}
-      <h4 class="sec">尝试明细（${(d.attempts || []).length}）</h4>
+      <h4 class="sec">尝试明细（共 ${(d.attempts || []).length} 次）</h4>
       <div class="tablewrap"><table>
         <thead><tr><th>#</th><th>供应商</th><th>凭据</th><th>结果</th><th>HTTP</th><th>错误</th><th>详情</th><th>延迟</th><th>Tokens</th></tr></thead>
         <tbody>${attempts || '<tr><td colspan="9" class="muted">无尝试记录（可能是修复前的流式请求）</td></tr>'}</tbody>
@@ -1056,8 +1436,10 @@ async function openDrawer(requestId) {
 async function loadUsage() {
   const stats = await api(`/admin/stats?days=${state.usageDays}&recent=0`);
   const u = stats.usage || {};
-  const kpi = (label, value, sub) => `<div class="card"><h3>${esc(label)}</h3>
-    <div class="kpi-value">${value}</div><div class="kpi-sub">${esc(sub || "")}</div></div>`;
+  const kpi = (label, value, sub, tone) => `<div class="kpi${tone ? " is-" + tone : ""}">
+    <div class="k-label">${esc(label)}</div>
+    <div class="k-value">${value}</div>
+    <div class="k-sub">${esc(sub || "")}</div></div>`;
   const maxDay = Math.max(1, ...(stats.daily || []).map(x => x.tokens));
   const daily = (stats.daily || []).map(x => `<tr>
       <td>${esc(x.day)}</td><td>${num(x.requests)}</td>
@@ -1067,6 +1449,10 @@ async function loadUsage() {
       <td>${num(x.requests)}</td><td>${fmtK(x.tokens)}</td>
       <td>${fmtCost(x.cost_usd)}</td></tr>`).join("");
   $("#view-usage").innerHTML = `
+    <div class="view-head">
+      <h2>用量统计</h2>
+      <span class="desc">Token 与等价成本（按公开牌价折算，免费渠道即省下的钱）</span>
+    </div>
     <div class="toolbar">
       <span class="muted small">时间窗口</span>
       <select id="u-days">${[1, 7, 30].map(d => `<option value="${d}" ${d === state.usageDays ? "selected" : ""}>近 ${d} 天</option>`).join("")}</select>
@@ -1118,33 +1504,36 @@ async function loadModels() {
        <span class="chip ${d.input_cost_per_mtok || d.output_cost_per_mtok ? "" : "muted"}" title="牌价 USD/百万token（输入/输出）">
          💲${d.input_cost_per_mtok ?? 0}/${d.output_cost_per_mtok ?? 0}</span>
        ${d.enabled ? "" : " " + pill("disabled")}</div>`).join("");
-    return `<tr><td><b>${esc(x.id)}</b>${x.description ? `<div class="small muted">${esc(x.description)}</div>` : ""}</td>
+    return `<tr><td class="acts"><div class="row-flex"><button class="mini" data-edit-model="${esc(x.id)}" title="编辑模型 ${esc(x.id)}">编辑</button><button class="mini danger" data-del-model="${esc(x.id)}" title="删除模型 ${esc(x.id)}">删除</button></div></td>
+      <td class="name"><b>${esc(x.id)}</b>${x.description ? `<span class="sub">${esc(x.description)}</span>` : ""}</td>
       <td>${x.enabled ? pill("healthy") : pill("disabled")}</td>
       <td>${fmtK(x.context_window)}</td><td>${deps || "-"}</td>
-      <td><button class="mini" data-edit-model="${esc(x.id)}">编辑</button>
-          <button class="mini" data-del-model="${esc(x.id)}">删除</button></td></tr>`;
-  }).join("");
+    </tr>`;  }).join("");
   const aliasRows = Object.entries(al.data || {}).map(([name, a]) => `
-    <tr><td><b>${esc(name)}</b>${a.description ? `<div class="small muted">${esc(a.description)}</div>` : ""}</td>
+    <tr><td class="acts"><div class="row-flex"><button class="mini" data-edit-alias="${esc(name)}" title="编辑别名 ${esc(name)}">编辑</button><button class="mini danger" data-del-alias="${esc(name)}" title="删除别名 ${esc(name)}">删除</button></div></td>
+    <td class="name"><b>${esc(name)}</b>${a.description ? `<span class="sub">${esc(a.description)}</span>` : ""}</td>
     <td>${esc(a.strategy)}</td>
     <td>${(a.targets || []).map(esc).join(" → ")}</td>
     <td class="small muted">${esc(((al.resolved || {})[name] || []).join(", "))}</td>
     <td>${a.enabled ? pill("healthy") : pill("disabled")}</td>
-    <td><button class="mini" data-edit-alias="${esc(name)}">编辑</button>
-        <button class="mini" data-del-alias="${esc(name)}">删除</button></td></tr>`).join("");
+    </tr>`).join("");
   const warnings = (m.config_warnings || []).length
     ? `<div class="toolbar"><span class="pill amber">⚠ 配置警告 ${m.config_warnings.length} 条</span>
        <details class="raw grow"><summary>展开</summary><pre>${m.config_warnings.map(esc).join("\n")}</pre></details></div>` : "";
   $("#view-models").innerHTML = `
+    <div class="view-head">
+      <h2>模型与别名</h2>
+      <span class="desc">模型 → 部署 → 供应商全景；别名的目标链顺序即优先级</span>
+    </div>
     ${warnings}
     <div class="toolbar"><h4 class="sec grow" style="margin:0">模型（${(m.data || []).length}）</h4>
       <button class="primary" id="md-market">🧺 模型市场（从供应商导入）</button>
       <button id="md-new">➕ 手动新建</button></div>
-    <div class="tablewrap"><table><thead><tr><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th><th>操作</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th class="acts">操作</th><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th></tr></thead>
       <tbody>${modelRows}</tbody></table></div>
     <div class="toolbar" style="margin-top:22px"><h4 class="sec grow" style="margin:0">别名（对外稳定入口）</h4>
       <button class="primary" id="al-new">➕ 新建别名</button></div>
-    <div class="tablewrap"><table><thead><tr><th>别名</th><th>策略</th><th>目标链</th><th>解析结果</th><th>状态</th><th>操作</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th class="acts">操作</th><th>别名</th><th>策略</th><th>目标链</th><th>解析结果</th><th>状态</th></tr></thead>
       <tbody>${aliasRows}</tbody></table></div>
     <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
     <div class="card"><div class="row-flex">
@@ -1223,11 +1612,12 @@ function openModelModal(modelId, prefill) {
   let deps = (m.deployments || []).map(d => Object.assign({}, d));
   if (!deps.length && !modelId) deps = [{}];
   const modal = $("#model-modal");
-  modal.innerHTML = `<div class="card">
-    <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建" : "新建模型")}</h3>
+  modal.innerHTML = `<div class="card wide">
+    <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建模型" : "新建模型")}</h3>
+    <div class="modal-sub">改完立即生效，并同步写回配置文件（重启后仍在）。</div>
     ${factsNote.length ? `
-      <div class="card" style="padding:10px 12px;margin-bottom:12px;background:var(--bg2,#fafafa)">
-        <div class="small" style="font-weight:600;margin-bottom:6px">📋 供应商实测能力（已自动按此填好）</div>
+      <div class="facts-card">
+        <div class="f-title">📋 供应商实测能力（表单已按这些实测值预填）</div>
         <table class="small"><tbody>
           ${factsNote.map(f => `<tr>
             <td style="white-space:nowrap;width:96px">${esc(f.label)}</td>
@@ -1246,7 +1636,7 @@ function openModelModal(modelId, prefill) {
         <option value="false" ${m.enabled === false ? "selected" : ""}>禁用</option></select></label>
       <label style="grid-column:1/-1">描述<input type="text" id="mm-desc" value="${esc(m.description || "")}" placeholder="可空"></label>
     </div>
-    <h4 class="sec">能力评分（0-10，cost 越大越便宜）</h4>
+    <h4 class="sec">能力评分（0–10，cost 越大代表越便宜）</h4>
     <div class="capgrid">${CAP_DIMS.map(k => {
       // 上游只说一次实话的地方就不让手填：视觉/上下文由实测决定
       const locked = (k === "vision" && facts.vision_input !== undefined) ||
@@ -1264,14 +1654,12 @@ function openModelModal(modelId, prefill) {
     ${facts.reasoning_effort?.length ? `
       <div class="small muted" style="margin-top:8px">该模型的思考强度可调：${facts.reasoning_effort.map(esc).join(" / ")}
       <span title="请求时用 reasoning_effort 参数指定，越强越慢也越准">（是什么？）</span></div>` : ""}
-    <h4 class="sec">部署（哪个供应商的哪个上游模型）</h4>
+    <h4 class="sec">部署（哪个供应商、上游模型叫什么）</h4>
     <div id="mm-deps"></div>
     <div class="toolbar" style="margin-top:10px"><button id="mm-add-dep">➕ 加部署</button></div>
-    <div class="row-flex" style="margin-top:14px">
+    <div class="modal-actions">
       <button class="primary" id="mm-save">💾 保存</button>
       <button id="mm-cancel">取消</button>
-      <span class="grow"></span>
-      <span class="small muted">保存立即生效并写入数据库，重启后仍在</span>
     </div>
   </div>`;
   modal.classList.add("show");
@@ -1342,8 +1730,9 @@ async function openMarketModal(presetPid) {
   const providers = (state.providers || []).filter(p => p.requires_credential && p.available);
   if (!providers.length) { toast("没有可用供应商（先给某个供应商配好能用的 Key）", "err"); return; }
   const first = presetPid && providers.some(p => p.id === presetPid) ? presetPid : providers[0].id;
-  modal.innerHTML = `<div class="card">
+  modal.innerHTML = `<div class="card wide">
     <h3>🧺 模型市场</h3>
+    <div class="modal-sub">选一个供应商，点「探测」把它真实支持的模型列出来；已收录的会预填上下文 / 能力 / 牌价。</div>
     <div class="row-flex" style="margin-bottom:10px">
       <label class="small muted">供应商
         <select id="mk-provider">${providers.map(p => `<option value="${esc(p.id)}" ${p.id === first ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select>
@@ -1368,14 +1757,14 @@ async function openMarketModal(presetPid) {
       }
       const render = (arr) => arr.map((x, idx) => `
         <tr class="${x.already_added ? "muted" : ""}">
-          <td><b>${esc(x.suggested_model_id)}</b><div class="small muted">${esc(x.upstream_model)}</div></td>
+          <td class="acts">${x.already_added
+            ? '<span class="pill gray">已收录</span>'
+            : `<button class="mini primary" data-add-model="${idx}">＋ 添加</button>`}</td>
+          <td class="name"><b>${esc(x.suggested_model_id)}</b><span class="sub">${esc(x.upstream_model)}</span></td>
           <td class="small">${fmtK(x.discovered?.context_window ?? x.preset.context_window)}
             ${x.discovered_known ? '<span class="chip" title="来自供应商 API 实测">实测</span>' : '<span class="chip muted" title="没有实测数据，按经验值预估">预估</span>'}</td>
           <td class="small muted">${esc(x.preset.description)}</td>
           <td class="small">${x.preset.input_price ? "$" + x.preset.input_price + "/" + x.preset.output_price : "-"}</td>
-          <td>${x.already_added
-            ? '<span class="pill gray">已收录</span>'
-            : `<button class="mini primary" data-add-model="${idx}">＋ 添加</button>`}</td>
         </tr>`).join("");
       const renderList = (q) => {
         const filtered = q
@@ -1420,7 +1809,7 @@ async function openMarketModal(presetPid) {
           <span class="small muted" id="mk-count"></span>
         </div>
         <div class="tablewrap" style="max-height:55vh"><table>
-          <thead><tr><th>模型</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th><th>操作</th></tr></thead>
+          <thead><tr><th class="acts">操作</th><th>模型</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th></tr></thead>
           <tbody id="mk-rows"></tbody>
         </table></div>`;
       const updateCount = () => {
@@ -1448,8 +1837,9 @@ function openAliasModal(name) {
   const src = name ? (state.aliasesCache || {})[name] : null;
   const a = src || {strategy: "capability", targets: [], enabled: true, description: "", weights: {}, requires: {}};
   const modal = $("#alias-modal");
-  modal.innerHTML = `<div class="card">
+  modal.innerHTML = `<div class="card wide">
     <h3>${name ? "编辑别名" : "新建别名"}</h3>
+    <div class="modal-sub">别名是客户端唯一需要记住的名字；改它，调用方一行代码都不用动。</div>
     <div class="formgrid">
       <label>别名<input type="text" id="am-name" value="${esc(name || "")}" ${name ? "disabled" : ""} placeholder="如 zk-auto"></label>
       <label>策略<select id="am-strategy">${["capability","priority","speed","cost","round_robin","weighted"]
@@ -1465,7 +1855,7 @@ function openAliasModal(name) {
       <label>硬门槛 requires（可选，同上）<textarea id="am-requires" rows="3" style="width:100%"
         placeholder="vision=8">${esc(Object.entries(a.requires || {}).map(([k,v]) => `${k}=${v}`).join("\n"))}</textarea></label>
     </div>
-    <div class="row-flex" style="margin-top:14px">
+    <div class="modal-actions">
       <button class="primary" id="am-save">💾 保存</button>
       <button id="am-cancel">取消</button>
     </div>
@@ -1516,12 +1906,13 @@ let cgState = null; // GET /admin/chatgpt 的快照
 
 async function openChatGptModal() {
   const modal = $("#chatgpt-modal");
-  modal.innerHTML = `<div class="card">
+  modal.innerHTML = `<div class="card wide">
     <h3>🤖 ChatGPT / Codex 桌面版</h3>
+    <div class="modal-sub">维护 <code>~/.codex/config.toml</code>：改接入方式、模型、接入地址、思考强度，或一键切回官方。写入前自动备份。</div>
     <div id="cg-loading" class="small muted">读取中…</div>
     <div id="cg-body" style="display:none">
-      <div class="card" style="padding:10px 12px;margin-bottom:12px;background:var(--bg)">
-        <div class="small" id="cg-status"></div>
+      <div class="card" style="padding:12px 14px;margin-bottom:14px">
+        <div class="small" id="cg-status" style="line-height:1.9"></div>
         <div class="small muted" id="cg-path" style="margin-top:4px;word-break:break-all"></div>
       </div>
 
@@ -1557,26 +1948,29 @@ async function openChatGptModal() {
 
       <div id="cg-preview" style="display:none;margin-top:12px"></div>
 
-      <div class="row-flex" style="margin-top:14px">
+      <div class="modal-actions">
         <button id="cg-btn-preview">🔍 预览变更</button>
         <button class="primary" id="cg-btn-save">💾 保存并写入</button>
         <button id="cg-btn-reapply" style="display:none">↻ 重新写入本机</button>
         <button id="cg-btn-syncenv" style="display:none" title="把网关 .env 里的令牌写进 Windows 用户级环境变量（桌面版从 explorer 启动只认这个）">🔧 同步令牌到用户环境变量</button>
+        <span class="grow"></span>
         <button id="cg-cancel">取消</button>
       </div>
 
-      <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
-      <div class="small muted" style="margin-bottom:8px">
+      <hr class="sep">
+      <h4 class="sec">热切换模型</h4>
+      <div class="modal-sub" style="margin-bottom:12px">
         桌面版发的模型是 <code>zk-auto</code>；下面换模型 = 把所选模型提到 <code>zk-auto</code>
-        兜底链最前面，<strong>立即生效</strong>，不用重启桌面版。
+        兜底链最前面，<strong>下一条消息立即生效</strong>，不用重启桌面版。
       </div>
       <div class="formgrid">
-        <label>当前首选模型 <select id="cg-hot-model"></select></label>
+        <label class="wide">当前首选模型 <select id="cg-hot-model"></select></label>
       </div>
-      <div class="row-flex" style="margin-top:10px">
-        <button id="cg-hot-save">热切换</button>
+      <div class="modal-actions">
+        <button class="primary" id="cg-hot-save">热切换</button>
+        <span class="grow"></span>
+        <span class="small muted" id="cg-chain"></span>
       </div>
-      <div class="small muted" id="cg-chain" style="margin-top:8px"></div>
     </div>
   </div>`;
   modal.classList.add("show");
@@ -1796,14 +2190,19 @@ function applyTheme(t) {
 $("#btn-theme").onclick = () =>
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 applyTheme(localStorage.getItem("zkai_theme") || "light");
-document.querySelectorAll("nav button").forEach(b => b.onclick = () => switchView(b.dataset.view));
+document.querySelectorAll("#tabs button[data-view]").forEach(b => b.onclick = () => switchView(b.dataset.view));
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("#drawer").classList.remove("open"); });
 
-/* URL 带 ?token=xxx 时自动保存（书签直达） */
+/* URL 参数：
+ *   ?token=xxx   管理令牌（书签直达，自动记住，随后从地址栏抹掉）
+ *   ?view=pool   默认打开哪个视图（总览 / 凭据池 / 请求记录 / 用量统计 / 模型与别名），
+ *                让「模型与别名」这种深页也能直接收藏、直接分享 */
 const urlToken = new URLSearchParams(location.search).get("token");
-if (urlToken) { state.token = urlToken; localStorage.setItem("zkai_admin_token", urlToken);
-  history.replaceState(null, "", "/ui"); }
-refresh();
+if (urlToken) { state.token = urlToken; localStorage.setItem("zkai_admin_token", urlToken); }
+const urlView = new URLSearchParams(location.search).get("view");
+const initialView = (urlView && LOADERS[urlView]) ? urlView : state.view;
+history.replaceState(null, "", "/ui");
+switchView(initialView);
 </script>
 </body>
 </html>

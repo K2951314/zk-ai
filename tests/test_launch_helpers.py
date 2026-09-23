@@ -172,7 +172,7 @@ def test_tray_that_crashes_on_startup_is_reported(monkeypatch, tmp_path: Path, c
 
     assert launch_hidden.main(["gateway"]) == 1
     out = capsys.readouterr().out
-    assert "tray exited immediately" in out
+    assert "托盘进程刚起来就退出了" in out
     assert "uv sync" in out, "point at the fix that actually applies most of the time"
 
 
@@ -184,7 +184,7 @@ def test_dead_tray_leaves_its_output_on_disk(monkeypatch, tmp_path: Path) -> Non
 
     log = tmp_path / "data" / "tray_gateway.log"
     assert log.exists(), "the launcher creates the log before spawning"
-    assert "launching tray: gateway" in log.read_text(encoding="utf-8")
+    assert "启动托盘：gateway" in log.read_text(encoding="utf-8")
     kwargs = captured.get("kwargs")
     assert isinstance(kwargs, dict)
     assert kwargs["stderr"] is launch_hidden.subprocess.STDOUT

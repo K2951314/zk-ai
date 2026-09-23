@@ -338,7 +338,7 @@ class CredentialPool:
             logger.info("credential %s enabled by operator", credential_id)
             return transition
 
-    def disable(self, credential_id: str, reason: str = "disabled by operator") -> Transition | None:
+    def disable(self, credential_id: str, reason: str = "操作员手动禁用") -> Transition | None:
         with self._lock:
             credential = self._credentials.get(credential_id)
             if credential is None:

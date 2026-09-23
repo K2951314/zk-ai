@@ -133,7 +133,7 @@ def _install_middleware(app: FastAPI) -> None:
                     status_code=413,
                     content={
                         "error": {
-                            "message": f"request body too large (limit {max_body_bytes // (1 << 20)}MB)",
+                            "message": f"请求体过大（上限 {max_body_bytes // (1 << 20)}MB）",
                             "type": "context_length_exceeded",
                             "code": 413,
                         }
@@ -170,7 +170,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
             status_code=400,
             content={
                 "error": {
-                    "message": "invalid request payload",
+                    "message": "请求体不合法",
                     "type": "invalid_request_error",
                     "code": 400,
                     "details": [
@@ -188,7 +188,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
             status_code=500,
             content={
                 "error": {
-                    "message": "internal gateway error",
+                    "message": "网关内部错误",
                     "type": "internal_error",
                     "code": 500,
                 }

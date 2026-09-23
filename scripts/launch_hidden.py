@@ -165,25 +165,25 @@ def _tray_exit_code(proc: subprocess.Popen[bytes] | None) -> int | None:
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else "gateway"
     if mode not in {"gateway", "burner"}:
-        print(f"usage: launch_hidden.py [gateway|burner] [extra args]; got {mode!r}")
+        print(f"用法：launch_hidden.py [gateway|burner] [额外参数]；收到 {mode!r}")
         return 2
     interpreter, env_extra = _child_interpreter()
     if not interpreter.exists():
-        print(f"ERROR: interpreter not found: {interpreter}")
-        print(f"       (.venv/pyvenv.cfg home = {_venv_home()})")
+        print(f"【错误】找不到 Python 解释器：{interpreter}")
+        print(f"       （.venv/pyvenv.cfg 的 home = {_venv_home()}）")
         return 1
     with contextlib.suppress(Exception):
         # Never leave two trays of the same mode running (blue ghost icon).
         stopped = stop_existing_trays(mode)
         if stopped:
-            print(f"stopped previous tray ({mode}): PID {', '.join(map(str, stopped))}")
+            print(f"已停掉上一个托盘（{mode}）：PID {', '.join(map(str, stopped))}")
     argv_out = [str(interpreter), "scripts/tray_launcher.py", mode, *argv[1:]]
-    print(f"starting tray ({mode}) with {interpreter.name}, no console window")
+    print(f"正在用 {interpreter.name} 启动托盘（{mode}），不弹控制台窗口")
     log = _tray_log(mode)
     log.parent.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     with log.open("ab", buffering=0) as handle:
-        handle.write(f"\n===== {stamp} launching tray: {mode} =====\n".encode())
+        handle.write(f"\n===== {stamp} 启动托盘：{mode} =====\n".encode())
         # No-console flags *and* a GUI-subsystem interpreter: belt and braces. The
         # child is fully detached, so it survives this helper (and the .cmd) exiting.
         proc = subprocess.Popen(  # noqa: S603 - our own fixed argv
@@ -196,14 +196,14 @@ def main(argv: list[str]) -> int:
             creationflags=_NO_WINDOW,
         )
     if (code := _tray_exit_code(proc)) is not None:
-        print(f"ERROR: the tray exited immediately (code {code}) - nothing will show in the taskbar.")
-        print(f"       Its own output: {log.relative_to(_ROOT)}")
+        print(f"【错误】托盘进程刚起来就退出了（退出码 {code}），任务栏里不会出现图标。")
+        print(f"       它自己的输出在：{log.relative_to(_ROOT)}")
         detail = _tail(log, _TAIL_LINES)
         if detail:
-            print("       last lines:")
+            print("       最后几行：")
             for line in detail.splitlines():
                 print(f"       | {line}")
-        print("       Most often this is a stale .venv - run: uv sync")
+        print("       最常见的原因是 .venv 没跟上依赖——跑一次：uv sync")
         return 1
     return 0
 

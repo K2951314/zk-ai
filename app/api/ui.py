@@ -28,7 +28,7 @@ async def console() -> HTMLResponse:
     except OSError as exc:  # pragma: no cover - file ships with the package
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"message": "console assets unavailable"}},
+            detail={"error": {"message": "控制台页面文件缺失"}},
         ) from exc
     return HTMLResponse(html)
 
@@ -41,7 +41,7 @@ async def agent_console() -> HTMLResponse:
     except OSError as exc:  # pragma: no cover - file ships with the package
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"message": "agent assets unavailable"}},
+            detail={"error": {"message": "Agent 任务台页面文件缺失"}},
         ) from exc
     return HTMLResponse(html)
 

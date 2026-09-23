@@ -28,9 +28,9 @@ _SSE_HEARTBEAT = 15.0
 def get_agent(request: Request) -> AgentService:
     container: Container | None = getattr(request.app.state, "container", None)
     if container is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "gateway is starting up")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "网关正在启动")
     if not container.settings.agent_enabled:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "agent disabled")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent 功能已停用")
     return container.agent_service
 
 
@@ -74,7 +74,7 @@ async def create_session(payload: StartPayload, agent: AgentDep,
     model = payload.model or container.settings.agent_default_model
     if not agent.validate_model(model):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            f"unknown model/alias: {model!r}")
+                            f"未知的模型/别名：{model!r}")
     return await agent.start(task=payload.task, model=payload.model,
                              workspace=payload.workspace)
 
@@ -83,7 +83,7 @@ async def create_session(payload: StartPayload, agent: AgentDep,
 async def get_session(session_id: str, agent: AgentDep) -> dict[str, Any]:
     detail = await agent.session_detail(session_id)
     if detail is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     return detail
 
 
@@ -95,14 +95,14 @@ async def followup(session_id: str, payload: FollowupPayload,
     except ZKAIError as exc:
         raise HTTPException(exc.http_status, exc.message) from exc
     if detail is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     return detail
 
 
 @router.post("/sessions/{session_id}/cancel")
 async def cancel(session_id: str, agent: AgentDep) -> dict[str, Any]:
     if not await agent.cancel(session_id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     return {"cancelled": True}
 
 
@@ -113,7 +113,7 @@ async def delete_session(session_id: str, agent: AgentDep) -> dict[str, Any]:
     except ZKAIError as exc:
         raise HTTPException(exc.http_status, exc.message) from exc
     if not deleted:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     return {"deleted": True}
 
 
@@ -124,7 +124,7 @@ async def decide_approval(session_id: str, approval_id: str, payload: ApprovalPa
                                 approved=payload.approved, remember=payload.remember)
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
-                            "no such pending approval (already decided or session ended)")
+                            "没有这条待审批请求（可能已处理，或会话已结束）")
     return result
 
 
@@ -133,7 +133,7 @@ async def events(session_id: str, agent: AgentDep) -> StreamingResponse:
     """Live session stream: ``snapshot`` then JSON events, ``: ping`` keepalives."""
     detail = await agent.session_detail(session_id)
     if detail is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
 
     async def stream() -> Any:
         queue = await agent.subscribe(session_id)

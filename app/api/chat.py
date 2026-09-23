@@ -112,7 +112,7 @@ def routing_headers(response_meta: dict[str, Any]) -> dict[str, str]:
     return headers
 
 
-@router.post("/v1/chat/completions", summary="Create a chat completion")
+@router.post("/v1/chat/completions", summary="创建一次对话补全")
 async def chat_completions(
     payload: ChatCompletionRequest,
     container: ContainerDep,

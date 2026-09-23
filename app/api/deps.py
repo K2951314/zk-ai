@@ -16,7 +16,7 @@ def get_container(request: Request) -> Container:
     if container is None:  # pragma: no cover - startup always sets it
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"message": "gateway is starting up", "type": "not_ready"}},
+            detail={"error": {"message": "网关正在启动", "type": "not_ready"}},
         )
     return container
 
@@ -39,7 +39,7 @@ async def require_admin(
     """
     container = get_container(request)
     if not container.settings.admin_enabled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="admin API disabled")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="管理接口已停用")
 
     expected = container.settings.admin_token
     if not expected:
@@ -51,7 +51,7 @@ async def require_admin(
     if not constant_time_equals(provided, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"message": "invalid admin token", "type": "unauthorized"}},
+            detail={"error": {"message": "管理令牌无效", "type": "unauthorized"}},
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -80,7 +80,7 @@ async def require_client_auth(
     if not constant_time_equals(provided, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"message": "invalid or missing api key", "type": "authentication_error"}},
+            detail={"error": {"message": "API Key 缺失或无效", "type": "authentication_error"}},
             headers={"WWW-Authenticate": "Bearer"},
         )
 

@@ -49,7 +49,7 @@ logger = get_logger("api.responses")
 router = APIRouter(tags=["responses"], dependencies=[Depends(require_client_auth)])
 
 
-@router.post("/v1/responses", summary="Create a response (Responses API subset)")
+@router.post("/v1/responses", summary="创建一次响应（Responses API 子集）")
 async def create_response(
     payload: ResponsesRequest,
     container: ContainerDep,

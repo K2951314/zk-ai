@@ -92,13 +92,13 @@ def open_console(*, path: str = "ui", port: int | None = None, token: str | None
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="open the gateway console")
-    parser.add_argument("--path", default="ui", help="console sub-path, e.g. ui or ui/agent")
-    parser.add_argument("--port", type=int, default=None, help="override the resolved port")
-    parser.add_argument("--token", default=None, help="admin token (default: read from .env)")
-    parser.add_argument("--wait", type=float, default=30.0, help="seconds to wait for the port")
+    parser = argparse.ArgumentParser(description="打开网关控制台页面")
+    parser.add_argument("--path", default="ui", help="控制台子路径，如 ui 或 ui/agent")
+    parser.add_argument("--port", type=int, default=None, help="覆盖自动解析出的端口")
+    parser.add_argument("--token", default=None, help="管理令牌（默认从 .env 读取）")
+    parser.add_argument("--wait", type=float, default=30.0, help="等待端口就绪的秒数")
     parser.add_argument("--detach", action="store_true",
-                        help="re-spawn hidden and return immediately (used by the .cmd)")
+                        help="隐式重新拉起本脚本并立即返回（供 .cmd 调用）")
     args = parser.parse_args(argv)
 
     if args.detach:
@@ -112,16 +112,16 @@ def main(argv: list[str] | None = None) -> int:
             child, cwd=str(_ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW, env={**os.environ},
         )
-        print("console will open in your browser once the gateway is ready")
+        print("网关就绪后会自动打开控制台页面")
         return 0
 
     if open_console(path=args.path, port=args.port, token=args.token, wait=args.wait):
-        print("opened the console")
+        print("控制台已打开")
         return 0
     print(
-        "the gateway did not answer - open http://127.0.0.1:"
-        f"{args.port or env_from_file('ZKAI_PORT', '8317')}/{args.path} manually, "
-        "or check data/gateway.log"
+        "网关迟迟没有响应——请手动打开 http://127.0.0.1:"
+        f"{args.port or env_from_file('ZKAI_PORT', '8317')}/{args.path}，"
+        "或查看 data/gateway.log 里的日志"
     )
     return 1
 
