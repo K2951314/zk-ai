@@ -80,6 +80,34 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   硬拦截未知模型并附可用清单（09-23 从警告升级为 400）；路由器的
   `ModelNotFoundError` 文案会带相近名（前缀优先 + difflib 兜底）。
   配置目录可用 `ZKAI_CODEX_HOME` 覆盖（多开用户 / 测试隔离），默认 `~/.codex`。
+- **`.env` 的值尾部混进 `\r` → 网关 bind 失败，报错却写成 `getaddrinfo failed`**
+  （2026-09-24 换机后实测，排查绕了远路）：那份 `.env` 的**每一行**换行都是
+  `\r\r\n`（多一个回车，共 115 行），于是 `ZKAI_HOST=0.0.0.0\r\r`。
+  `str.splitlines()` 只吃掉作行尾的那个 CR，**值里剩的一个 CR 会一路传下去**：
+  托盘进程环境 `ZKAI_HOST='0.0.0.0\r'` → uvicorn argv `--host '0.0.0.0\r'` →
+  `socket.bind((host, port))` 走 `getaddrinfo` 解析 → `OSError [Errno 11001]
+  getaddrinfo failed` → uvicorn `logger.error(exc)` + `sys.exit(3)`。
+  **别把这个 errno 当 DNS 问题**：Windows 上 11001 是「解析地址/服务失败」，
+  bind 解析 host 时抛的也是它。实测复现：`bind(('0.0.0.0\r', 8317))` 与
+  `bind(('8317', 8317))` 都是这个错，而 `bind(('0.0.0.0', 8317))` 正常。
+  **判定三连**（照顺序看，30 秒定案）：
+  ① 日志里**有没有 `Uvicorn running on http://...`**——它只在 bind 成功后才打印，
+     失败的那次永远没有；且报错紧跟在 `Application startup complete` 之后、
+     `Waiting for application shutdown` 之前的**同一秒**（DNS 故障不可能这么快）。
+  ② `python -c "raw=open('.env','rb').read(); print(raw.count(b'\r\r'), raw.count(b'\r\n'))"`
+     ——两个数相等就是全文件 `\r\r\n`，写个开头为 `\r\r\n` 的替换即可（改前先备份，
+     改后逐行比对确认内容零差异）。
+  ③ 值含不可见字符时直接读进程环境块（PEB，`ReadProcessMemory`）比猜快：
+     本机就是这么看到 `'0.0.0.0\r'` 的。
+  **别再被 `shadowed by pre-existing process environment` 警告带偏**：它点名
+  `ZKAI_HOST`/`ZKAI_PORT` 时，真相往往是**文件里的值带 `\r` 导致两边不等**，
+  不是「环境变量冲突」。`ZKAI_HOST`/`ZKAI_PORT` 在 HKCU/Machine 里查不到是**正常的**
+  （只有迁移脚本会写 `ZKAI_API_TOKEN`），别去删不存在的变量。现已拆成两条：
+  `malformed_env_names()` 报 ERROR 并指「去修文件」，`shadowed_env_names()` 只报真冲突。
+  `tray_launcher._env_or_default` 取值也已 `.strip()` 兜底。
+  **回归测试** `tests/test_config.py`（malformed 与真冲突互不误报）、
+  `tests/test_tray_launcher.py`（argv 里不许带控制字符，且要过 `getaddrinfo`）。
+  换机前值得先验一遍 `.env` 换行——现在启动日志会替你把关
 
 ## Agent 工作方式（2026-09-23，防半途而废）
 - **本机 shell 是 PowerShell，here-string 会把中文和转义写坏**：写含中文的临时脚本时
@@ -339,4 +367,24 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   双验证 / 备份时间戳防同秒覆盖 / 替换行尾注释保留 / 标量字段禁换行）+
   `_provision_chatgpt_env` 接住注册表 OSError；配 9 个对抗回归测试，
   变异抽查 6/6 被抓（详见当日日志）。
+
+- 2026-09-24（换机后网关起不来 → 定位到 `.env` 换行损坏）：新机双击后托盘转蓝、
+  8317 无监听，日志里 `Application startup complete` 之后紧跟
+  `ERROR: [Errno 11001] getaddrinfo failed` 然后 `Waiting for application shutdown`，
+  两次（23:09:47、23:13:58）逐字一样。**当时收到的诊断是「DNS 解析失败 + 环境变量被
+  顶掉」，两条都不对**——绕了一圈才见底：`.env` 整个文件 115 行全是 `\r\r\n`，
+  `ZKAI_HOST=0.0.0.0\r\r` 的值尾部带着 CR，被托盘原样传成 `--host '0.0.0.0\r'`，
+  死在 `socket.bind()`（细节与判定方法见「已知坑」新增那条）。修复：①`.env` 换行
+  归一为 `\r\n`（备份 + 逐行比对确认内容零差异）；②`_env_or_default` 对 os.environ
+  取值补 `.strip()`；③新增 `malformed_env_names()`，把「文件坏」与「真冲突」分开报
+  ——原来的 `shadowed by pre-existing process environment` 警告点名 `ZKAI_HOST`/
+  `ZKAI_PORT` 时会被读成「去删环境变量」，实际是文件的问题。测试 +6
+  （`test_config.py` 3 例、`test_tray_launcher.py` 3 例），门禁 ruff / mypy / **587 passed**；
+  真实启动验证：`--host 0.0.0.0 --port 8317` 干净、8317 监听、`/health` healthy、
+  `zk-auto → StepFun` 真实推理 200。**换机路径的教训**：迁移包里的 `.env` 可能在
+  源机保存时就写坏了，导入端要有校验（现在启动日志报 ERROR 并指文件）
+- 待办（2026-09-24 发现，未处理）：`MOONSHOT_API_KEY` 在 `.env` 里是空值，
+  `kimi-k3-moonshot` 恒为 DISABLED —— 它在 `zk-auto`/`zk-k3` 的故障转移链上
+  （`kimi-k3-sensenova` 之后），轮到必然失败，是个**死部署**：要么填 Key，
+  要么把 `models.yaml` 里 `kimi-k3-moonshot` / `kimi-k3-nvidia` 从别名链摘掉
 

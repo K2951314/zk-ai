@@ -206,10 +206,21 @@ class _ChildProcess:
 
 
 def _env_or_default(name: str, default: str) -> str:
-    """Environment first (set by the launcher or the OS), then .env, then default."""
+    """Environment first (set by the launcher or the OS), then .env, then default.
+
+    Values are stripped of *trailing* control characters before they travel into
+    uvicorn's argv. ``.env`` is CRLF, so a line that was written with an extra
+    carriage return yields a value like ``"0.0.0.0\\r"`` - and ``splitlines()``
+    only removes the CR that is the line terminator, never one inside the value.
+    That CR then reaches ``socket.bind()``, which resolves the host through
+    ``getaddrinfo`` and fails with ``[Errno 11001] getaddrinfo failed`` - a
+    message that reads like a DNS outage while the real fault is one stray byte
+    (2026-09-24: gateway died on bind right after "Application startup
+    complete", and the port never opened).
+    """
     value = os.environ.get(name)
     if value:
-        return value
+        return value.strip()
     env_file = _ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():

@@ -118,6 +118,53 @@ def test_env_or_default_uses_default(tmp_path: Path, monkeypatch) -> None:
     assert _env_or_default("ZKAI_TEST_Z", "fallback") == "fallback"
 
 
+def test_env_or_default_strips_control_chars_from_process_env(monkeypatch) -> None:
+    """A stray CR in the value must not survive into uvicorn's argv.
+
+    2026-09-24: a ``.env`` whose lines ended in ``\\r\\r`` put ``"0.0.0.0\\r"``
+    in the tray's environment, so the gateway was launched with
+    ``--host '0.0.0.0\\r'``. ``socket.bind()`` resolves that through
+    ``getaddrinfo`` and dies with ``[Errno 11001] getaddrinfo failed`` - logged
+    right after "Application startup complete", so it read as a DNS failure
+    while the port simply never opened.
+    """
+    monkeypatch.setenv("ZKAI_TEST_CR", "0.0.0.0\r")
+    assert _env_or_default("ZKAI_TEST_CR", "fallback") == "0.0.0.0"
+
+
+def test_env_or_default_strips_control_chars_from_dotenv(tmp_path: Path, monkeypatch) -> None:
+    """Same guard for the ``.env`` path: CRLF + an extra CR inside the value.
+
+    ``splitlines()`` only eats the CR that terminates the line, so the value
+    itself arrives with the leftover byte still attached.
+    """
+    monkeypatch.delenv("ZKAI_TEST_CR2", raising=False)
+    (tmp_path / ".env").write_bytes(b"ZKAI_TEST_CR2=8317\r\r\n")
+    from scripts import tray_launcher
+    monkeypatch.setattr(tray_launcher, "_ROOT", tmp_path)
+    assert _env_or_default("ZKAI_TEST_CR2", "fallback") == "8317"
+
+
+def test_launch_args_never_hands_a_control_char_to_uvicorn(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end guard: the argv built for the gateway must be bind-safe.
+
+    ``--host``/``--port`` go straight to ``socket.bind()``; anything with a
+    trailing control character makes the bind fail with an errno that looks
+    like a DNS problem.
+    """
+    from scripts import tray_launcher
+    monkeypatch.setattr(tray_launcher, "_ROOT", tmp_path)
+    monkeypatch.setenv("ZKAI_HOST", "0.0.0.0\r")
+    monkeypatch.setenv("ZKAI_PORT", "8317\r")
+    args = _launch_args("gateway", [], Path("C:/fake/pythonw.exe"))
+    host, port = args[args.index("--host") + 1], args[args.index("--port") + 1]
+    assert host == "0.0.0.0"
+    assert port == "8317"
+    # the values uvicorn will actually bind must resolve
+    import socket
+    socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+
+
 def test_icon_set_colors() -> None:
     green = _icon_set(_GREEN)
     blue = _icon_set(_BLUE)

@@ -569,6 +569,20 @@ def load_dotenv_file(path: Path | str | None = None) -> bool:
             target = Path(".env")
             if not target.is_file():
                 return False
+    malformed = malformed_env_names(target)
+    if malformed:
+        # Reported first and separately: unlike a genuine shadow, the fix is to
+        # repair the file, and the symptom shows up far away (a bind failure
+        # logged as a DNS error), so the operator needs the pointer.
+        logger.error(
+            "%d variable(s) in %s carry stray whitespace/control characters in "
+            "their value (e.g. a line ending in \\r\\r): %s - processes reading "
+            "them straight from the environment get a value like '0.0.0.0\\r', "
+            "which fails deep in the stack (socket bind reports it as "
+            "'getaddrinfo failed'). Repair the file: rewrite those lines with "
+            "plain CRLF endings",
+            len(malformed), target, ", ".join(sorted(malformed)[:20]),
+        )
     shadowed = shadowed_env_names(target)
     if shadowed:
         logger.warning(
@@ -585,7 +599,18 @@ def load_dotenv_file(path: Path | str | None = None) -> bool:
 
 def shadowed_env_names(path: Path | str = ".env") -> list[str]:
     """``.env`` names whose file value is being ignored (process env already has
-    a *different* value - with ``override=False`` the process value silently wins)."""
+    a *different* value - with ``override=False`` the process value silently wins).
+
+    A value that differs from the file only by *surrounding whitespace or control
+    characters* is not a real conflict - it is a corrupted ``.env``. Those lines
+    end up here because ``dotenv_values()`` strips them from the file value while
+    ``os.environ`` keeps them, and the fallout is severe: a line written as
+    ``ZKAI_HOST=0.0.0.0\\r\\r`` puts ``"0.0.0.0\\r"`` into the process (and, via
+    the tray, into uvicorn's argv), where ``socket.bind()`` resolves the host
+    through ``getaddrinfo`` and dies with ``[Errno 11001] getaddrinfo failed`` -
+    a message that reads as a DNS outage. So the two cases are reported
+    separately: :func:`malformed_env_names` names the fixable ones.
+    """
     target = Path(path)
     if not target.is_file():
         return []
@@ -597,7 +622,29 @@ def shadowed_env_names(path: Path | str = ".env") -> list[str]:
         name
         for name, value in file_values.items()
         if value and name in os.environ and os.environ[name] != value
+        and name not in malformed_env_names(target)
     ]
+
+
+def malformed_env_names(path: Path | str = ".env") -> list[str]:
+    """``.env`` names whose *process* value differs only by stripped characters.
+
+    These are not shadowing conflicts to resolve by unsetting an OS variable -
+    the file's own bytes carry the junk, so the fix is to repair the file.
+    """
+    target = Path(path)
+    if not target.is_file():
+        return []
+    try:
+        file_values = dotenv_values(target)
+    except Exception:  # pragma: no cover - malformed .env
+        return []
+    names: list[str] = []
+    for name, value in file_values.items():
+        current = os.environ.get(name)
+        if current and value and current != value and current.strip() == value:
+            names.append(name)
+    return names
 
 
 def load_app_config(settings: Settings | None = None) -> AppConfig:

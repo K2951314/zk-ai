@@ -14,6 +14,7 @@ from app.core.config import (
     interpolate_env,
     load_app_config,
     load_dotenv_file,
+    malformed_env_names,
     shadowed_env_names,
 )
 
@@ -61,6 +62,46 @@ def test_shadowed_env_names_flags_only_differing_values(tmp_path, monkeypatch) -
     monkeypatch.delenv("ZKAI_TEST_ABSENT_KEY", raising=False)
 
     assert shadowed_env_names(env_file) == ["ZKAI_TEST_SHADOW_KEY"]
+
+
+def test_malformed_env_names_flags_values_with_stray_control_chars(tmp_path, monkeypatch) -> None:
+    """``.env`` lines ending in an extra CR are a file bug, not a shadow conflict.
+
+    2026-09-24: ``ZKAI_HOST=0.0.0.0\\r\\r`` put ``"0.0.0.0\\r"`` into the process
+    environment. The tray passed it to uvicorn as ``--host``, ``socket.bind()``
+    resolved it via ``getaddrinfo`` and the gateway died with
+    ``[Errno 11001] getaddrinfo failed`` - read as a DNS outage.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"ZKAI_TEST_CR_HOST=0.0.0.0\r\r\nZKAI_TEST_CR_CLEAN=ok\r\n")
+    monkeypatch.setenv("ZKAI_TEST_CR_HOST", "0.0.0.0\r")
+    monkeypatch.setenv("ZKAI_TEST_CR_CLEAN", "ok")
+
+    assert malformed_env_names(env_file) == ["ZKAI_TEST_CR_HOST"]
+
+
+def test_malformed_name_is_not_reported_as_a_shadow(tmp_path, monkeypatch) -> None:
+    """The corrupted entry must not send the operator off unsetting OS variables.
+
+    Reporting it as "shadowed by process environment" is what made this failure
+    look like an environment-variable conflict; the fix is in the file.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"ZKAI_TEST_CR_BOTH=8317\r\r\n")
+    monkeypatch.setenv("ZKAI_TEST_CR_BOTH", "8317\r")
+
+    assert malformed_env_names(env_file) == ["ZKAI_TEST_CR_BOTH"]
+    assert shadowed_env_names(env_file) == []
+
+
+def test_genuine_shadow_is_still_reported(tmp_path, monkeypatch) -> None:
+    """A real conflict (different value, not just stray whitespace) is untouched."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("ZKAI_TEST_REAL=from-dotenv\n", encoding="utf-8")
+    monkeypatch.setenv("ZKAI_TEST_REAL", "totally-different")
+
+    assert malformed_env_names(env_file) == []
+    assert shadowed_env_names(env_file) == ["ZKAI_TEST_REAL"]
 
 
 # --------------------------------------------------------------------------- #
