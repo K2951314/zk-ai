@@ -333,6 +333,23 @@
   .attention .att-msg { flex: 1; min-width: 220px; }
   .attention .att-ico { flex: none; }
   .attention .empty { font-size: 12.5px; color: var(--text-2); }
+  .attention.is-warn { border-color: var(--warn-border); border-left-color: var(--warn); background: var(--warn-soft); }
+
+  /* ---------- 配置表单（消耗器页） ---------- */
+  .cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 14px; }
+  .cfg-grid .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-2); }
+  .cfg-grid .field input, .cfg-grid .field textarea {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: var(--r-sm); padding: 7px 9px; resize: vertical;
+  }
+  .cfg-grid .field input:focus, .cfg-grid .field textarea:focus { outline: none; border-color: var(--accent); }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-2); background: var(--panel-2);
+  }
+  .tag.is-ok { color: var(--ok); border-color: var(--ok-border, var(--border)); background: var(--ok-soft); }
+  .tag.is-warn { color: var(--warn); border-color: var(--warn-border, var(--border)); background: var(--warn-soft); }
+  .tag.is-err { color: var(--err); border-color: var(--err-border, var(--border)); background: var(--err-soft); }
 
   /* ---------- 抽屉 ---------- */
   #drawer {
@@ -481,6 +498,7 @@
       <button class="nav-item" data-view="usage"><span class="ico">📈</span>用量统计</button>
       <div class="nav-label">配置</div>
       <button class="nav-item" data-view="models"><span class="ico">🧩</span>模型与别名</button>
+      <button class="nav-item" data-view="burner"><span class="ico">🔥</span>积分消耗器</button>
     </nav>
     <div class="sidebar-foot">
       <div>版本 <span class="ver" id="side-version">-</span></div>
@@ -513,6 +531,7 @@
       <section class="view" id="view-requests"></section>
       <section class="view" id="view-usage"></section>
       <section class="view" id="view-models"></section>
+      <section class="view" id="view-burner"></section>
     </main>
   </div>
 </div>
@@ -630,7 +649,7 @@ async function api(path, opts = {}) {
 /* ================= 视图注册 ================= */
 const LOADERS = {
   overview: loadOverview, pool: loadPool, requests: loadRequests,
-  usage: loadUsage, models: loadModels,
+  usage: loadUsage, models: loadModels, burner: loadBurner,
 };
 function switchView(name) {
   state.view = name;
@@ -2206,3 +2225,132 @@ switchView(initialView);
 </script>
 </body>
 </html>
+
+
+/* ================= 积分消耗器 ================= */
+/* 独立进程（scripts/burn_sensenova.py）烧商汤 Flash-Lite 专属池积分，1:1 折算成
+   kimi-k3 可用积分。它不经网关，所以这里单独一页：左边是每账号的窗口账
+   （什么时候该停、什么时候满血），右边是 config/burner.yaml 的可调参数。
+   改配置只写 YAML，重启消耗器才生效——页面里说清楚，避免以为改了立刻见效。 */
+const BURNER_LABELS = {
+  model: "模型（只能是 Flash-lite）",
+  concurrency: "全局并发上限",
+  per_account_start: "单账号起始并发",
+  per_account_max: "单账号并发上限",
+  max_tokens: "单次输出上限",
+  filler_chars: "输入填充字符数",
+  rate_in: "输入费率（积分/百万token）",
+  rate_out: "输出费率（积分/百万token）",
+  safety_margin: "安全系数",
+  window_credits: "5h 窗口积分上限",
+  weekly_credits: "周积分上限",
+  pool_total_credits: "累计绝对上限（0=关）",
+  quota_park_hours: "额度耗尽停靠时长（小时）",
+  only: "只烧这些 Key",
+  anchors: "5h 窗口锚点",
+  week_anchors: "周窗口锚点（按账号）",
+  week_anchor: "全局周锚点（回落值）",
+  account_groups: "同账号 Key 分组",
+  cooldown_base: "429 首次冷却（秒）",
+  cooldown_max: "429 冷却上限（秒）",
+  summary_interval: "汇总打印间隔（秒）",
+  max_seconds: "最长运行秒数（0=常驻）",
+};
+const BURNER_NUM = new Set(["concurrency","per_account_start","per_account_max","max_tokens",
+  "filler_chars","rate_in","rate_out","safety_margin","window_credits","weekly_credits",
+  "pool_total_credits","quota_park_hours","cooldown_base","cooldown_max",
+  "summary_interval","max_seconds"]);
+const BURNER_WIDE = new Set(["only","anchors","week_anchors","account_groups"]);
+
+function burnerField(key, value) {
+  const label = BURNER_LABELS[key] || key;
+  if (BURNER_WIDE.has(key)) {
+    return `<label class="field" style="grid-column:1/-1"><span>${esc(label)}</span>
+      <textarea id="bf-${key}" rows="2">${esc(value ?? "")}</textarea></label>`;
+  }
+  const type = BURNER_NUM.has(key) ? "number" : "text";
+  const step = BURNER_NUM.has(key) ? "any" : null;
+  return `<label class="field"><span>${esc(label)}</span>
+    <input id="bf-${key}" type="${type}" ${step ? `step="${step}"` : ""} value="${esc(value ?? "")}"></label>`;
+}
+
+async function loadBurner() {
+  const d = await api("/admin/burner");
+  const L = d.ledger || {};
+  const cost = d.request_cost || 0;
+  const kpi = (label, value, sub, tone) => `<div class="kpi${tone ? " is-" + tone : ""}">
+    <div class="k-label">${esc(label)}</div><div class="k-value">${value}</div>
+    <div class="k-sub">${esc(sub || "")}</div></div>`;
+  const warn = (d.warnings || []).map(w =>
+    `<div class="att-row is-warn"><span class="att-ico">⚠️</span><span>${esc(w)}</span></div>`).join("");
+  const rows = (d.accounts || []).map(a => {
+    const pct5 = a.cap_5h ? Math.min(100, a.burned_5h / a.cap_5h * 100) : 0;
+    const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
+    const b5 = a.next_5h_boundary ? new Date(a.next_5h_boundary * 1000).toLocaleString("zh-CN", {hour12:false}) : "—";
+    const bW = a.next_week_boundary ? new Date(a.next_week_boundary * 1000).toLocaleString("zh-CN", {hour12:false}) : "—";
+    const tag = a.absolute_capped ? `<span class="tag is-err">已达绝对上限</span>`
+      : a.parked ? `<span class="tag is-warn">停靠中</span>`
+      : a.anchored_5h ? `<span class="tag is-ok">锚点</span>`
+      : `<span class="tag">滚动</span>`;
+    return `<tr>
+      <td><b>${esc(a.name)}</b><div class="muted small">${tag}</div></td>
+      <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pct5 * 1.2)}px"><i></i></div>
+        <span class="small">${num(Math.round(a.burned_5h))}/${num(Math.round(a.cap_5h))}</span></div>
+        <div class="muted small">余 ${num(Math.round(a.left_5h))} ≈ ${num(a.requests_left_5h)} 条</div></td>
+      <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pctW * 1.2)}px"><i></i></div>
+        <span class="small">${num(Math.round(a.burned_week))}/${num(Math.round(a.cap_week))}</span></div>
+        <div class="muted small">余 ${num(Math.round(a.left_week))}</div></td>
+      <td class="small">${b5}<div class="muted">周 ${bW}</div></td>
+      <td class="small">目标 ${num(a.target)}<div class="muted">成功 ${num(a.ok)} · 429 ${num(a.rate_limited)}</div></td>
+      <td class="small">${fmtK(a.tokens_in)} / ${fmtK(a.tokens_out)}</td></tr>`;
+  }).join("");
+  const fields = (d.form_fields || []).map(k => burnerField(k, (d.config || {})[k])).join("");
+  $("#view-burner").innerHTML = `
+    <div class="view-head">
+      <h2>积分消耗器</h2>
+      <span class="desc">后台烧商汤 Flash-Lite 专属池积分（1:1 折算成 kimi-k3 可用积分）。
+        配置在 <code>config/burner.yaml</code>，改完<strong>重启消耗器</strong>才生效</span>
+    </div>
+    ${warn ? `<div class="attention">${warn}</div>` : ""}
+    <div class="grid kpis">
+      ${kpi("单条请求", cost + " 积分", "按当前填充量与输出上限估算")}
+      ${kpi("费率", `入${num(L.rate_in)} / 出${num(L.rate_out)}`, "积分每百万 token；账本口径")}
+      ${kpi("安全系数", L.safety_margin, "熔断线 = 官方上限 × 该系数")}
+      ${kpi("账号数", num((d.accounts || []).length), `账本更新于 ${esc(L.saved_at || "—")}`)}
+      ${kpi("目标池", d.flash_lite_ok ? "Flash-Lite 专属池" : "⚠ 非 Flash-Lite",
+            d.flash_lite_ok ? "只有它扣专属池、能折算回充" : "会直接扣 K3 的通用池积分",
+            d.flash_lite_ok ? "ok" : "err")}
+    </div>
+    <h4 class="sec">每账号窗口账</h4>
+    <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 窗口</th><th>本周</th>
+      <th>下一边界</th><th>并发 / 结果</th><th>Tokens 入/出</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
+    <h4 class="sec">配置</h4>
+    <div class="card"><div class="cfg-grid">${fields}</div>
+      <div class="modal-actions">
+        <button id="bf-save" class="primary">保存并重启</button>
+        <span class="muted small">写入 config/burner.yaml（保留注释），并让托盘重启消耗器使配置生效（约 3 秒）</span>
+      </div></div>`;
+  $("#bf-save").onclick = saveBurnerConfig;
+}
+
+async function saveBurnerConfig() {
+  const patch = {};
+  document.querySelectorAll("#view-burner [id^='bf-']").forEach(el => {
+    const key = el.id.slice(3);
+    let v = el.value;
+    if (BURNER_NUM.has(key)) { v = v.trim() === "" ? 0 : Number(v); if (Number.isNaN(v)) return toast(key + " 不是数字", "err"); }
+    patch[key] = v;
+  });
+  const btn = $("#bf-save");
+  btn.disabled = true; btn.textContent = "保存中…";
+  try {
+    // restart=true：消耗器只在自己启动时读配置，不重启这次保存就不生效。
+    // 重启由托盘心跳异步完成（约 3s），这里只承诺「已请求」。
+    await api("/admin/burner/config?restart=true", { method: "PUT", body: JSON.stringify(patch) });
+    toast("已保存，正在重启消耗器（约 3 秒后生效）", "ok");
+    await loadBurner();
+    setTimeout(loadBurner, 4000);
+  } catch (e) { toast(e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = "保存并重启"; }
+}

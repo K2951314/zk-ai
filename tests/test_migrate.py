@@ -56,6 +56,8 @@ def _populate(root: Path, *, with_db: bool = True) -> None:
         con.execute("insert into t (v) values ('hello')")
         con.commit()
         con.close()
+    (root / "config" / "burner.yaml").write_text(
+        "model: sensenova-6.8-flash-lite\nrate_out: 2500\n", encoding="utf-8")
     (root / "data" / "burn_state.json").write_text("{}\n", encoding="utf-8")
     (root / "data" / "rate_limits.json").write_text("{}\n", encoding="utf-8")
 
@@ -76,6 +78,7 @@ def test_export_contains_everything(tmp_path: Path) -> None:
         "config/providers.yaml",
         "config/models.yaml",
         "config/chatgpt.yaml",
+        "config/burner.yaml",
         "data/zkai.db",
         "data/burn_state.json",
         "data/rate_limits.json",
@@ -548,3 +551,36 @@ def test_provision_chatgpt_env_warns_when_token_missing(tmp_path, isolated_codex
     assert "Missing environment variable: ZKAI_API_TOKEN" in out
     assert "setx ZKAI_API_TOKEN" in out
 
+
+# --------------------------------------------------------------------------- #
+# 积分消耗器配置必须跟着换机
+# --------------------------------------------------------------------------- #
+def test_burner_config_travels_with_the_package(tmp_path: Path) -> None:
+    """烧哪些 Key、每账号锚点、费率都在 config/burner.yaml 里。不带它，新机的
+    消耗器只会用代码默认值——费率退回低估 7 倍的旧默认，锚点全丢，专属池被烧穿
+    只是时间问题。"""
+    _populate(tmp_path)
+    out = tmp_path / "pkg.zip"
+    migrate.export_package(out, "pw", root=tmp_path)
+
+    target = tmp_path / "new-machine"
+    target.mkdir()
+    restored, _backup = migrate.import_package(out, "pw", root=target)
+
+    burner = target / "config" / "burner.yaml"
+    assert burner.exists()
+    assert "sensenova-6.8-flash-lite" in burner.read_text(encoding="utf-8")
+    assert "config/burner.yaml" in [r.replace("\\", "/") for r in restored]
+
+
+def test_import_asks_the_tray_to_restart_the_burner(tmp_path: Path) -> None:
+    """消耗器只在启动时读配置：换了 burner.yaml / burn_state.json 之后，运行中的
+    实例还在用旧值。导入必须留一个重启请求，托盘心跳看到才会重启。"""
+    _populate(tmp_path)
+    out = tmp_path / "pkg.zip"
+    migrate.export_package(out, "pw", root=tmp_path)
+
+    target = tmp_path / "new-machine"
+    target.mkdir()
+    migrate.import_package(out, "pw", root=target)
+    assert (target / "data" / "burner_restart.request").exists()

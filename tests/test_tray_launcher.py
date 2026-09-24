@@ -228,3 +228,60 @@ def test_restart_child_does_not_block_the_menu(monkeypatch) -> None:
             break
         time.sleep(0.05)
     assert refreshed, "the icon is refreshed once the new child is up"
+
+
+# --------------------------------------------------------------------------- #
+# 控制台「保存并重启」：信箱文件 → 托盘重启 burner
+# --------------------------------------------------------------------------- #
+class _CountingChild:
+    """只关心 start() 被调了几次的心跳替身。"""
+
+    def __init__(self) -> None:
+        self.starts = 0
+
+    def start(self) -> None:
+        self.starts += 1
+
+    def alive(self) -> bool:
+        return True
+
+    def log_age(self) -> float:
+        return 0.0
+
+
+def _tray(mode: str) -> TrayLauncher:
+    """Build a launcher without touching pystray's real icon."""
+    tray = object.__new__(TrayLauncher)
+    tray._mode = mode
+    tray._running = True
+    tray._child = _CountingChild()
+    return tray
+
+
+def test_restart_request_restarts_the_burner(tmp_path: Path, monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    req = tmp_path / "burner_restart.request"
+    monkeypatch.setattr(tray_launcher, "RESTART_REQUEST", req)
+    tray = _tray("burner")
+
+    assert tray._consume_restart_request() is False, "没有请求就不该重启"
+    assert tray._child.starts == 0
+
+    req.write_text("2026-09-24 13:00:00\n", encoding="utf-8")
+    assert tray._consume_restart_request() is True
+    assert tray._child.starts == 1
+    assert not req.exists(), "请求必须被消费掉，否则每次心跳都重启一次"
+
+
+def test_restart_request_is_ignored_in_gateway_mode(tmp_path: Path, monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    req = tmp_path / "burner_restart.request"
+    req.write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(tray_launcher, "RESTART_REQUEST", req)
+    tray = _tray("gateway")
+
+    # 心跳只在 burner 模式检查信箱；网关模式留着文件不动（可能属于另一台机器）
+    assert tray._child.starts == 0
+    assert req.exists()

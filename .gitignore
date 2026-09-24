@@ -10,6 +10,7 @@ imports_backup/
 config/config.yaml
 config/providers.yaml
 config/models.yaml
+config/burner.yaml
 config/*.local.yaml
 
 # --- runtime data -----------------------------------------------------------

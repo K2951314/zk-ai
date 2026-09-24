@@ -32,12 +32,12 @@
   - 在飞请求的成本先记账（dispatch 时按预估扣，完成时按实扣修正），
     高并发下也不会超订阅 5h 窗口
 
-费率（2026-09-12 按控制台实扣校准过一次）：
-  默认 入500 / 出1500 积分/百万token。用户实测一轮：估 12538（旧默认 3000/9000）
-  → 实扣 <1000，反推实际费率 ≈ 入120~240 / 出360~720。新默认保留 ~2 倍保守
-  边际（宁可多估：预算按估算熔断，估算偏高=更安全）。要贴上限烧就把估算校准到
-  实扣：跑一段后看控制台「积分消耗明细」实扣 Z、日志汇总的 入X/出Y，
-  r_out ≈ Z×1e6/(Y + X/3)，r_in ≈ r_out/3，然后 --rate-in/--rate-out 传入。
+费率（2026-09-24 三次控制台读数交叉校准，覆盖 09-12 的旧结论）：
+  旧默认 入120 / 出360 **偏低约 7 倍**，是 2026-09 「烧穿专属池」事故的根因之一
+  （熔断线按错误费率推算，物理上永远触不到）。现默认 入830 / 出2500 积分/百万token：
+  用控制台「本周剩余」的两次读数差反推，两个账号各自算出 2516 / 2441（相差 3%），
+  按 r_in = r_out/3 摊后取整。费率写进 data/burn_state.json，重启后自动恢复。
+  注意：网关侧的 flash-lite 流量也扣同一个池，校准前要确认它当时没有在跑。
 
 窗口刷新模型（2026-09-13 与 zk-k3 讨论定稿）：
   - 控制台显示每池的「重置时间」且每账号不同。两种可能：a) 固定锚点窗口
@@ -73,13 +73,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+import yaml
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LOG = ROOT / "data" / "burn_sensenova.log"
 STATE_FILE = ROOT / "data" / "burn_state.json"
+# 本地配置入口（gitignore，可提交模板 config/burner.example.yaml）。
+# 存在时其中的键会作为默认值，命令行显式传入的仍然优先——这样「双击启动」
+# 和「临时加参数」两条路都能走，控制台/锚点改动不用再记命令行。
+CONFIG_FILE = ROOT / "config" / "burner.yaml"
 
 FILLER = "下面是一段用于接口压测的填充材料，请直接忽略它的内容，不要评论它。"
+
+# 只有 Flash-lite 家族的模型扣「专属池周期积分」，而专属池才是唯一能 1:1 折算
+# 回充成 K3 可用积分的池。换成别的模型（kimi-k3 / glm / deepseek 等）会直接扣
+# 通用池——那是 kimi-k3 的口粮，烧了纯亏，且 API 零信号、事后无从发现。
+# 所以启动时硬校验：模型名不含 "flash-lite" 就拒绝跑。
+FLASH_LITE_REQUIRED = "flash-lite"
+
+
+def is_flash_lite(model: str) -> bool:
+    return FLASH_LITE_REQUIRED in model.lower()
 
 # 额度耗尽的强特征词；命中且不带「频率/限流」字样才长停靠，避免把普通 429 判成额度用尽
 QUOTA_STRONG = ("quota", "余额", "欠费", "arrears", "insufficient", "exhaust",
@@ -113,6 +128,19 @@ class AccountState:
     # 固定锚点窗口（可选）：anchor_ts 是控制台「重置时间」对应的 epoch，
     # 边界 = anchor_ts + k*5h。=0 表示未配置，走滚动窗口模型（保守、安全）。
     anchor_ts: float = 0.0
+    # 按账号的周锚点（可选）：控制台「周刷新」对应的 epoch。0 = 用全局
+    # --week-anchor。各账号周刷新时刻不同（实测 = 创建时刻 + N×7天），
+    # 全局单值会让早刷新的账号被少算、晚刷新的被多算。
+    week_anchor_ts: float = 0.0
+
+    def week_start(self, now: float, fallback: float = 0.0) -> float:
+        """本周固定窗口起点：优先本账号的 week_anchor_ts，否则用全局锚点。
+        两者都为 0 → 返回 0，调用方退回滚动 7 天记账（逃生口）。"""
+        base = self.week_anchor_ts or fallback
+        if not base:
+            return 0.0
+        k = int((now - base) // WIN_WEEK)
+        return base + k * WIN_WEEK
 
     def window_start(self, now: float) -> float:
         """当前 5h 窗口的起点（仅锚点模式有意义）。"""
@@ -322,6 +350,119 @@ def parse_week_anchor(spec: str) -> float:
     return ts
 
 
+#: 配置键 → argparse dest 的映射。值类型不同（bool/int/float/str），
+#: 故不自动推断，逐键声明，写错类型会在这里炸而不是烧到一半才炸。
+_CONFIG_KEYS: dict[str, type] = {
+    "model": str,
+    "base_url": str,
+    "max_seconds": float,
+    "once": bool,
+    "concurrency": int,
+    "per_account_max": int,
+    "per_account_start": int,
+    "max_tokens": int,
+    "filler_chars": int,
+    "window_credits": float,
+    "weekly_credits": float,
+    "safety_margin": float,
+    "week_anchor": str,
+    "week_anchors": str,
+    "pool_total_credits": float,
+    "rate_in": float,
+    "rate_out": float,
+    "quota_park_hours": float,
+    "account_groups": str,
+    "anchors": str,
+    "cooldown_base": float,
+    "cooldown_max": float,
+    "connect_timeout": float,
+    "read_timeout": float,
+    "summary_interval": float,
+    "only": str,
+}
+
+
+def load_config(path: Path | None = None) -> dict:
+    """读 config/burner.yaml（gitignore 的本地配置入口）→ argparse dest 字典。
+
+    文件不存在或读不了 → {}（不阻断启动：命令行与 .env 仍然有效）。
+    未知键告警后忽略；类型不符直接抛错——宁可启动失败，也不要在
+    烧到一半时才发现「安全系数被写成了字符串」。
+    """
+    cfg_path = path or CONFIG_FILE
+    if not cfg_path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"ERROR: 读不了 {cfg_path}：{exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    if not isinstance(raw, dict):
+        print(f"ERROR: {cfg_path} 顶层必须是映射（键: 值）", file=sys.stderr)
+        raise SystemExit(2)
+    out: dict = {}
+    for key, value in raw.items():
+        dest = str(key).replace("-", "_")
+        want = _CONFIG_KEYS.get(dest)
+        if want is None:
+            print(f"WARN: {cfg_path} 里的 {key!r} 不是已知参数，已忽略", file=sys.stderr)
+            continue
+        if isinstance(value, bool) and want is not bool:
+            print(f"ERROR: {cfg_path} 的 {key} 应是 {want.__name__}，"
+                  f"却给了布尔值 {value!r}", file=sys.stderr)
+            raise SystemExit(2)
+        if not isinstance(value, want):
+            # int 接受 float 的整数值（YAML 里 60000 也常常被写成 6e4）
+            if want is float and isinstance(value, int):
+                value = float(value)
+            else:
+                print(f"ERROR: {cfg_path} 的 {key} 应是 {want.__name__}，"
+                      f"却是 {type(value).__name__}", file=sys.stderr)
+                raise SystemExit(2)
+        out[dest] = value
+    return out
+
+
+def parse_week_anchors(spec: str) -> dict[int, float]:
+    """解析 --week-anchors "2=Wed 18:10;10=Thu 09:36" → {Key序号: epoch}。
+
+    时刻取「最近一个（含今天）该星期几的 HH:MM」，已过则再往前推一周
+    （与 parse_week_anchor 同一套确定性规则）。各账号的周刷新时刻不同
+    （实测 = 账号创建时刻 + N×7天），全局单值必然错配，故按账号给。
+    """
+    out: dict[int, float] = {}
+    for item in filter(None, (s.strip() for s in spec.split(";"))):
+        num_s, sep, when = item.partition("=")
+        num_s, when = num_s.strip(), when.strip()
+        if not sep or not num_s.isdigit():
+            continue
+        try:
+            out[int(num_s)] = parse_week_anchor(when)
+        except ValueError:
+            continue
+    return out
+
+
+def apply_week_anchors(spec: str, keys: list[KeyState], log) -> int:
+    """把 --week-anchors 应用到对应账号（数字 = Key 序号，同 apply_anchors）。"""
+    if not spec.strip():
+        return 0
+    mapping = parse_week_anchors(spec)
+    seen: set[int] = set()
+    for idx, ts in sorted(mapping.items()):
+        names = ["SENSENOVA_API_KEY"] if idx == 1 else [f"SENSENOVA_API_KEY_{idx:02d}"]
+        target = next((k.account for k in keys if k.name in names), None)
+        if target is None:
+            log(f"周锚点项 {idx!r} 没有匹配到已加载的 Key，已跳过", "WARN")
+            continue
+        if target.week_anchor_ts and target.week_anchor_ts != ts:
+            log(f"账号 {target.name} 已有周锚点，保留先出现的", "WARN")
+            continue
+        target.week_anchor_ts = ts
+        seen.add(id(target))
+    return len(seen)
+
+
 def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
     """把 "1=03:30;3=07:15" 形式的窗口重置时刻应用到对应账号。
 
@@ -423,7 +564,7 @@ class Burner:
             return False
         if self.cap5h <= 0 and self.capweek <= 0:
             return True  # 预算显式关闭（危险，启动时已大声警告）
-        ws = self.week_start(now)
+        ws = acct.week_start(now, self.week_anchor_ts)
         avail = acct.available(now, self.cap5h, self.capweek, ws)
         if avail >= cost:
             return True
@@ -444,11 +585,18 @@ class Burner:
             "accounts": {a.name: {"events": [[ts, c] for ts, c in a.events],
                                   "credits_total": a.credits_total,
                                   "target": a.target,
-                                  "anchor_ts": a.anchor_ts}
+                                  "anchor_ts": a.anchor_ts,
+                                  "week_anchor_ts": a.week_anchor_ts}
                          for a in self.accounts},
             "keys": {k.name: {"ok": k.ok, "fail": k.fail, "rate_limited": k.rate_limited,
                               "tokens_in": k.tokens_in, "tokens_out": k.tokens_out}
                      for k in self.keys},
+            # 费率与安全系数必须一起落盘：_save_rates_to_state 先写、本函数后写，
+            # 早先的整体覆盖把这两个键冲掉 → 重启后校准丢失、退回默认费率
+            # （2026-09-24 实测踩到：真实费率比旧默认高近 7 倍都没能记住）。
+            "rate_in": self.args.rate_in,
+            "rate_out": self.args.rate_out,
+            "safety_margin": self.args.safety_margin,
         }
         with contextlib.suppress(OSError):
             tmp = self.state_file.with_suffix(".tmp")
@@ -478,6 +626,8 @@ class Burner:
             # 锚点：CLI 传入的优先；未传时恢复上次持久化的
             if acct.anchor_ts == 0:
                 acct.anchor_ts = float(blob.get("anchor_ts") or 0)
+            if acct.week_anchor_ts == 0:
+                acct.week_anchor_ts = float(blob.get("week_anchor_ts") or 0)
             loaded = True
         by_key = {k.name: k for k in self.keys}
         for name, blob in data.get("keys", {}).items():
@@ -798,7 +948,8 @@ class Burner:
             now = time.time()
             parked = sum(1 for a in self.accounts if now < a.parked_until)
             inflight = sum(a.inflight for a in self.accounts)
-            week_burned = sum(a.burned_since(self.week_start(now)) for a in self.accounts)
+            week_burned = sum(a.burned_since(a.week_start(now, self.week_anchor_ts))
+                              for a in self.accounts)
             self.log(
                 f"汇总 {elapsed / 3600:.2f}h | 累计 {htokens(self.total.tokens_in)}入"
                 f" {htokens(self.total.tokens_out)}出 ≈{self.total.credits:.0f}积分"
@@ -906,15 +1057,18 @@ class Burner:
                           + self.total.tokens_out - self.base_out) / elapsed
             self.log(f"本段平均速率 {htokens(total_rate)} tok/s（含限流/停靠等待）")
         now = time.time()
-        ws = self.week_start(now)
         for acct in self.accounts:
+            ws = acct.week_start(now, self.week_anchor_ts)
             tag = ""
             if now < acct.parked_until:
                 tag = f"停靠至 {time.strftime('%m-%d %H:%M', time.localtime(acct.parked_until))}"
                 if acct.park_reason:
                     tag += f"（{acct.park_reason}）"
             if acct.anchor_ts:
-                tag += f" 锚点下边界 {time.strftime('%m-%d %H:%M', time.localtime(acct.next_boundary(now)))}"
+                tag += f" 5h边界 {time.strftime('%m-%d %H:%M', time.localtime(acct.next_boundary(now)))}"
+            if ws:
+                tag += (f" 周边界 {time.strftime('%m-%d %H:%M', time.localtime(ws + WIN_WEEK))}"
+                        f"{'(按账号)' if acct.week_anchor_ts else ''}")
             self.log(
                 f"  账号 {acct.name:<28} 5h窗口≈{acct.burned(now, WIN_5H):.0f}积分"
                 f" 本周(固定)≈{acct.burned_since(ws):.0f}积分 累计≈{acct.credits_total:.0f}积分"
@@ -937,80 +1091,103 @@ class Burner:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    # config/burner.yaml 的值作为默认值，命令行显式传入的优先——改配置不用
+    # 记命令行，临时加参数也不受影响。用法里 --help 显示的是代码默认值，
+    # 实际生效值以启动日志的「配置来源」为准。
+    cfg = load_config()
     p = argparse.ArgumentParser(
         description="持续、多账号并行消耗商汤 sensenova-6.8-flash-lite 的专属池积分"
                     "（只烧专属池，预算熔断防止溢出扣到 kimi-k3 要用的通用池）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--model", default="sensenova-6.8-flash-lite", help="上游模型 ID")
-    p.add_argument("--base-url",
+
+    def opt(flag: str, **kw):
+        """add_argument 的薄包装：配置文件里有同名键就顶掉 default。"""
+        dest = flag.lstrip("-").replace("-", "_")
+        if dest in cfg:
+            kw["default"] = cfg[dest]
+        return p.add_argument(flag, **kw)
+
+    p.set_defaults(_config_used=dict(cfg))
+
+    opt("--model", default="sensenova-6.8-flash-lite", help="上游模型 ID")
+    opt("--base-url",
                    default=os.environ.get("SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1"),
                    help="商汤 OpenAI 兼容接口地址")
-    p.add_argument("--concurrency", type=int, default=128,
+    opt("--concurrency", type=int, default=128,
                    help="全局 worker 数（并发上限；实际并发由每账号 AIMD 自适应决定）")
-    p.add_argument("--per-account-max", type=int, default=24,
+    opt("--per-account-max", type=int, default=24,
                    help="单账号最大并发（AIMD 的天花板；429 频繁就调小，从不 429 可调大）")
-    p.add_argument("--per-account-start", type=int, default=8,
+    opt("--per-account-start", type=int, default=8,
                    help="单账号自适应并发起点（起步高、靠 429 减半回落，收敛快）")
-    p.add_argument("--max-tokens", type=int, default=16384,
+    opt("--max-tokens", type=int, default=16384,
                    help="单次请求输出上限（越大烧得越狠）")
-    p.add_argument("--filler-chars", type=int, default=6000,
+    opt("--filler-chars", type=int, default=6000,
                    help="输入填充材料的字符数（烧输入 token，对耗时影响很小）")
     # ---- 积分池预算（防溢出烧到通用池） ----
-    p.add_argument("--window-credits", type=float, default=60000,
+    opt("--window-credits", type=float, default=60000,
                    help="每账号 Flash-lite 专属池 5h 窗口积分上限（官方 6 万）")
-    p.add_argument("--weekly-credits", type=float, default=600000,
+    opt("--weekly-credits", type=float, default=600000,
                    help="每账号 Flash-lite 专属池每周积分上限（官方 60 万；"
                         "若控制台显示的实际规模更小，请按控制台填）")
-    p.add_argument("--safety-margin", type=float, default=0.45,
+    opt("--safety-margin", type=float, default=0.45,
                    help="预算安全系数（熔断线 = 上限 × 该系数）。0.45 = 内建 2 倍"
                         "费率不确定性（实测区间 出333~720，估算取 360）——即使实际"
                         "费率是估算的 2 倍，实扣也不会超过官方上限")
-    p.add_argument("--week-anchor", default="Mon 00:00",
+    opt("--week-anchor", default="Mon 00:00",
                    help="周固定窗口的起点（星期几缩写 + HH:MM，本地时区），如 "
                         '"Mon 00:00"、"Wed 09:30"。自该时刻起累计周烧量，到线停靠'
                         "至下周同一时刻。可对齐控制台「专属池」的重置时刻")
-    p.add_argument("--pool-total-credits", type=float, default=0,
+    opt("--pool-total-credits", type=float, default=0,
                    help="每账号累计烧量绝对上限（按持久化账本口径，到线永久停靠，"
                         "防赠送池过期后继续空转烧通用池）。0 = 关闭")
-    p.add_argument("--rate-in", type=float, default=120,
-                   help="输入 token 积分费率（积分/百万token）。2026-09-12 两次控制台"
-                        "实测交叉验证：实际 ≈111（区间 111~240），取 120 贴实测值，"
-                        "显示与控制台实扣基本一致；可用 --calibrate-actual 精校准")
-    p.add_argument("--rate-out", type=float, default=360,
-                   help="输出 token 积分费率（积分/百万token）。同上，实际 ≈333（区间"
-                        " 333~720）。注：预算熔断在物理可达的烧速下永远触不到，显示"
-                        "准确性优先于保守边际")
-    p.add_argument("--quota-park-hours", type=float, default=12,
+    opt("--rate-in", type=float, default=830,
+                   help="输入 token 积分费率（积分/百万token）。2026-09-24 用控制台"
+                        "「本周剩余」两次读数差反推校准（旧默认 120 偏低约 7 倍，"
+                        "是烧穿专属池事故的根因之一）。费率会持久化进账本，"
+                        "重启后以账本为准；可用 --calibrate-actual 精校准")
+    opt("--rate-out", type=float, default=2500,
+                   help="输出 token 积分费率（积分/百万token）。同上，两次独立读数"
+                        "反推 2516 / 2441（相差 3%），按 r_in=r_out/3 摊后取整。"
+                        "单条请求（6000 字填充 + 16384 出）≈46 积分，5h 熔断线"
+                        "27000 ≈ 587 条")
+    opt("--quota-park-hours", type=float, default=12,
                    help="判定积分耗尽后账号停靠时长（小时）")
-    p.add_argument("--account-groups", default="SENSENOVA_API_KEY,SENSENOVA_API_KEY_02",
+    opt("--account-groups", default="SENSENOVA_API_KEY,SENSENOVA_API_KEY_02",
                    help="同账号 Key 分组（分号分组、逗号分 Key）；组内共享一份预算与并发")
-    p.add_argument("--anchors", default="",
+    opt("--week-anchors", default="",
+                   help="每账号的周窗口重置时刻（控制台显示的「周刷新」，本地时间）。"
+                        '格式：--week-anchors "2=Wed 18:10;10=Thu 09:36"（数字=Key '
+                        "序号，同 --anchors；星期几缩写 + HH:MM）。各账号周刷新时刻"
+                        "不同（实测=创建时刻+N×7天），全局 --week-anchor 单值必然错配；"
+                        "不填的账号回落到全局 --week-anchor")
+    opt("--anchors", default="",
                    help="每账号的专属池窗口重置时刻（控制台显示的「重置时间」，本地 HH:MM）。"
                         "格式：--anchors \"1=03:30;3=07:15;5=22:05\"（数字=Key 序号，"
                         "1 即 SENSENOVA_API_KEY，与 02 同账号共用）。不填=滚动窗口模型"
                         "（保守安全）；填了=固定窗口爆发（边界后满血烧干再停靠）")
     # ---- 冷却/超时 ----
-    p.add_argument("--cooldown-base", type=float, default=60, help="429 首次冷却秒数（指数退避）")
-    p.add_argument("--cooldown-max", type=float, default=900, help="429 冷却上限秒数")
-    p.add_argument("--connect-timeout", type=float, default=15)
-    p.add_argument("--read-timeout", type=float, default=180,
+    opt("--cooldown-base", type=float, default=60, help="429 首次冷却秒数（指数退避）")
+    opt("--cooldown-max", type=float, default=900, help="429 冷却上限秒数")
+    opt("--connect-timeout", type=float, default=15)
+    opt("--read-timeout", type=float, default=180,
                    help="流式读超时（相邻 chunk 间隔上限）")
-    p.add_argument("--summary-interval", type=float, default=60, help="汇总打印间隔秒数")
-    p.add_argument("--max-seconds", type=float, default=0, help="最长运行秒数，0 = 一直跑")
-    p.add_argument("--once", action="store_true", help="每把 Key 只发一次请求就汇总退出（自检用）")
-    p.add_argument("--only", default="",
+    opt("--summary-interval", type=float, default=60, help="汇总打印间隔秒数")
+    opt("--max-seconds", type=float, default=0, help="最长运行秒数，0 = 一直跑")
+    opt("--once", action="store_true", default=bool(cfg.get("once", False)),
+        help="每把 Key 只发一次请求就汇总退出（自检用）")
+    opt("--only", default="",
                    help="只用指定的 Key（逗号分隔 env 变量名），如 SENSENOVA_API_KEY_03")
-    p.add_argument("--log-file", default=str(DEFAULT_LOG), help="日志文件路径")
-    p.add_argument("--state-file", default=str(STATE_FILE),
+    opt("--log-file", default=str(DEFAULT_LOG), help="日志文件路径")
+    opt("--state-file", default=str(STATE_FILE),
                    help="账本持久化文件（重启不清零，累计口径与控制台连续）")
-    p.add_argument("--calibrate-actual", type=float, default=0,
+    opt("--calibrate-actual", type=float, default=0,
                    help="校准模式：传入控制台「积分消耗明细」里与账本同时段的实扣积分"
                         "（如 --calibrate-actual 7000），算出精确费率后退出，不烧积分")
-    p.add_argument("--auto-calibrate", type=float, default=0, metavar="TOKENS",
+    opt("--auto-calibrate", type=float, default=0, metavar="TOKENS",
                    help="自动校准：每烧够 N 百万 token 暂停一次，提示输入控制台实扣积分，"
                         "自动算出精确费率并继续烧。0 = 关闭。推荐 5（约 1~2 小时烧到）")
-    p.add_argument("--auto-calibrate-keep-margin", action="store_true",
+    opt("--auto-calibrate-keep-margin", action="store_true",
                    help="自动校准后保持原安全系数（默认校准后自动提到 0.9，因为费率已精确）")
     return p.parse_args(argv)
 
@@ -1036,6 +1213,15 @@ def main(argv: list[str] | None = None) -> int:
     if not keys:
         print("ERROR: .env 里没有找到任何 SENSENOVA_API_KEY*，无法运行。", file=sys.stderr)
         return 2
+    if not is_flash_lite(args.model):
+        # 烧错模型 = 直接扣 kimi-k3 的通用池积分，且静默无信号。宁可拒绝启动。
+        print(f"ERROR: --model {args.model!r} 不是 Flash-lite 模型。\n"
+              f"       只有 Flash-lite 家族扣「专属池周期积分」（唯一能 1:1 折算回充成\n"
+              f"       K3 可用积分的池）；其他模型只扣「通用池」——那是 kimi-k3 的口粮，\n"
+              f"       烧了纯亏，且 API 不返回任何池信号，事后无从发现。\n"
+              f"       请用 sensenova-6.8-flash-lite（或 6.7-flash-lite，限流桶独立，\n"
+              f"       可另开实例并行烧）。", file=sys.stderr)
+        return 2
     group_accounts(keys, args.account_groups)
 
     burner = Burner(args, keys)
@@ -1043,6 +1229,11 @@ def main(argv: list[str] | None = None) -> int:
         n = apply_anchors(args.anchors, keys, burner.log)
         if n == 0:
             print("WARN: --anchors 没有生效到任何账号，将退回滚动窗口模型", file=sys.stderr)
+    if args.week_anchors:
+        n = apply_week_anchors(args.week_anchors, keys, burner.log)
+        if n == 0:
+            print("WARN: --week-anchors 没有生效到任何账号，"
+                  "这些账号回落到全局 --week-anchor", file=sys.stderr)
     burner._load_rates_from_state()
     if burner.load_state():
         burner.base_in, burner.base_out = burner.total.tokens_in, burner.total.tokens_out
@@ -1082,7 +1273,8 @@ def main(argv: list[str] | None = None) -> int:
         f" | 共 {len(keys)} 把 Key、{len(burner.accounts)} 个账号预算："
         f"{', '.join(a.name for a in burner.accounts)}"
     )
-    next_week = burner.week_start(time.time()) + WIN_WEEK
+    now = time.time()
+    next_week = burner.week_start(now) + WIN_WEEK
     anchor_str = time.strftime('%m-%d %H:%M', time.localtime(burner.week_anchor_ts))
     next_str = time.strftime('%m-%d %H:%M', time.localtime(next_week))
     burner.log(
@@ -1104,14 +1296,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.auto_calibrate:
         burner.log(f"自动校准：每 {args.auto_calibrate:.0f}M token 暂停一次提示校准"
                    f"（当前费率 入{args.rate_in:.0f}/出{args.rate_out:.0f}）")
+    cfg_used = ", ".join(f"{k}={args._config_used[k]}" for k in sorted(args._config_used)) \
+        if args._config_used else "无（全用命令行/默认）"
+    burner.log(f"配置来源：config/burner.yaml → {cfg_used}")
+    burner.log(f"目标池：Flash-Lite 专属池（model={args.model}；"
+               f"只有它扣专属池、能 1:1 折算回充成 K3 可用积分）")
     burner.log(f"接口：{burner.url}")
     anchored = [a for a in burner.accounts if a.anchor_ts]
     if anchored:
-        burner.log("锚点模式（固定窗口，边界后满血爆发）：" + ", ".join(
-            f"{a.name}→下边界 {time.strftime('%m-%d %H:%M', time.localtime(a.next_boundary(time.time())))}"
+        burner.log("5h 锚点模式（固定窗口，边界后满血爆发）：" + ", ".join(
+            f"{a.name}→{time.strftime('%m-%d %H:%M', time.localtime(a.next_boundary(now)))}"
             for a in anchored))
     else:
-        burner.log("窗口模型：滚动（未配置 --anchors；按最近5h烧量记账，保守安全）")
+        burner.log("5h 窗口模型：滚动（未配置 --anchors；按最近5h烧量记账，保守安全）")
+    per_acct_week = [a for a in burner.accounts if a.week_anchor_ts]
+    if per_acct_week:
+        parts = []
+        for a in per_acct_week:
+            ws = a.week_start(now, burner.week_anchor_ts)
+            parts.append(f"{a.name}→{time.strftime('%m-%d %H:%M', time.localtime(ws + WIN_WEEK))}")
+        burner.log("周锚点（按账号，来自 --week-anchors）：" + ", ".join(parts))
+    fallback_week = [a for a in burner.accounts if not a.week_anchor_ts]
+    if fallback_week:
+        burner.log(f"周锚点（回落全局 --week-anchor={args.week_anchor}）："
+                   + ", ".join(a.name for a in fallback_week))
 
     # Windows 关闭控制台窗口会发 SIGBREAK（约 5s 宽限）：保存账本并留痕
     def _on_close(signum, frame) -> None:

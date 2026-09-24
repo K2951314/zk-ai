@@ -87,7 +87,7 @@
 | **流式** | 纯 `data:` + `data: [DONE]`，OpenAI SDK 直接可用；路由元数据走 SSE **注释行**，不污染 chunk 流。 |
 | **零秘密泄漏** | Key 只从环境变量解析；日志、数据库、admin API 一律脱敏。 |
 | **可审计** | SQLite/SQLAlchemy 2.x 落库：requests、request_attempts、usage_records、health_checks。 |
-| **积分消耗器** | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。见使用手册「后台烧 flash-lite 积分」。 |
+| **积分消耗器** | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。控制台「🔥 积分消耗器」页可看每账号 5h/周窗口余量与下一边界、改 `config/burner.yaml`（模板 `burner.example.yaml`）并一键重启；`model` 硬校验只能是 Flash-lite 家族。换机时随迁移包携带。见使用手册「后台烧 flash-lite 积分」。 |
 
 ---
 
@@ -570,7 +570,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 23 个测试模块，514 个用例，全部 Mock
+├── tests/                # conftest + 25 个测试模块，568 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -1239,7 +1239,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**514 个用例，全部通过，零网络、零真实配额。**
+**568 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

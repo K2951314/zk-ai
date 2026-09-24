@@ -19,8 +19,12 @@ from scripts.burn_sensenova import (
     AccountState,
     Burner,
     KeyState,
+    apply_week_anchors,
+    is_flash_lite,
+    load_config,
     parse_args,
     parse_week_anchor,
+    parse_week_anchors,
 )
 
 
@@ -191,3 +195,240 @@ def test_5h_rolling_still_applies() -> None:
     assert burner.budget_allow(acct, 1.0) is False
     # 停靠时刻应按 5h 滚动事件计算（>= 最老窗口内事件 + 5h）
     assert acct.parked_until >= now + WIN_5H - 120
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-24 校准与按账号周锚点（控制台真值驱动）
+# ---------------------------------------------------------------------------
+
+
+def test_per_account_week_anchor_overrides_the_global_one() -> None:
+    """各账号周刷新时刻不同（实测=创建时刻+N×7天），必须按账号记周账。"""
+    burner = _burner(weekly_credits=1000, safety_margin=0.5)
+    acct = burner.keys[0].account
+    now = time.time()
+    # 账号自己的周锚点：故意设成 2 天前 → 本周已烧很多
+    acct.week_anchor_ts = now - 2 * 86400
+    acct.events = [(now - 3600, 400.0)]
+    # 全局锚点是默认 Mon 00:00，若误用全局，这条事件落在窗口外 → 会放行
+    ws = acct.week_start(now, burner.week_anchor_ts)
+    assert ws == acct.week_anchor_ts
+    assert acct.available(now, cap5h=10**9, capweek=500.0, week_start=ws) == 100.0
+
+
+def test_week_start_falls_back_to_the_global_anchor() -> None:
+    burner = _burner()
+    acct = burner.keys[0].account
+    now = time.time()
+    assert acct.week_anchor_ts == 0.0
+    assert acct.week_start(now, burner.week_anchor_ts) == burner.week_start(now)
+
+
+def test_week_start_returns_zero_when_both_anchors_are_unset() -> None:
+    burner = _burner()
+    acct = burner.keys[0].account
+    burner.week_anchor_ts = 0.0          # 全局锚点显式置空 = 滚动 7 天逃生口
+    assert acct.week_anchor_ts == 0.0
+    assert acct.week_start(time.time(), 0.0) == 0.0
+
+
+def test_parse_week_anchors_parses_key_index_to_epoch() -> None:
+    got = parse_week_anchors("2=Wed 18:10;10=Thu 09:36")
+    assert set(got) == {2, 10}
+    for ts in got.values():
+        lt = time.localtime(ts)
+        assert ts <= time.time()
+        assert (lt.tm_hour, lt.tm_min) in ((18, 10), (9, 36))
+
+
+def test_parse_week_anchors_rejects_garbage_without_raising() -> None:
+    assert parse_week_anchors("nope") == {}
+    assert parse_week_anchors("2=not-a-time") == {}
+
+
+def test_apply_week_anchors_maps_key_index_to_account() -> None:
+    keys = [KeyState(name="SENSENOVA_API_KEY_02", key="sk-a",
+                     account=AccountState(name="K2")),
+            KeyState(name="SENSENOVA_API_KEY_10", key="sk-b",
+                     account=AccountState(name="K10"))]
+    logs: list[tuple[str, str]] = []
+    n = apply_week_anchors("2=Wed 18:10;99=Fri 01:00",
+                           keys, lambda msg, level="INFO": logs.append((msg, level)))
+    assert n == 1
+    assert keys[0].account.week_anchor_ts > 0
+    assert keys[1].account.week_anchor_ts == 0.0
+    assert any("99" in msg for msg, _ in logs)
+
+
+def test_budget_uses_the_account_week_anchor_not_the_global_one() -> None:
+    """全局单值会让早刷新的账号被少算 → 烧穿。这里钉死按账号那条路。"""
+    burner = _burner(weekly_credits=1000, safety_margin=0.5, window_credits=10**9)
+    acct = burner.keys[0].account
+    now = time.time()
+    acct.week_anchor_ts = now - 2 * 86400     # 账号周窗口 2 天前才开始
+    acct.events = [(now - 3600, 480.0)]       # 全落在这个窗口内
+    assert burner.budget_allow(acct, 30.0) is False
+    ws = acct.week_start(now, burner.week_anchor_ts)
+    assert acct.parked_until >= ws + WIN_WEEK
+
+
+def test_save_state_persists_the_calibrated_rates(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """费率必须落盘：_save_rates_to_state 先写、save_state 后写，早先的整体
+    覆盖把 rate_in/rate_out/safety_margin 冲掉 → 重启后校准丢失、退回默认
+    费率（2026-09-24 实测：真实费率比旧默认高近 7 倍都没能记住）。"""
+    import json
+
+    burner = _burner(rate_in=830, rate_out=2500, safety_margin=0.45)
+    burner.state_file = tmp_path / "state.json"
+    burner.args.rate_in, burner.args.rate_out = 830.0, 2500.0
+    burner.save_state()
+    data = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert data["rate_in"] == 830.0
+    assert data["rate_out"] == 2500.0
+    assert data["safety_margin"] == 0.45
+
+
+def test_state_round_trip_keeps_both_anchor_kinds(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    burner = _burner()
+    burner.state_file = tmp_path / "state.json"
+    now = time.time()
+    acct = burner.keys[0].account
+    acct.anchor_ts = now - 3600
+    acct.week_anchor_ts = now - 86400
+    acct.credits_total = 123.0
+    burner.save_state()
+
+    again = _burner()
+    again.state_file = tmp_path / "state.json"
+    assert again.load_state() is True
+    got = again.keys[0].account
+    assert got.anchor_ts == acct.anchor_ts
+    assert got.week_anchor_ts == acct.week_anchor_ts
+    assert got.credits_total == 123.0
+
+
+# ---------------------------------------------------------------------------
+# config/burner.yaml 配置入口（2026-09-24）
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_returns_empty_when_file_missing(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "nope.yaml") == {}
+
+
+def test_load_config_reads_known_keys(tmp_path: Path) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_out: 2500\nsafety_margin: 0.45\nanchors: \"2=15:10\"\n",
+                   encoding="utf-8")
+    got = load_config(cfg)
+    assert got == {"rate_out": 2500.0, "safety_margin": 0.45, "anchors": "2=15:10"}
+
+
+def test_load_config_accepts_int_where_float_expected(tmp_path: Path) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("window_credits: 60000\n", encoding="utf-8")
+    assert load_config(cfg)["window_credits"] == 60000.0
+
+
+def test_load_config_ignores_unknown_keys(tmp_path: Path, capsys) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_out: 1\nnot_a_flag: 2\n", encoding="utf-8")
+    got = load_config(cfg)
+    assert got == {"rate_out": 1.0}
+    assert "not_a_flag" in capsys.readouterr().err
+
+
+def test_load_config_rejects_wrong_type(tmp_path: Path) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_out: \"fast\"\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        load_config(cfg)
+
+
+def test_load_config_rejects_bool_for_number(tmp_path: Path) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_out: true\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        load_config(cfg)
+
+
+def test_load_config_rejects_non_mapping(tmp_path: Path) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("- just\n- a\n- list\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        load_config(cfg)
+
+
+def test_config_file_values_become_defaults(tmp_path: Path,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """配置入口的核心契约：文件值成为默认值，命令行显式传入仍然优先。"""
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_out: 2500\nconcurrency: 64\nmax_seconds: 900\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+
+    args = parse_args([])
+    assert args.rate_out == 2500.0
+    assert args.concurrency == 64
+    assert args.max_seconds == 900.0
+    assert args._config_used["rate_out"] == 2500.0
+
+    overridden = parse_args(["--rate-out", "999", "--concurrency", "16"])
+    assert overridden.rate_out == 999.0
+    assert overridden.concurrency == 16
+    assert overridden.max_seconds == 900.0
+
+
+def test_config_file_hyphen_keys_are_normalised(tmp_path: Path,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("per-account-max: 32\nweek-anchors: \"2=Wed 18:10\"\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+    args = parse_args([])
+    assert args.per_account_max == 32
+    assert args.week_anchors == "2=Wed 18:10"
+
+
+def test_committed_template_covers_every_config_key() -> None:
+    """模板必须列出全部可配置键，否则用户不知道有什么可调。"""
+    text = (Path(__file__).resolve().parent.parent
+            / "config" / "burner.example.yaml").read_text(encoding="utf-8")
+    missing = sorted(k for k in burn_sensenova._CONFIG_KEYS if f"{k}:" not in text)
+    assert not missing, f"模板缺少这些键：{missing}"
+
+
+# ---------------------------------------------------------------------------
+# Flash-Lite 专属池保护（烧错模型 = 直接吃 kimi-k3 的通用池积分）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model,ok", [
+    ("sensenova-6.8-flash-lite", True),
+    ("sensenova-6.7-flash-lite", True),
+    ("SENSENOVA-6.8-FLASH-LITE", True),
+    ("kimi-k3", False),
+    ("glm-5.2", False),
+    ("deepseek-v4-flash", False),
+    ("sensenova-u1-fast", False),
+])
+def test_is_flash_lite_only_accepts_the_flash_lite_family(model: str, ok: bool) -> None:
+    assert is_flash_lite(model) is ok
+
+
+def test_main_refuses_a_non_flash_lite_model(tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """烧错模型 = 扣 kimi-k3 的通用池积分，且静默无信号。必须拒绝启动。"""
+    monkeypatch.setattr(burn_sensenova, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", tmp_path / "no-such.yaml")
+    monkeypatch.setenv("SENSENOVA_API_KEY_03", "sk-test")
+    rc = burn_sensenova.main(["--model", "kimi-k3", "--log-file", str(tmp_path / "b.log")])
+    assert rc == 2
+
+
+def test_committed_template_pins_the_flash_lite_model() -> None:
+    """模板与现役配置都必须烧 Flash-lite——这是专属池保护的入口。"""
+    root = Path(__file__).resolve().parent.parent
+    for name in ("burner.example.yaml", "burner.yaml"):
+        text = (root / "config" / name).read_text(encoding="utf-8")
+        assert "model: sensenova-6.8-flash-lite" in text, name

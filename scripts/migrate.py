@@ -99,6 +99,11 @@ def _config_files() -> list[Path]:
         # ChatGPT / Codex 桌面版期望配置：导入后自动写入新机 ~/.codex，
         # 「换机后上来就能用」的客户端一环（见 _apply_chatgpt_client）。
         Path("config/chatgpt.yaml"),
+        # 积分消耗器配置：烧哪些 Key、每账号 5h/周锚点、费率与预算熔断线。
+        # 不带它，新机的消耗器就只会用代码默认值——费率会退回旧的低估 7 倍的
+        # 默认（120/360），锚点全丢，重新烧穿专属池只是时间问题。
+        # 模板 burner.example.yaml 不需要搬（新机有仓库里的那份）。
+        Path("config/burner.yaml"),
     ]
 
 
@@ -387,6 +392,15 @@ def import_package(
             # package's desired config (file-level only - the OS env var is the
             # CLI layer's job, see _provision_chatgpt_env).
             _apply_chatgpt_client(root, [r.replace("\\", "/") for r in restored])
+            # 消耗器只在启动时读配置：导入换了 burner.yaml / burn_state.json 之后，
+            # 运行中的实例仍在用旧值。留一个重启请求，托盘心跳会替我们重启它。
+            if any(r.replace("\\", "/").startswith(("config/burner.yaml", "data/burn_state.json"))
+                   for r in restored):
+                with contextlib.suppress(OSError):
+                    (root / "data").mkdir(parents=True, exist_ok=True)
+                    (root / "data" / "burner_restart.request").write_text(
+                        time.strftime("%Y-%m-%d %H:%M:%S") + "\n", encoding="utf-8")
+                print("  已请求重启积分消耗器（托盘会在数秒内重启它，新配置才会生效）")
             return restored, backup
     finally:
         for junk in tmp.glob("*"):

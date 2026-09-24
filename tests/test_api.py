@@ -1310,3 +1310,165 @@ async def test_chatgpt_sync_env_without_gateway_token_is_400(tmp_path, monkeypat
 def _forbid_write(*_args):
     raise AssertionError("write_user_env_var must not run here")
 
+
+# --------------------------------------------------------------------------- #
+# 积分消耗器（/admin/burner*）
+# --------------------------------------------------------------------------- #
+BURNER_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
+
+@pytest.fixture
+def burner_files(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """隔离消耗器的账本与配置，绝不碰真实 data/ 与 config/。"""
+    import app.api.admin as admin_module
+
+    state = tmp_path / "burn_state.json"
+    config = tmp_path / "burner.yaml"
+    monkeypatch.setattr(admin_module, "_burner_paths", lambda: (state, config))
+    return state, config
+
+
+def _seed(state, config) -> None:
+    state.write_text(json.dumps({
+        "saved_at": "2026-09-24 13:00:00",
+        "rate_in": 830.0, "rate_out": 2500.0, "safety_margin": 0.45,
+        "accounts": {
+            "K2": {"events": [[0, 500.0]], "credits_total": 900.0, "target": 8.0,
+                   "anchor_ts": 0.0, "week_anchor_ts": 0.0},
+        },
+        "keys": {"K2": {"ok": 10, "fail": 1, "rate_limited": 2,
+                        "tokens_in": 1000, "tokens_out": 2000}},
+    }), encoding="utf-8")
+    config.write_text("model: sensenova-6.8-flash-lite\nrate_out: 2500\n", encoding="utf-8")
+
+
+async def test_burner_snapshot_returns_config_and_accounts(api, burner_files) -> None:
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.get("/admin/burner", headers=BURNER_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config"]["model"] == "sensenova-6.8-flash-lite"
+    assert body["flash_lite_ok"] is True
+    assert body["ledger"]["rate_out"] == 2500.0
+    assert len(body["accounts"]) == 1
+    acct = body["accounts"][0]
+    assert acct["name"] == "K2"
+    assert acct["credits_total"] == 900.0
+    assert acct["ok"] == 10
+
+
+async def test_burner_snapshot_tolerates_a_half_written_ledger(api, burner_files) -> None:
+    """账本由消耗器每分钟落盘，读到半行必须显示空表而不是 500。"""
+    client, _ = api
+    state, config = burner_files
+    state.write_text('{"accounts": {"K2": {"even', encoding="utf-8")
+    config.write_text("model: sensenova-6.8-flash-lite\n", encoding="utf-8")
+    r = await client.get("/admin/burner", headers=BURNER_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["accounts"] == []
+
+
+async def test_burner_snapshot_without_any_files(api, burner_files) -> None:
+    client, _ = api
+    r = await client.get("/admin/burner", headers=BURNER_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["accounts"] == []
+    assert any("还没" in w or "从未" in w for w in body["warnings"])
+
+
+async def test_burner_save_config_round_trips(api, burner_files) -> None:
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+                         json={"concurrency": 96, "safety_margin": 0.5})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config"]["concurrency"] == 96
+    assert body["config"]["safety_margin"] == 0.5
+    # 真的落盘了，且没把原有的 model / rate_out 两行冲掉
+    text = config.read_text(encoding="utf-8")
+    assert "concurrency: 96" in text
+    assert "safety_margin: 0.5" in text
+    assert "model: sensenova-6.8-flash-lite" in text
+    assert "rate_out: 2500" in text
+
+
+async def test_burner_save_config_rejects_a_non_flash_lite_model(api, burner_files) -> None:
+    """烧错模型 = 直接吃 kimi-k3 的通用池积分，必须在入口就拦死。"""
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+                         json={"model": "kimi-k3"})
+    assert r.status_code == 400
+    err = r.json()["detail"]["error"]
+    assert err["type"] == "burner_config_invalid"
+    assert "Flash-lite" in err["message"]
+    # 磁盘没被改坏
+    assert "kimi-k3" not in config.read_text(encoding="utf-8")
+
+
+async def test_burner_save_config_rejects_unknown_key(api, burner_files) -> None:
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+                         json={"not_a_flag": 1})
+    assert r.status_code == 400
+    assert "not_a_flag" not in config.read_text(encoding="utf-8")
+
+
+async def test_burner_save_config_rejects_out_of_range_margin(api, burner_files) -> None:
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+                         json={"safety_margin": 1.5})
+    assert r.status_code == 400
+    assert "safety_margin" in r.json()["detail"]["error"]["message"]
+
+
+async def test_burner_save_requests_a_restart_by_default(api, burner_files) -> None:
+    """消耗器只在自己启动时读配置，所以保存必须顺带请求重启，否则这次保存对
+    运行中的实例无效。"""
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+                         json={"concurrency": 96})
+    assert r.status_code == 200
+    assert (state.parent / "burner_restart.request").exists()
+    assert r.json()["restart_pending"] is True
+
+
+async def test_burner_save_can_skip_the_restart(api, burner_files) -> None:
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config?restart=false", headers=BURNER_HEADERS,
+                         json={"concurrency": 96})
+    assert r.status_code == 200
+    assert not (state.parent / "burner_restart.request").exists()
+
+
+async def test_burner_rejects_config_without_asking_for_a_restart(api, burner_files) -> None:
+    """校验失败的保存不该留重启信——否则托盘会为一个没发生的改动重启 burner。"""
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+                         json={"model": "kimi-k3"})
+    assert r.status_code == 400
+    assert not (state.parent / "burner_restart.request").exists()
+
+
+async def test_burner_endpoints_require_admin(api, burner_files) -> None:
+    client, _ = api
+    state, config = burner_files
+    _seed(state, config)
+    assert (await client.get("/admin/burner")).status_code in (401, 403)
+    assert (await client.put("/admin/burner/config", json={"concurrency": 8})).status_code in (401, 403)

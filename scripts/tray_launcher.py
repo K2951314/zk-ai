@@ -93,6 +93,13 @@ _BLUE = (58, 100, 220, 255)   # stopped / silent
 
 #: Seconds without a log write before we treat the child as silent/stalled.
 _SILENT_AFTER = 90.0
+
+#: 控制台「保存消耗器配置」用来请求重启的信号文件。消耗器只在自己启动时读
+#: config/burner.yaml，所以改完必须重启才生效；而 burner 是托盘 spawn 的子进程，
+#: 网关进程碰不到它。用文件当信箱：网关写文件，托盘心跳（3s 一次）看到就重启，
+#: 重启后删掉。这样既不用给 burner 开端口/信号，也不改父子结构。
+#: 路径可被 ZKAI_DATA_DIR 覆盖，测试用 tmp_path 隔离。
+RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_restart.request"
 _HEARTBEAT_EVERY = 3.0
 
 
@@ -346,10 +353,27 @@ class TrayLauncher:
 
         threading.Thread(target=_go, daemon=True).start()
 
+    def _consume_restart_request(self) -> bool:
+        """控制台请求重启消耗器 → 读一下、删掉、重启子进程。
+
+        返回是否真的重启了（只在 burner 模式有意义；网关模式没有这个信箱）。
+        """
+        try:
+            if not RESTART_REQUEST.exists():
+                return False
+            RESTART_REQUEST.unlink()
+        except OSError:
+            return False
+        logger.info("restart requested by the console; restarting %s", self._mode)
+        self._child.start()
+        return True
+
     def _heartbeat_loop(self) -> None:
         while self._running:
             time.sleep(_HEARTBEAT_EVERY)
             try:
+                if self._mode == "burner":
+                    self._consume_restart_request()
                 self._refresh()
             except Exception:
                 logger.exception("tray heartbeat failed for %s", self._mode)

@@ -9,11 +9,12 @@ Credential responses never contain secret material - only a masked fingerprint.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -41,7 +42,7 @@ from app.models.provider import (
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.routing.aliases import AliasRegistry
 from app.routing.limits import RateLimitRule
-from app.services import chatgpt_service
+from app.services import burner_service, chatgpt_service
 
 logger = get_logger("api.admin")
 
@@ -1406,3 +1407,61 @@ def _apply_desired(
         "no_op": applied.no_op,
         "apply_result": applied.as_dict(),
     }
+
+
+# --------------------------------------------------------------------------- #
+# 积分消耗器（scripts/burn_sensenova.py）——配置 + 运行状态
+#
+# 消耗器是独立进程、不经网关，控制台原本完全看不到它。这里把它的配置
+# （config/burner.yaml）和账本（data/burn_state.json）接进控制台：窗口余量、
+# 每账号 5h/周边界、剩余可烧条数都能看，参数改完写回 YAML，重启消耗器即生效。
+# --------------------------------------------------------------------------- #
+def _burner_paths() -> tuple[Path, Path]:
+    settings = load_app_config().settings
+    return (settings.resolved_data_dir / "burn_state.json",
+            settings.resolved_config_dir / "burner.yaml")
+
+
+@router.get("/burner", summary="积分消耗器配置与运行状态")
+async def burner_snapshot() -> dict[str, Any]:
+    state_file, config_file = _burner_paths()
+    return burner_service.snapshot(state_file, config_file)
+
+
+@router.put("/burner/config", summary="保存积分消耗器配置")
+async def burner_save_config(
+    payload: dict[str, Any] = Body(...),
+    restart: Annotated[bool, Query(description="保存后请求重启消耗器（改配置才会生效）")] = True,
+) -> dict[str, Any]:
+    """写入 config/burner.yaml（保留注释），返回新的快照。
+
+    写失败整体回滚：文件用临时文件 + replace，异常时原文件不动，避免界面显示
+    成功而磁盘还是旧值。
+
+    ``restart=true``（默认）时顺带留一个重启请求，托盘心跳看到就重启 burner——
+    它只在自己启动时读配置，不重启的话这次保存对运行中的实例无效。重启由托盘
+    异步完成，这里只承诺「已请求」，所以返回里带 ``restart_pending`` 让界面能提示。
+    """
+    state_file, config_file = _burner_paths()
+    try:
+        patch = burner_service.validate_patch(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"message": str(exc), "type": "burner_config_invalid"}},
+        ) from exc
+    try:
+        changed = burner_service.write_config(config_file, patch)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": {
+                "message": f"消耗器配置写入失败，本次改动已取消：{exc}",
+                "type": "burner_config_write_failed"}},
+        ) from exc
+    logger.info("burner config updated: %s", ", ".join(sorted(changed)))
+    if restart:
+        with contextlib.suppress(OSError):
+            burner_service.request_restart(state_file.parent)
+        logger.info("burner restart requested (tray will pick it up within ~3s)")
+    return burner_service.snapshot(state_file, config_file)

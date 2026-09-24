@@ -1,0 +1,73 @@
+# ZK-AI 商汤积分消耗器配置模板（可提交；本地现役配置是 config/burner.yaml，gitignore）
+#
+# 复制到 config/burner.yaml 后按需修改。这个文件就是消耗器的「配置入口」：
+# 改完双击 scripts\start_burner.cmd 就生效，不用记命令行。
+# 命令行显式传的参数优先于这里（临时调参用），启动日志会打印实际生效值。
+# 键名与 burn_sensenova.py --help 的参数一一对应（去掉 --，短横线可写下划线）。
+
+# ---- 烧什么 ----
+# ⚠️ 必须是 Flash-lite 家族：只有它扣「专属池周期积分」，而专属池是唯一能 1:1
+#    折算回充成 kimi-k3 可用积分的池。换成 kimi-k3 / glm / deepseek 等其他模型
+#    会直接扣「通用池」——那是 K3 的口粮，烧了纯亏，且 API 零信号、事后无从发现。
+#    启动时会硬校验，模型名不含 flash-lite 直接拒绝运行。
+#    6.7 和 6.8 同属专属池、限流桶大概率独立，可另开一个实例并行烧。
+model: sensenova-6.8-flash-lite
+# 商汤 OpenAI 兼容接口地址（一般不用改）
+base_url: https://token.sensenova.cn/v1
+# 最长运行秒数，0 = 一直跑（常驻就留 0；试跑改成分钟数）
+max_seconds: 0
+# 每把 Key 只发一次请求就汇总退出（自检用）。常驻必须留 false
+once: false
+
+# ---- 并发（429 频繁就调低 per_account_max，从不 429 可调高）----
+concurrency: 64
+per_account_start: 8
+per_account_max: 24
+max_tokens: 16384
+filler_chars: 6000
+
+# ---- 费率（2026-09-24 控制台两次读数差反推校准，覆盖旧的 120/360）----
+# 旧默认偏低约 7 倍，是「烧穿专属池」事故的根因之一。
+# 重新校准：记下控制台「本周剩余」两次读数，差值 ÷ 同期日志的出 token。
+# 注意网关侧的 flash-lite 流量也扣同一个池，校准前确认它当时没在跑。
+rate_in: 830
+rate_out: 2500
+safety_margin: 0.45
+
+# ---- 积分池预算（每账号；官方 5h 6 万 / 周 60 万）----
+window_credits: 60000
+weekly_credits: 600000
+# 赠送池过期后建议设上，防空转烧通用池。0 = 关闭
+pool_total_credits: 0
+# 判定积分耗尽后账号停靠时长（小时）
+quota_park_hours: 12
+
+# ---- 账号与 Key 分组 ----
+# 只烧这些 Key（逗号分隔 env 变量名）。控制台数据缺失的 Key 先排除，
+# 否则专属池余量未知，有静默溢出风险。
+only: ""
+# 同账号 Key 分组（分号分组、逗号分 Key；组内共享一份预算与并发）
+account_groups: "SENSENOVA_API_KEY,SENSENOVA_API_KEY_02"
+
+# ---- 5h 窗口锚点（固定窗口爆发模式）----
+# 数字 = Key 序号（1 即不带后缀的 SENSENOVA_API_KEY，与 02 同账号共用）。
+# 规律（2026-09-24 用账号创建时间证实）：5h 重置 = 创建时刻 + N×5h。
+# 填「下一个真实边界」——已过的时刻会让窗口起点算到几小时前，把账号误判成已烧满。
+# 例：anchors: "2=15:10;3=15:10;10=14:36"
+anchors: ""
+
+# ---- 周窗口锚点（按账号）----
+# 规律：周刷新 = 创建时刻 + N×7天。各账号相差可达 6 天，全局 week_anchor
+# 单值必然错配（早刷新的被少算→烧穿，晚刷新的被多算→少烧）。
+# 星期几缩写 + HH:MM，取控制台「周刷新」那一时刻。
+# 例：week_anchors: "2=Wed 18:10;10=Thu 09:36"
+week_anchors: ""
+# 没进 week_anchors 的账号回落到这个全局值
+week_anchor: "Mon 00:00"
+
+# ---- 冷却 / 超时 / 汇总 ----
+cooldown_base: 60
+cooldown_max: 900
+connect_timeout: 15
+read_timeout: 180
+summary_interval: 60
