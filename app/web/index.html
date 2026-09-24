@@ -2222,11 +2222,6 @@ const urlView = new URLSearchParams(location.search).get("view");
 const initialView = (urlView && LOADERS[urlView]) ? urlView : state.view;
 history.replaceState(null, "", "/ui");
 switchView(initialView);
-</script>
-</body>
-</html>
-
-
 /* ================= 积分消耗器 ================= */
 /* 独立进程（scripts/burn_sensenova.py）烧商汤 Flash-Lite 专属池积分，1:1 折算成
    kimi-k3 可用积分。它不经网关，所以这里单独一页：左边是每账号的窗口账
@@ -2354,3 +2349,6 @@ async function saveBurnerConfig() {
   } catch (e) { toast(e.message, "err"); }
   finally { btn.disabled = false; btn.textContent = "保存并重启"; }
 }
+</script>
+</body>
+</html>

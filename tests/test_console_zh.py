@@ -206,3 +206,53 @@ def test_page_has_no_external_assets(page: str) -> None:
     for marker in ('<link rel="stylesheet"', "<script src=", "@import url(",
                    "fonts.googleapis", "unpkg.", "jsdelivr."):
         assert marker not in text, f"{page} 不该引入外部资源（{marker}）"
+
+
+def test_all_page_js_lives_inside_the_script_tag() -> None:
+    """所有 JS 必须在 <script> 里，<script> 里必须真的有个函数定义。
+
+    2026-09-24 的真实事故：消耗器那 130 行（loadBurner / BURNER_LABELS /
+    saveBurnerConfig…）被拼到了 `</html>` **之后**。浏览器把 </html> 之后的
+    文本当普通 DOM 文本节点，根本不当脚本执行——于是 LOADERS.burner 指向一个
+    从未声明的 loadBurner，进页面就 ReferenceError，整个控制台白屏，
+    只剩一堆看起来像乱码的静态文字。截图放大看半天都看不出来，因为 DOM 里
+    文字确实"在"，只是脚本死了。
+
+    这里用「</html> 之后只剩空白」和「script 块里能匹配到顶层定义」两道断言
+    把这类拼接错误钉死。
+    """
+    for page in ("index.html", "agent.html"):
+        raw = _html(page)
+        closed = raw.rindex("</html>")
+        tail = raw[closed + len("</html>"):]
+        assert tail.strip() == "", (
+            f"{page} 的 </html> 之后还有 {len(tail.strip())} 个非空白字符，"
+            "浏览器不会执行它")
+
+        # 每个 <script> 块自身能匹配到顶层声明（空 script = 拼坏的信号）
+        for i, block in enumerate(re.findall(r"<script[^>]*>(.*?)</script>",
+                                             raw, re.DOTALL)):
+            assert re.search(r"^(?:const|let|var|function|class)\s+\w",
+                             block, re.MULTILINE), (
+                f"{page} 的第 {i} 个 <script> 块里没有任何顶层声明，"
+                "很可能有代码被拼到了标签外面")
+
+
+def test_burner_view_loaders_are_declared_inside_the_script() -> None:
+    """LOADERS.burner 引用的函数必须在同一个 <script> 块里 define。
+
+    这正是上面那次事故的机理：LOADERS 写在块内，loadBurner 写在块外，
+    对象字面量求值时抛 ReferenceError，把后面全部启动代码一起带走。
+    """
+    raw = _html("index.html")
+    block = re.search(r"<script[^>]*>(.*?)</script>", raw, re.DOTALL).group(1)
+
+    # LOADERS 里每个值都必须在这个 script 块内定义
+    loaders = re.search(r"const LOADERS = \{(.*?)\n\};", block, re.DOTALL)
+    assert loaders, "LOADERS 对象没找到"
+    for name in re.findall(r"^\s*(\w+):\s*(\w+)\s*,?\s*$",
+                           loaders.group(1), re.MULTILINE):
+        registered = name[1]
+        assert re.search(rf"^(?:async )?function {registered}\b",
+                         block, re.MULTILINE), (
+            f"LOADERS 引用了 {registered}，但同一 <script> 块里没有它的定义")

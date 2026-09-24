@@ -101,6 +101,35 @@ QUOTA_STRONG = ("quota", "余额", "欠费", "arrears", "insufficient", "exhaust
                 "用尽", "已用完", "余额不足")
 FREQ_HINTS = ("rate limit", "限流", "频率", "too many", "并发", "requests per",
               "rpm", "tps", "throttl")
+# 限流类 429 的强特征词。商汤 429 同时表达「限流」和「权益用尽」两种意思（2026-09-24
+# 实测），body 分别长这样：
+#   {"error":{"message":"tpm exhausted","type":"quota_exceeded_error","code":"8"}}
+#   {"error":{"message":"token plan entitlement exhausted","type":"quota_exceeded_error","code":"8"}}
+# 两者都含 exhausted/type，区别只在前面的名词：tpm/rpm/rps/qps = 每分钟的量，
+# entitlement/plan/balance = 权益或余额。所以必须先看这些限定词，再 fallback。
+FREQ_STRONG = ("tpm", "rpm", "rps", "qps", "concurrency", "frequency", "throttl")
+# 权益/余额耗尽（长停靠到周期刷新，而不是短冷却）
+QUOTA_TERMS = ("entitlement", "plan", "balance", "credit", "insufficient",
+               "arrears", "subscription", "用尽", "余额不足")
+
+
+def is_quota_exhausted(body: str) -> bool:
+    """判断 429 是「权益/余额用尽」还是「限流」。
+
+    商汤把两种情况都返回 429 + `quota_exceeded_error`，只靠 HTTP 状态码分不开。
+    两者处置相反：用尽要停靠到周刷新，限流等窗口滑过去就行——误判的代价是
+    要么空转刷 429，要么白白停靠几小时不烧。所以按 body 里的限定词决定：
+
+    1. 先看限流限定词（tpm/rpm/rps/qps…）——出现即限流；
+    2. 再看权益限定词（entitlement/plan/balance/credit…）；
+    3. 都认不出时保守判 True（真用尽时多等一会儿，好过烧穿）。
+    """
+    low = body.lower()
+    if any(h in low for h in FREQ_STRONG):
+        return False
+    if any(h in low for h in QUOTA_TERMS):
+        return True
+    return bool(any(h in low or h in body for h in QUOTA_STRONG))
 
 WIN_5H = 5 * 3600
 WIN_WEEK = 7 * 86400
@@ -769,12 +798,35 @@ class Burner:
             f" | 账号并发目标 {acct.target:.0f}"
         )
 
-    # ---- 错误分类：限流 > Key 失效 > 额度耗尽 ------------------------------
+    # ---- 错误分类：额度耗尽 > Key 失效 > 限流 ------------------------------
     def on_error(self, ks: KeyState, status: int, body: str) -> None:
         low = body.lower()
         acct = ks.account
         self.total.recent.append("err")
         is_freq = any(h in low or h in body for h in FREQ_HINTS)
+
+        # 额度耗尽必须比 429 先判。2026-09-24 实测：商汤把「权益用尽」和「限流」
+        # 都返回 429，body 分别为 `token plan entitlement exhausted` 与
+        # `tpm exhausted`——长得很像，但处置完全相反（前者要停靠到周刷新，
+        # 后者等窗口滑过去就好）。早先 `if status == 429` 挡在前面，这个分支
+        # 永远是死代码，于是只能靠人在配置里手工排除没额度的 Key。
+        if is_quota_exhausted(body) and status in (402, 403, 429):
+            acct.parked_until = time.time() + self.args.quota_park_hours * 3600
+            acct.park_reason = "疑似额度/积分耗尽"
+            ks.rate_limited += 1
+            self.total.rate_limited += 1
+            self.log(
+                f"[{ks.name}] 疑似积分耗尽（专属池+通用池都已扣完），账号停靠 "
+                f"{self.args.quota_park_hours:.0f}h（{body[:160]}）", "ERROR",
+            )
+            self.log(
+                "⚠ 溢出实锤：走到这一步说明专属池此前已被烧穿、通用池/活动池已受损。"
+                "请到商汤控制台核对「Flash-lite 专属池」的实际规模/重置时刻，用 "
+                f"--weekly-credits / --safety-margin（当前 {self.args.safety_margin}）/ "
+                "--week-anchor 收紧预算，或 --pool-total-credits 设绝对上限",
+                "ERROR",
+            )
+            return
 
         if status == 429 or is_freq:
             ks.rate_limited += 1
@@ -792,7 +844,12 @@ class Burner:
                 cd = min(self.args.cooldown_base * 2 ** (ks.streak - 1), self.args.cooldown_max)
             ks.cooldown_until = time.time() + cd
             ks.last_err = f"429 x{ks.streak}"
-            self.log(f"[{ks.name}] 429 限流，冷却 {cd:.0f}s，账号并发目标 {old_target:.0f}→{acct.target:.0f}")
+            # 响应体必须写进日志：2026-09-24 实测，只看「429 限流」分不清是
+            # 「余额/积分耗尽」（该长停靠）还是「rpm exhausted」（共享 RPM 打满，
+            # 等窗口滑过去就好）——两者处置相反，而 body 就一句话，抄下来零成本。
+            reason = body.strip().replace("\n", " ")[:160]
+            self.log(f"[{ks.name}] 429 限流，冷却 {cd:.0f}s，账号并发目标 "
+                     f"{old_target:.0f}→{acct.target:.0f} | {reason}")
             self.maybe_global_backoff()
             return
 
@@ -803,26 +860,6 @@ class Burner:
             self.total.fail += 1
             ks.last_err = f"HTTP {status}"
             self.log(f"[{ks.name}] HTTP {status}，永久停靠：{body[:200]}", "ERROR")
-            return
-
-        # 额度/积分耗尽：说明专属池和通用池都空了（扣减顺序走到底才会报错），
-        # 此时再打只会空转，长停靠等周期发放。任何状态码都可能带这种文案。
-        if any(h in low or h in body for h in QUOTA_STRONG) and status in (402, 403, 429):
-            acct.parked_until = time.time() + self.args.quota_park_hours * 3600
-            acct.park_reason = "疑似额度/积分耗尽"
-            ks.rate_limited += 1
-            self.total.rate_limited += 1
-            self.log(
-                f"[{ks.name}] 疑似积分耗尽（专属池+通用池都已扣完），账号停靠 "
-                f"{self.args.quota_park_hours:.0f}h（{body[:160]}）", "ERROR",
-            )
-            self.log(
-                "⚠ 溢出实锤：走到这一步说明专属池此前已被烧穿、通用池/活动池已受损。"
-                "请到商汤控制台核对「Flash-lite 专属池」的实际规模/重置时刻，用 "
-                f"--weekly-credits / --safety-margin（当前 {self.args.safety_margin}）/ "
-                "--week-anchor 收紧预算，或 --pool-total-credits 设绝对上限",
-                "ERROR",
-            )
             return
 
         # 5xx / 其他：短冷却换个 Key 顶上
@@ -1130,10 +1167,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--weekly-credits", type=float, default=600000,
                    help="每账号 Flash-lite 专属池每周积分上限（官方 60 万；"
                         "若控制台显示的实际规模更小，请按控制台填）")
-    opt("--safety-margin", type=float, default=0.45,
-                   help="预算安全系数（熔断线 = 上限 × 该系数）。0.45 = 内建 2 倍"
-                        "费率不确定性（实测区间 出333~720，估算取 360）——即使实际"
-                        "费率是估算的 2 倍，实扣也不会超过官方上限")
+    opt("--safety-margin", type=float, default=0.9,
+                   help="预算安全系数（熔断线 = 上限 × 该系数）。2026-09-24 从 0.45 "
+                        "提到 0.9：0.45 是费率不准时代的保守折扣（估算费率可能低估 2 "
+                        "倍），而费率已按控制台真值校准到 ±3%，继续用 0.45 只会让每个"
+                        "账号每周白丢约 33 万回赠积分。0.9 = 熔断线 5.4万/54万，仍留 "
+                        "10% 缓冲带。若重新校准后发现费率又偏了，先改费率、再考虑降它")
     opt("--week-anchor", default="Mon 00:00",
                    help="周固定窗口的起点（星期几缩写 + HH:MM，本地时区），如 "
                         '"Mon 00:00"、"Wed 09:30"。自该时刻起累计周烧量，到线停靠'

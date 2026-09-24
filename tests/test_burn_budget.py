@@ -21,6 +21,7 @@ from scripts.burn_sensenova import (
     KeyState,
     apply_week_anchors,
     is_flash_lite,
+    is_quota_exhausted,
     load_config,
     parse_args,
     parse_week_anchor,
@@ -172,8 +173,10 @@ def test_absolute_total_cap_parks_account_forever() -> None:
 
 def test_default_margin_is_conservative() -> None:
     args = parse_args([])
-    # 0.45 = 官方上限的一半：费率即使处在实测区间上沿（≈估算 2 倍）也不烧穿
-    assert args.safety_margin == 0.45
+    # 2026-09-24 从 0.45 提到 0.9。0.45 是费率不准时代的折扣（估算可能低估 2 倍），
+    # 但费率已按控制台「本周剩余」两次读数差校准到 ±3%，继续折半只会让每个账号
+    # 每周白丢约 33 万回赠积分。0.9 = 熔断线 5.4万/54万，仍留 10% 缓冲带。
+    assert args.safety_margin == 0.9
     assert args.week_anchor == "Mon 00:00"
     assert args.pool_total_credits == 0
 
@@ -432,3 +435,71 @@ def test_committed_template_pins_the_flash_lite_model() -> None:
     for name in ("burner.example.yaml", "burner.yaml"):
         text = (root / "config" / name).read_text(encoding="utf-8")
         assert "model: sensenova-6.8-flash-lite" in text, name
+
+# ---------------------------------------------------------------------------
+# 429 二义性：限流 vs 权益用尽（2026-09-24 实测，商汤两者都返回 429）
+# ---------------------------------------------------------------------------
+
+#: 商汤真实返回体（2026-09-24 逐把 Key 单发抓到，keep verbatim）
+_TPM_BODY = '{"error":{"message":"tpm exhausted","type":"quota_exceeded_error","code":"8"}}'
+_RPM_BODY = '{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}'
+_RPS_BODY = '{"error":{"message":"rps exhausted","type":"quota_exceeded_error","code":"8"}}'
+_ENTITLEMENT_BODY = (
+    '{"error":{"message":"token plan entitlement exhausted",'
+    '"type":"quota_exceeded_error","code":"8"}}'
+)
+_BALANCE_BODY = (
+    '{"error":{"message":"plan balance exhausted",'
+    '"type":"quota_exceeded_error","code":"8"}}'
+)
+
+
+@pytest.mark.parametrize("body", [_TPM_BODY, _RPM_BODY, _RPS_BODY,
+                                  "Requests per minute exceeded",
+                                  "rate limit reached, please retry later"])
+def test_rate_limited_bodies_are_not_mistaken_for_exhaustion(body: str) -> None:
+    """限流要短冷却重试；误判成「用尽」会让账号白停靠几小时不烧。"""
+    assert is_quota_exhausted(body) is False
+
+
+@pytest.mark.parametrize("body", [_ENTITLEMENT_BODY, _BALANCE_BODY,
+                                  "insufficient credits for this request",
+                                  "您的权益已用尽，请下周再来"])
+def test_entitlement_exhausted_bodies_are_recognised(body: str) -> None:
+    """权益用尽要长停靠到周期刷新；误判成限流会每 60s 空转刷一次 429。"""
+    assert is_quota_exhausted(body) is True
+
+
+def test_quota_branch_runs_before_the_429_branch() -> None:
+    """回归：早先 `if status == 429` 挡在前面，「权益用尽」分支是死代码，
+    于是 KEY_07（权益已用尽）只被冷却 60s 后反复重试，只能靠人在
+    config/burner.yaml 里手工排除它。现在程序必须自己认出并长停靠。"""
+    burner = _burner(quota_park_hours=12)
+    acct = burner.keys[0].account
+    ks = burner.keys[0]
+
+    burner.on_error(ks, 429, _ENTITLEMENT_BODY)
+
+    # 长停靠（12h），不是 60s 短冷却
+    assert acct.park_reason == "疑似额度/积分耗尽"
+    assert acct.parked_until > time.time() + 11 * 3600
+    # 停靠期间不许再放行预算
+    assert burner.budget_allow(acct, 1.0) is False
+
+
+def test_tpm_exhaustion_still_cools_down_instead_of_parking() -> None:
+    """对照组：tpm exhausted 只该短冷却 + AIMD 降档，绝不长停靠。"""
+    burner = _burner()
+    acct = burner.keys[0].account
+    ks = burner.keys[0]
+    start_target = acct.target
+
+    burner.on_error(ks, 429, _TPM_BODY)
+
+    # 没被长停靠（这正是要守住的：别把限流当成权益用尽）
+    assert acct.park_reason == ""
+    assert acct.parked_until == 0.0
+    assert ks.rate_limited == 1
+    # AIMD 乘性减：撞一次 429 目标减半，而不是钉死或长停靠
+    assert acct.target == start_target / 2
+    assert acct.target > 1.0
