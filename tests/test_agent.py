@@ -117,6 +117,54 @@ async def decide_approval(service, sid: str) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# 子任务派发（spawn_subagent）
+# --------------------------------------------------------------------------- #
+
+
+def spawn_config(tmp_path: Path, *, max_steps: int = 40, depth: int = 2,
+                 live_children: int = 2, total_children: int = 4):
+    """父子分**不同 provider** 的配置。
+
+    为什么必须分：``AgentFakeAdapter`` 只有一个 deque，而 adapter 按 provider
+    注册——父子共用一个实例时会争抢同一条队列，父的 spawn 响应可能被子 pop 走，
+    时序上不可预测。分成 fake / fake-child 两家，各自的响应队列就独立了。
+    角色表也按此把 vision 指向 child 那边，父的 zk-auto 留在 fake 上。
+    """
+    config = make_config(
+        providers=[
+            make_provider("fake", key_ids=("key-1",)),
+            make_provider("fake-child", key_ids=("key-2",)),
+        ],
+        models=[
+            make_model("fake-model", provider_id="fake", capabilities={"tool_use": 9.0}),
+            make_model("fake-child-model", provider_id="fake-child",
+                       capabilities={"tool_use": 9.0, "vision": 9.0}),
+        ],
+        aliases=[
+            make_alias("zk-auto", ["fake-model"]),
+            # 带硬门槛的 vision 别名：vision 角色派过来时走这条链。
+            make_alias("zk-vision", ["fake-child-model"], requires={"vision": 8.0},
+                       weights={"vision": 5.0}),
+        ],
+    )
+    config.settings.agent_workspace = tmp_path / "ws"
+    config.settings.agent_max_steps = max_steps
+    config.settings.agent_context_token_limit = 1_000_000
+    config.settings.agent_max_depth = depth
+    config.settings.agent_max_live_children = live_children
+    config.settings.agent_max_children_total = total_children
+    return config
+
+
+def spawn_harness(tmp_path: Path, **kwargs):
+    """父 adapter（fake）+ 子 adapter（fake-child）的 harness。"""
+    parent_adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",)))
+    child_adapter = AgentFakeAdapter(make_provider("fake-child", key_ids=("key-2",)))
+    config = spawn_config(tmp_path, **kwargs)
+    return config, parent_adapter, child_adapter
+
+
+# --------------------------------------------------------------------------- #
 # Loop behaviour
 # --------------------------------------------------------------------------- #
 
@@ -449,4 +497,273 @@ async def test_api_agent_endpoints(tmp_path):
         assert r.status_code == 200
         r = await client.get(f"/admin/agent/sessions/{sid}")
         assert r.status_code == 404
+    await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# spawn_subagent：派发成功
+# --------------------------------------------------------------------------- #
+
+
+async def test_spawn_child_completes_and_reports_back(tmp_path: Path) -> None:
+    """父派一个 vision 子任务，子的结论要回填进父的 tool_result。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path)
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "看这张图，说出颜色"})),
+        text_resp("子任务说主要颜色是蓝色，我据此继续。"),
+    )
+    child_adapter.queue(text_resp("图里的主要颜色是蓝色。"))
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    messages = await service.repo.messages(sid)
+    tool_rows = [m for m in messages if m["kind"] == "tool_result"
+                 and (m.get("data") or {}).get("tool") == "spawn_subagent"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["data"]["ok"] is True
+    assert "图里的主要颜色是蓝色" in tool_rows[0]["content"]
+
+    # 父的下一步请求里必须带着这条 tool_result（OpenAI 协议要求配对）
+    last_request = parent_adapter.requests[-1]
+    assert any(m.role == "tool" and "子任务" in (m.content or "") for m in last_request.messages)
+
+    # 子会话自己是独立的会话，不是父 transcript 里的几行
+    child_ids = [r["id"] for r in await service.repo.list_sessions()
+                 if r["id"] != sid]
+    assert len(child_ids) == 1
+    child_messages = await service.repo.messages(child_ids[0])
+    assert child_messages[0]["content"] == "看这张图，说出颜色"
+    await harness.container.shutdown()
+
+
+async def test_unknown_role_returns_the_role_list(tmp_path: Path) -> None:
+    """角色不在注册表 -> ok=False + 可用清单，父会话本身不能失败。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path)
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "厨师", "task": "炒个菜"})),
+        text_resp("没有这个角色，我自己来。"),
+    )
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    tool_rows = [m for m in await service.repo.messages(sid)
+                 if m["kind"] == "tool_result"
+                 and (m.get("data") or {}).get("tool") == "spawn_subagent"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["data"]["ok"] is False
+    output = tool_rows[0]["content"]
+    assert "厨师" in output and "vision" in output and "coder" in output
+    # 不该真的起一个子会话
+    assert len(await service.repo.list_sessions()) == 1
+    await harness.container.shutdown()
+
+
+async def test_child_cannot_spawn_grandchild(tmp_path: Path) -> None:
+    """子的工具箱里没有 spawn_subagent——模型硬调也拿不到这个 schema。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path)
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "看图"})),
+        text_resp("收到。"),
+    )
+    # 子不服气，硬要再派一级
+    child_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "再派一层"})),
+        text_resp("派不动，我自己看完图了。"),
+    )
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    # 子请求里根本没有 spawn_subagent 这个 schema
+    assert child_adapter.requests, "子会话应该发过请求"
+    for request in child_adapter.requests:
+        assert request.tools is not None
+        assert "spawn_subagent" not in {t["function"]["name"] for t in request.tools}
+
+    # 全局只有父子两个会话，没有孙辈
+    assert len(await service.repo.list_sessions()) == 2
+    await harness.container.shutdown()
+
+
+async def test_child_failure_does_not_kill_the_parent(tmp_path: Path) -> None:
+    """子会话炸了，父拿到 ok=False 的说明，仍能自己收尾。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path)
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "看图"})),
+        text_resp("子任务失败了，我自己处理。"),
+    )
+
+    async def boom(request, ctx):
+        raise UpstreamServerError("上游全挂", provider="fake-child", model="fake-child-model")
+
+    child_adapter.chat = boom  # type: ignore[method-assign]
+
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    tool_rows = [m for m in await service.repo.messages(sid)
+                 if m["kind"] == "tool_result"
+                 and (m.get("data") or {}).get("tool") == "spawn_subagent"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["data"]["ok"] is False
+    assert "上游全挂" in tool_rows[0]["content"]
+    await harness.container.shutdown()
+
+
+async def test_live_children_limit_refuses_a_second_child(tmp_path: Path) -> None:
+    """同一轮里并行派两个子任务，第二个该被「并发已满」拒绝。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path, live_children=1)
+    # 父一次性吐出两个 spawn 调用
+    parent_adapter.queue(
+        tool_resp(
+            ("spawn_subagent", {"role": "vision", "task": "第一张图"}),
+            ("spawn_subagent", {"role": "vision", "task": "第二张图"}),
+        ),
+        text_resp("一个成功一个被拒，我按成功的那个继续。"),
+    )
+    child_adapter.queue(text_resp("第一张图是蓝色的。"))
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    tool_rows = [m for m in await service.repo.messages(sid)
+                 if m["kind"] == "tool_result"
+                 and (m.get("data") or {}).get("tool") == "spawn_subagent"]
+    assert len(tool_rows) == 2
+    verdicts = sorted(str(r["data"]["ok"]) for r in tool_rows)
+    assert verdicts == ["False", "True"], verdicts
+    refused = next(r for r in tool_rows if r["data"]["ok"] is False)
+    assert "并发已满" in refused["content"] or "上限" in refused["content"]
+    await harness.container.shutdown()
+
+
+async def test_depth_gate_refuses_deeper_dispatch(tmp_path: Path) -> None:
+    """depth 到上限时直接拒绝，且不能把父会话拖成 failed。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path, depth=1)
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "看图"})),
+        text_resp("派不动，我自己来。"),
+    )
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    tool_rows = [m for m in await service.repo.messages(sid)
+                 if m["kind"] == "tool_result"
+                 and (m.get("data") or {}).get("tool") == "spawn_subagent"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["data"]["ok"] is False
+    assert "深度" in tool_rows[0]["content"]
+    assert len(await service.repo.list_sessions()) == 1  # 没起子会话
+    await harness.container.shutdown()
+
+
+async def test_children_do_not_steal_the_root_semaphore(tmp_path: Path) -> None:
+    """死锁回归：max_concurrent=1 时根会话派出的子任务仍要能跑起来。
+
+    这是本次最容易踩的坑。根 loop 持着 ``_sem`` 等子，子若也来抢 ``_sem``，
+    在 max_concurrent=1 下就是「持锁等锁」——父子互等，两个会话永远不结束。
+    子走独立的 ``_child_sem``，所以这里即使只给一个根槽，子也该跑完。
+    """
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path)
+    config.settings.agent_max_concurrent = 1
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "看图"})),
+        text_resp("子任务回来了，我收尾。"),
+    )
+    child_adapter.queue(text_resp("图是蓝的。"))
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"}, max_wait=10)
+    assert row["status"] == "done", row["error"]
+
+    tool_rows = [m for m in await service.repo.messages(sid)
+                 if m["kind"] == "tool_result"
+                 and (m.get("data") or {}).get("tool") == "spawn_subagent"]
+    assert tool_rows and tool_rows[0]["data"]["ok"] is True
+    assert "图是蓝的" in tool_rows[0]["content"]
+    await harness.container.shutdown()
+
+
+async def test_child_events_reach_the_parent_subscribers(tmp_path: Path) -> None:
+    """子会话的进度要透传到父的 SSE 订阅者，否则父页面看不出子在干什么。"""
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path)
+    parent_adapter.queue(
+        tool_resp(("spawn_subagent", {"role": "vision", "task": "看图"})),
+        text_resp("收到。"),
+    )
+    child_adapter.queue(text_resp("蓝"))
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    sid = await start_session(harness, parent_adapter)
+    queue = await service.subscribe(sid)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    child_events: list[dict[str, Any]] = []
+    while not queue.empty():
+        event = queue.get_nowait()
+        if event.get("type") == "child_event":
+            child_events.append(event)
+    assert child_events, "父订阅者应该收到子会话的事件"
+    # 透传的事件必须带 child_session，前端才知道这行属于哪个子任务
+    assert all(e.get("child_session") for e in child_events)
+    service.unsubscribe(sid, queue)
+    await harness.container.shutdown()
+
+
+async def test_spawn_capacity_is_independent_of_root_capacity(tmp_path: Path) -> None:
+    """子任务容量与根容量是两个独立信号量，互不挤占。"""
+    from app.services.agent.service import AgentService
+
+    config, parent_adapter, child_adapter = spawn_harness(tmp_path, total_children=4)
+    harness = await build_harness(config, adapters={
+        "fake": parent_adapter, "fake-child": child_adapter,
+    })
+    service = harness.container.agent_service
+    # 根 3 席、子 4 席，是两个不同的对象
+    assert service._sem._value == 3  # type: ignore[attr-defined]
+    assert service._child_sem._value == 4  # type: ignore[attr-defined]
+    assert service._sem is not service._child_sem
+    assert isinstance(service, AgentService)
     await harness.container.shutdown()

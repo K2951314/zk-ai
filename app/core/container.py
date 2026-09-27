@@ -203,6 +203,7 @@ async def build_container(
         pool=pool,
         policy=policy,
         request_timeout=settings.request_timeout,
+        max_input_tokens=settings.max_input_tokens,
     )
 
     config_repository = ConfigRepository(database)

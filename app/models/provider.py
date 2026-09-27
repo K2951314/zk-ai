@@ -134,6 +134,26 @@ class DeploymentConfig(BaseModel):
     max_output_tokens: int | None = None
     #: Overrides merged on top of the model's capability scores.
     capabilities: dict[str, float] = Field(default_factory=dict)
+    #: Per-deployment hard gates: the deployment is only considered when the
+    #: *request's* requirement on these dimensions is at least as strong.
+    #:
+    #: ``requires`` on a :class:`ModelAliasConfig` says "the request must have
+    #: capability X"; this field says the opposite - "this deployment is only
+    #: worth calling for requests that already demand quality X". It is the
+    #: missing knob that lets one target list hold both a flagship and cheap
+    #: models without the linear weighted sum collapsing to a single winner:
+    #: instead of fighting over the *score*, each deployment declares which
+    #: class of request it is allowed to serve.
+    #:
+    #: Keys are capability dimension names; values are 0-10 minimums on the
+    #: requirement's ``weights`` (i.e. inferred importance, **not** the model's
+    #: own score). A request whose reasoning weight is ``5.0`` (reasoning
+    #: keywords detected) clears ``reasoning: 3.0``; a plain "hi" (weight 1.0)
+    #: does not, and that deployment is gated out for it.
+    #:
+    #: Empty (default) = consider this deployment for every request, exactly
+    #: the behaviour before this field existed.
+    request_requires: dict[str, float] = Field(default_factory=dict)
     #: USD per 1M tokens, informational (used for cost statistics).
     input_cost_per_mtok: float = 0.0
     output_cost_per_mtok: float = 0.0

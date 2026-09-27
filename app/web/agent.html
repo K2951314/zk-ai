@@ -145,6 +145,12 @@
     border: 1px solid var(--border); border-radius: 999px; color: var(--text-2);
   }
   .routing { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
+  /* 子任务结论：保留换行与缩进，但长文本不该把卡片撑爆 */
+  .spawn-body { white-space: pre-wrap; word-break: break-word; font-size: 13px;
+    line-height: 1.55; margin-top: 6px; max-height: 320px; overflow: auto; }
+  .linklike { background: none; border: 0; padding: 0; margin-top: 7px; cursor: pointer;
+    font-size: 11.5px; color: var(--accent); text-decoration: underline; }
+  .linklike:hover { color: var(--accent-strong, var(--accent)); }
   .approval-actions { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
   .approval-actions .ok { color: var(--ok); border-color: var(--ok-border); }
   .approval-actions .ok:hover { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
@@ -325,6 +331,18 @@ function toolCallChips(tcs) {
     `<span class="toolchip">🔧 ${esc(tc.function?.name || "?")}</span>`).join("")}</div>`;
 }
 
+function childEventLabel(ev) {
+  const names = (ev.tool_calls || []).map(c => c.function?.name || "").join("、");
+  const map = {
+    step_start: `第 ${ev.step} 步开始`,
+    assistant: ev.tool_calls?.length ? `调用了 ${names}` : "给出了中间答复",
+    tool_result: `工具 ${ev.tool || ""}${ev.ok ? " 成功" : " 失败"}`,
+    session_done: ev.status === "done" ? "已完成" : `结束（${ev.status}）`,
+    note: "有新的进展说明",
+  };
+  return map[ev.type] || "有更新";
+}
+
 function appendMessageRow(m) {
   const d = m.data || {};
   if (m.role === "user") {
@@ -346,6 +364,21 @@ function appendMessageRow(m) {
     } else {
       renderApprovalCard(m);
     }
+    return;
+  }
+  if (d.tool === "spawn_subagent") {
+    // 子任务：结论是关键，因此单独一张卡而不是糊一脸 <pre>。
+    // child_session 可点，直接跳到那个子会话看完整过程。
+    const kid = d.child_session;
+    const jump = kid
+      ? `<button class="linklike" data-kid="${esc(kid)}">查看子会话 ${esc(kid.slice(0, 8))}</button>`
+      : "";
+    const row = addRow(`<div class="card" style="border-left:3px solid var(--accent)">
+      <div class="who">🧩 派生子任务
+        <span class="chip ${d.ok ? "done" : "failed"}">${d.ok ? "已完成" : "未完成"}</span></div>
+      <div class="spawn-body">${esc(m.content || "")}</div>${jump}</div>`);
+    const btn = row.querySelector("[data-kid]");
+    if (btn) btn.onclick = () => openSession(btn.dataset.kid);
     return;
   }
   if (m.role === "tool") {
@@ -486,6 +519,10 @@ function handleEvent(ev) {
       return;
     case "note":
       addRow(`<div class="step-line">— ${esc(ev.content)} —</div>`);
+      return;
+    case "child_event":
+      // 子会话的进度透传：给父页面一行可见性，细节去子会话里看。
+      addRow(`<div class="step-line">子任务 ${esc((ev.child_session || "").slice(0, 8))}·${esc(childEventLabel(ev))}</div>`);
       return;
     case "session_done": {
       const old = document.querySelector(".step-live");

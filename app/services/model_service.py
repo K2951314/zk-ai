@@ -94,6 +94,7 @@ class ModelService:
                     "context_window": deployment.context_window,
                     "max_output_tokens": deployment.max_output_tokens,
                     "capabilities": deployment.capabilities,
+                    "request_requires": deployment.request_requires,
                     "input_cost_per_mtok": deployment.input_cost_per_mtok,
                     "output_cost_per_mtok": deployment.output_cost_per_mtok,
                     "supported_params": deployment.supported_params,

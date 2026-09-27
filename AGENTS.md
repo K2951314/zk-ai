@@ -43,6 +43,58 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   6 部署时 DeepSeek/Qwen 根本进不了计划，坏渠道烧光 `max_total_attempts` 就整体失败
   （已改 8）。**NVIDIA `max_retries` 会让挂起重试翻倍墙钟**（60s 超时→120s+/次），
   已设 0——挂起交给上层冷却+换渠道，别盲目重试
+- **`estimated_input_tokens()` 曾低估 2.67 倍，`context_fits` 因此空转（2026-09-25
+  修）**：日志记 269,162 est，上游实报 719,090 prompt_tokens（中文负载低估 4.0 倍）。
+  根因两条：①只累加 `message.text()`，**完全无视 `tool_calls.function.arguments`**
+  ——真实 Codex 会话 1274 个 call 共 746,953 字符全部漏算；②`tools` 用
+  `len(str(self.tools))`，Python dict 字面量比 JSON 短（单引号、`True`/`None`），
+  31 个工具的 schema 被系统性低估。已修（`app/models/request.py`），回归测试
+  `tests/test_token_estimator.py`（13 例，含图片 token 与「不许重复 //4」）。
+  **注意 `context_fits` 还留着 10% 余量**，那是给分词器误差的；低估 2.67 倍时
+  它反而帮倒忙，将来若接「估算值校准」要先想清楚这 10% 怎么处理。
+  **2026-09-25 又补了图片 token**：图发自上游后（见下条）这部分是真实成本，
+  实测 25 张真实截图 ≈ 34,699 tokens。**两个 part-type 集合别混**：
+  Responses 侧是 `input_image/output_image/image`，chat 侧是
+  `image_url/image/input_image`——翻译后 type 会变，估算器按像素算 token
+  （解 PNG IHDR / JPEG SOF / GIF / WebP 头），**不能按 base64 长度**（实测
+  每千字符 3,193~114,970 px，差 36 倍），且图片 token **不参与最后那个 //4**
+  （否则 34,699 会被压成 8,676）。
+- **413 有两道闸，别混为一谈（2026-09-25 梳理）**：字节闸（`app/main.py` 中间件，
+  `ZKAI_MAX_REQUEST_BODY_MB`，默认 10MB）与 token 闸（`RequestService._guard_input_size`，
+  `ZKAI_MAX_INPUT_TOKENS`，默认 0 关闭）。坑有四个：
+  ①**字节闸只看 `content-length` 首部**，chunked 上传不带这个头 → `declared=0` →
+     整个闸失效（Codex 的 `responses_retry` 带这个头，所以它撞的是"太宽"不是"太松"）；
+  ②**字节闸的 413 早退分支以前不写日志**（跳过中间件末尾统一的 `logger.info`），
+     本机 53,402 行 gateway.log 实测 `-> 413` 命中 0 次——客户端只看到一句
+     「请求体过大」，网关侧查无实据。已补 WARNING（`test_api.py::
+     test_oversized_body_leaves_a_log_trace` 守住，已验证原始代码上它会失败）；
+  ③**两个字段都没有 YAML 桥接**（全仓 grep `ZKAI_MAX_REQUEST_BODY`/`ZKAI_MAX_INPUT_TOKENS`
+     零命中），改 `config.yaml` 是静默无效——这正是"Codex 让你改 .env 而不是 config.yaml"的原因；
+  ④**调大字节阈值的方向是反的**：10MB ≈ 290 万 est tokens，而现役最大上游窗口只有 1M
+     （K3/GLM-5.3/StepFun），实测击穿点 body 4.99MB / 1.25M est tokens 时 0 个部署幸存
+     ——放过去只会吃上游 400/429。要放行先有 token 闸兜着。
+  token 闸挂在 `RequestService.chat` + `stream`（三条对外路径的收敛点，含流式——
+  **流式不经过 `chat()`**，只挂一处会漏掉最大的那批），报错复用既有
+  `ContextLengthExceededError`（413 + `context_length_exceeded`，`tests/test_errors.py`
+  钉住它不换 Key 不故障转移），文案指出最大几段 + 怎么调。
+- **Codex 截图的两种丢法，与 2026-09-25 的修复**：`app/models/request.py` 的
+  `_flatten_text` 只认 `input_text/output_text/text/refusal`，`input_image` 被吞。
+  实测同会话 `json.dumps(input)` 14,862,637 B 而 `chat.model_dump_json()` 仅
+  2,983,328 B（**比值 4.98**），base64 图片 11,390,912 B 占 76.6%。
+  顺带纠正一个流传的误判：本机 Codex 会话的**文本**工具输出中位数仅 445 字符、
+  最大 9,282 字符，**没有任何文本巨物**；942KB 以上的全是 view_image 的 base64。
+  所以「别再 cat 整份文件」打错了靶子。两种丢法都不是好事：
+  ①**裸 `input_image` item**（真实 rollout 里 24/25 张是这种，直接躺在 input
+     数组）被 `if kind and kind != "message": continue` **整条丢弃**——连
+     "这里有过图"都不留；②混在 `function_call_output` 里的图变成**空字符串
+     tool 消息**——发到上游等于撒谎「这个工具没返回内容」，模型据此判断会答错。
+  **已修**（`_translate_input` 三处都转成 `image_url` content part），开关
+  `ZKAI_FORWARD_IMAGES`（默认 true），关掉则回落一行占位文本。
+  **代价必须一起校准**：图发自上游后上游流量从 2.8MB 涨到 29MB（**10 倍**），
+  10MB 字节闸直接被触发——所以同时给估算器补了图片 token（见下面那条），
+  否则 token 闸对图片失明（实测只报 50 tokens）。
+  **`/v1/messages` 路径本来就没这个 bug**（`_image_part` 早已实现），不用改。
+  测试 `tests/test_token_estimator.py` 5 例；真实 E2E 验过图片确实到上游。
 - **数据库并发串行化（2026-09-19）**：`:memory:`/池化 aiosqlite 是单连接，两个
   AsyncSession 在同一连接上事务互相踩——实测表现为 UPDATE 静默丢失、空事务
   COMMIT 报错。`Database.session()` 已加进程级 asyncio.Lock 把事务串行化；
@@ -119,270 +171,89 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 ## 当前状态（2026-09-19）
 
+- **`.env` 换行损坏只在换机后发生，共 1 次（2026-09-24）**：115 行全部
+  `\r\r\n`，细节见上面「已知坑」里那条。**9-26 我曾把它写成「第二次复发」，
+  那是误判**——当天真正发生的是：我为给测试跑门禁，用脚本往 `.env` 写过两次最小
+  占位内容，最后一次写成 UTF-16LE（BOM `fffe`）且只剩一个键，**把真配置覆盖掉了**。
+  症状是 `import app.main` 直接 `UnicodeDecodeError`、6 个测试文件 collection error。
+  已从 `.env.bak-20260926` 恢复（UTF-8 无 BOM + 全 CRLF，115 行内容零差异），
+  真实启动验证 `/health` healthy、`/v1/models` 带令牌 200、启动日志 0 ERROR。
+  **教训（写给以后的自己）**：①**绝不用 `read_text()` 读写这个文件**——Python 文本
+  模式会把 CRLF 悄悄归一成 LF，混着写就成了半 LF 半 CRLF；要么全程字节，要么
+  `open(..., newline="")`（同 `chatgpt_service.apply_config`）。②**不许为了跑测试
+  去改本机 `.env`**——那是运营配置，不是测试夹具；门禁跑不了就停下来问，别再自作
+  主张写占位符。③`malformed_env_names()` 是现成的体检入口，返回空才算健康。
+  ④`scripts/migrate.py` 的 export 侧已有 `_check_env_health` 把关（`\r\r\n` 判据），
+  导入侧也会警告，这条链路是好的。
+- 2026-09-26（请求体/上下文治理，承接 Codex 413 排查）：①`estimated_input_tokens()`
+  补了 `tool_call arguments` 与图片 token，低估 2.67 倍的问题见「已知坑」；
+  ②Codex 截图不再被静默吞（`ZKAI_FORWARD_IMAGES`），见「已知坑」；
+  ③新增 token 闸 `ZKAI_MAX_INPUT_TOKENS`，**智能语义**：超过软上限不要紧，
+  只要有部署装得下就放行，只有「所有部署都装不下」才 413（`Router.plan` 零 I/O）。
+  本机现设 400000——覆盖历史分布 96% 的成功请求，又不误杀 719,090 那种大请求。
+  门禁 ruff / mypy / **616 passed**。
+- 2026-09-27（「智能分工」的真因：`pin_first` 会静默压过 `request_requires` 门槛）：
+  用户要「任何 agent 调用都能合理分工各模型」。**结论：机制本来就存在，一行配置就够，
+  不需要新建子链。**
+  - **现役已有分工机制**：`models.yaml` 里 kimi-k3 三个部署都配了
+    `request_requires: {reasoning: 4.0}`（`DeploymentConfig.request_requires`，
+    `app/routing/capability.py:238`）+ alias 的 `requires`——门槛不达标的部署直接被踢，
+    剩下的才按能力分排序。这套设计是对的，models.yaml 注释写着「旗舰的接活标准」。
+  - **病根**：`zk-auto` 静态配了 `pin_first: true`（且位置错位，夹在 zk-auto 的
+    `fallback_to_local` 与 zk-k3 注释之间，靠巧合归到 zk-auto）。
+    `strategy.py:160-168` 的 pin 分支**只按 `target_index` 排，不看 score、不看门槛**，
+    所以站在 `targets[0]` 的 `step-5-preview`（reasoning 8.5）赢下所有请求。
+    实测 `data/gateway.log`：zk-auto 有 25,642 次给 step-5、仅 3,022 次给 kimi-k3（89:10）；
+    用真实 rollout 24 条轮次回灌（14 条推理型）→ **100% 落 step-5，K3 一次没轮到**，
+    即使它分数更高（0.957 vs 0.837）、即使它过了 reasoning>=4 门槛。
+  - **修法**：删掉那个错位的 `pin_first: true`，在 zk-auto 块内显式写 `pin_first: false`。
+    同一批真实轮次回灌立刻变成：推理型 14 条 → kimi-k3，非推理型 10 条 → glm-5.3。
+    备份 `config/models.yaml.bak-20260927`。
+  - **为什么不直接删了 pin_first**：它同时是控制台「🤖 ChatGPT」热切换功能的依赖——
+    `app/api/admin.py:1239` 硬编码 `pin_first=True`，把所选模型提到 targets[0] 并钉住，
+    否则 capability 策略下高分模型恒赢、热切换 silently 无效。所以是「YAML 静态 pin
+    有害、代码热切换 pin 必要」——静态的那个删掉即可，热切换不受影响（它每次都会重写）。
+  - **教训（绕了四轮才想通）**：我先后四轮调 `weights`（reasoning 2→8、cost 3→0.5）
+    想让 K3「优先但适度分担」，每轮都是一边倒没有中间态。**真正的原因门槛在
+    `requires` 里、而 pin 在覆盖门槛——调 weights 对这两者都无效。** 识别信号：
+    同一个输入换权重后赢家只在两个模型间整体翻转、分数差恒定，而不是随输入变化。
+    以后遇到「聪明模型永远不接活」，先查 alias 有没有静态 pin_first，再查 weights。
+  - 测试 `tests/test_router.py` 两条（`test_request_requires_gate_divides_labour_without_a_pin`
+    的正向 + `test_a_static_pin_can_silently_defeat_the_request_requires_gate` 的反面对照），
+    已用变异法验证过鉴别力（移除门槛时正向测试精确失败在「机械请求该被门槛挡住」）。
+    门禁 ruff / mypy / **647 passed**。
+  - **现役还有第二层分工：`app/routing/agent_auto.py` 的按「形状」改写**（接线在
+    `router.py:210`，**监控的入口名就是 `zk-auto`**，不是另起的名字）。它在候选展开
+    **之前**按请求形状把 `zk-auto` 改写到别的链，让打分器只在选中的链内排名：
+    ①有图 → `zk-vision`（`requires: {vision: 8.0}` 硬门槛，无视觉能力的模型结构上不可能入选）；
+    ②`est >= 100_000` → `zk-long`（长上下文 + K3 唯一 1M 部署已饱和，机械长读该走空闲链）；
+    ③`has_tools and est >= 24_000` → `zk-long`（Codex 重放 31 个工具 schema + 5 万历史
+    只为产出 300 token 的 ack，不需要 K3 的 9.5 推理）；④其余**不改写**，留在 `zk-auto`
+    让 K3 有机会接。阈值故意设高——短的、规划重的工具轮仍走 `zk-auto`，「质量优先」是默认、
+    「省」是例外。DB 实测 Codex 近 7 天 ≥100k 的 1,131 条命中②。改写只改用于展开的 alias，
+    DB 里 `requested_model` 仍是 `zk-auto`，`zk_ai.alias` 显示改写后的链，可审计。
+  - **两层的边界别混**：`request_requires` 管「哪个部署有资格接」，`agent_auto` 管
+    「这批候选里该不该含 K3」。前者是资格、后者是范围，叠加是乘法不是互相取代。
+  - **差点犯的错**：我一度断定 `agent_auto.py` 是「接线了但没人用的死代码」要删，
+    依据是合成测试显示 `alias` 没变。**那是测试造假**——我只喂了最后一条 user 消息
+    （est 才 1.5k），够不到 24k 门槛，当然不改写；用真实轮次 + 真实规模重测，
+    1,131 条命中②。**教训：判断某段逻辑是否失效，先确认测试输入的量级真实，
+    否则「没触发」很可能是我喂得太小。** 反过来也栽过：我曾据一个合成输入断言
+    「中轮推理型会被误分流到 glm-5.3」，真实轮次下 0 条——**合成输入造出来的缺陷不算缺陷**。
+- 2026-09-26（晚，9.44 亿 input tokens 的病根定位 + `zk-long` + 按别名统计）：病根是
+  **`zk-k3` 单目标死钉 K3**（2,956 条、平均 input 228,745、io 比 640:1，吃掉全站 72%），
+  详见上面 9-27 条——但那条已修正了本条的归因（当时误判为「策略无中间态」，真因是
+  `pin_first` 压过门槛）。**仍然有效的部分**：①新增 `zk-long` 别名
+  （`glm-5.3`→`step-5-preview`→`deepseek-v4-flash`→`glm-5.3-flash`，capability，
+  刻意不含 K3），给客户端一个「要快/要省」的显式选择；②新增控制台「按别名」表
+  （`UsageRepository.summary` 的 `by_alias`，含 io_ratio，前端 >200:1 标黄 /
+  >500:1 标红）——这个维度此前只能靠 SQL 手工查，所以浪费长期隐形；
+  ③`purge_older_than` 必须连带删 `usage_records`，否则 join 不上的行会让
+  `by_alias` 少算（实测 30 天窗口差 15%），且必须用 `in_(select(...))` 子查询
+  （SQLite 变量上限 32766，先查 ID 再 in_ 会让清理永久停止）。
+  测试 `tests/test_usage_by_alias.py`。
+
 - 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
-- `retry.max_credentials_per_deployment` 已从 6 提到 8（试满全部商汤账号，
-  **重启网关后生效**）；会话残留已清干净（`*.mock.bak` 于 9-19，`data/*.stale` 与
-  `data/zkai.db.bak-*` 于 2026-09-21）
-- 对抗审查（2026-09-12）：git 历史无密钥、鉴权常量时间比较且 None 安全、Docker
-  不烤密钥（.dockerignore 已补）。**遗留决策（2026-09-20 已收紧）**：
-  `ZKAI_HOST=0.0.0.0` 曾且未设 `ZKAI_API_TOKEN` → /v1/* 对局域网开放；现已设
-  `ZKAI_API_TOKEN=zk-ai-local`（.env + 用户级环境变量——桌面版 app 从 explorer
-  启动不继承 shell 变量，两个来源都要有），POST /v1/* 需要
-  `Authorization: Bearer zk-ai-local`（GET /v1/models、/health 按设计免鉴权）。
-  **换机器/清环境变量后要同步所有客户端**（ZCode provider、cc-switch 等都发这个值）
-- 2026-09-13：`ZKAI_STRIP_REASONING=true` 折叠思考已生效（含回填进正文的思考，
-  README §18 缺陷 11）；`.env.example` 补了 `ZKAI_API_TOKEN` 可发现行；
-  双窗口模型（`--anchors`）就绪，待用户从控制台判定滚动/锚点后填值
-- 2026-09-13（晚）：新增原生 **`/v1/messages`（Anthropic 协议）端点**  （`app/api/messages.py` + `app/models/anthropic.py`，`ZKAI_ANTHROPIC_DEFAULT_MODEL`
-  兜底 claude-* 模型名）。起因：CC Switch 的 openai_chat 翻译层缺
-  `content_block_stop` → Claude Code 收到空回复（对照实验实锤）；CC Switch 里
-  zk-ai 供应商已切 `anthropic` 直通（BASE_URL 去掉 `/v1`），`claude -p` 与
-  工具调用端到端验证通过。次要问题待观察：商汤 K3 对 2.5 万 token+ 请求会
-  TPM 429（重试风暴）、moonshot 部署无可用 Key、nvidia 偶发流式连接超时
-- 2026-09-17：①新增 **NVIDIA glm-5.3 / glm-5.3-flash** 模型，且 `/ui` 控制台支持
-  运行时**新建/编辑/删除模型与别名**。②新增**主动配额限速**
-  `app/routing/limits.py`：滑动窗口，支持按请求数（`max_requests`）与 token 数
-  （`max_tokens`）双口径、credential/account/provider 三作用域；NVIDIA 单账号
-  40rpm、商汤按账号 5h+周 token 预算（约 300M/3G，积分折算的保守值，控制台可校准）。
-  scheduler 选中即记账、成功后回喂 token；到线的 Key 直接跳过。③限额可在控制台
-  「凭据池 → ⚙ 限额」运行时改（`PUT/DELETE /admin/providers/{id}/limits`）。
-  **坑**：真实模型响应常 >60s，串行测 rpm 限额会因窗口滑走而全过——验证要用并发 burst。
-  计数持久化 `data/rate_limits.json`（脏才写，测试不污染）
-- 2026-09-18：①**控制台写操作改为直接回写 YAML**（`app/core/config_writer.py`，
-  ruamel 保注释往回编辑；删除走文本行拼接，因为 ruamel 重排会乱注释归属）。
-  之前只存 DB 镜像 → 删掉的模型/别名在 reload/重启后被 YAML 复活。现在
-  **文件是唯一真相**：写失败整体 500 回滚，models/aliases 不再从 DB 回叠
-  （`apply_db_overrides` 只留限额一项兜底）。每步留 `<name>.yaml.bak`。
-  ②**网关/消耗器收进系统托盘**（`scripts/tray_launcher.py`，pystray 自绘蓝绿图标；
-  绿=运行、蓝=停止/静默超时；右键查看日志/打开控制台/重启/退出）。
-  **坑**：uv 的 `.venv\Scripts\python(w).exe` 是 trampoline，会再启动一次真解释器，
-  `CREATE_NO_WINDOW|DETACHED_PROCESS` 不会跟着传递 → 最内层 python.exe 自己新建
-  控制台窗口（任务栏残留）。必须读 `pyvenv.cfg` 的 `home` 直接用 base 目录的真
-  `pythonw.exe` + `__PYVENV_LAUNCHER__` 指回 venv；port_guard 及其
-  powershell/taskkill 子进程也都要 `CREATE_NO_WINDOW`
-- 2026-09-18（晚）：①控制台**增删供应商**（POST/DELETE `/admin/providers`，
-  回写 `providers.yaml`，编辑不动已有 Key/限额；`config_writer.upsert_provider`
-  保护 credentials 列表——`_sync_entry` 会把 payload 没有的字段删掉，这是修复过的
-  坑）。②模型市场加**实时搜索**（搜模型名/说明）。③凭据池页加「➕ 加 Key」
-  「🏢 供应商」按钮。④README §13.2 端点表与控制台描述补齐。
-- 2026-09-23（全站汉化 + 控制台视觉重构）：**界面、接口报错、脚本输出全部中文**。
-  - `app/web/index.html` 重做为「**左侧导航 + 内容区**」：侧栏分组（监控 / 配置）、
-    顶栏只留连接状态 + 令牌 / ChatGPT / 主题 / 刷新；KPI 改大数字卡（`.kpi`），
-    供应商卡 `.prov-card`，「需要处理」面板改 `.attention` 分级列表，弹窗统一
-    `.modal-actions` / `.modal-sub` / `.facts-card`；深浅双主题、窄屏侧栏降级为
-    顶部横滑。**JS 一行未改**，DOM id / `data-*` 钩子 / 函数名全部保留——
-    重构靠 `tests/test_console_zh.py` 守住契约（视图/弹窗/导航/顶栏 id 与
-    `data-view` 逐项断言）+ 无残留英文 UI 文案。
-  - `app/web/agent.html` 视觉对齐（同一套 CSS 变量与组件语言），交互逻辑未动；
-    会话状态码加了 `AGENT_STATUS_ZH` 中文映射（pending/执行中/待批准/…）。
-  - 接口报错 message 全中文（`app/api/*.py`、`app/routing/router.py`），
-    **`error.type` 机器码与 HTTP 状态码一律不变**；`summary=` / `Query(description=)`
-    （`/docs` 里给人看的）也一并汉化。
-  - 脚本输出汉化：`launch_hidden.py` / `open_console.py` / `health_check.py` /
-    `tray_launcher.py`。`.cmd` 仍保持纯 ASCII + CRLF，中文只放 Python 侧。
-  - 测试断言同步更新（`test_launch_helpers.py` 的两处英文提示）；门禁
-    ruff / mypy / **523 passed**。
-- 门禁 ruff / mypy / pytest 全绿（2026-09-23 全站汉化与控制台重构后 **525 passed**，含 `tests/test_console_zh.py` 11 例守卫）；`git push` 走本机代理
-  （`git -c http.proxy=http://127.0.0.1:10808 push`），直连 github.com 常被重置
-- 消耗器费率已两次控制台实测交叉校准（实际 ≈入111/出333 积分/百万token，区间
-  111~240/333~720），默认 120/360 显示贴合实扣；账本持久化在 `data/burn_state.json`
-  （重启不清零），`--calibrate-actual 实扣数` 可随时精校准；并发 AIMD 自适应
-  （全局≤128、单账号 8→24、429 减半/静默每分钟 +1），429 频繁就调低 `--per-account-max`
-- 2026-09-19：①**修积分池溢出事故**（用户实测专属池烧穿、吃掉 K3 通用池积分）：
-  根因 = 周预算滚动记账「遗忘」旧消耗 + 费率取实测区间下沿 → 熔断线（54 万/周）
-  按烧速（≈27 万/周/账号）物理上永远触不到。修复：周预算改**固定窗口**（自
-  `--week-anchor` 默认周一 00:00 起累计，到线停靠至下周锚点）、`--safety-margin`
-  默认 0.9→0.45（内建 2 倍费率不确定性）、新增 `--pool-total-credits` 绝对上限
-  （到线永久停靠）、额度耗尽错误升级为「溢出实锤」ERROR 告警。行为变化：全速烧
-  到周预算线（≈27 万积分/账号）会停靠等下周——**预期行为，不是 bug**。测试
-  `tests/test_burn_budget.py`。②新增 **ZK-Agent 任务台** `/ui/agent`（Codex 式
-  批量任务跑批器，网关进程内）：`app/services/agent/`（loop/tools/confirm/prompts）
-  + `/admin/agent/*`（REST+SSE）+ `app/web/agent.html`；6 工具两段式审批
-  （写文件/跑命令需用户批准，diff/命令预览，破坏性命令硬黑名单），工作区路径
-  锁定（resolve 后必须落在 `ZKAI_AGENT_WORKSPACE` 内），步数/并发双熔断，
-  transcript 行即 LLM 重放历史（`agent_sessions`/`agent_messages` 表，重启可续）。
-  托盘菜单加「打开 Agent」；`ZKAI_AGENT_*` 配置见 .env.example。定位：批量跑批
-  + 网关展示窗，不做 IDE 替代品（Web 先行，CLI 壳/模型分级路由留待后续）
-- 门禁 ruff / mypy / pytest 全绿（371 passed）；E2E 实测（8400 临时实例）：会话
-  创建→真实路由→tool_calls→审批→命令执行→结果回填全链路通；第二步因当天
-  K3/GLM 链路整体超时正确转入 failed（上游波动，非 Agent bug）
-- 2026-09-20（供应商生命周期 + 易用性收口，实测坑）：
-  - **运行时改 provider 必须同步 adapter 表**：`Router._adapters` 只由构造/reload 重建，
-    运行时增删/禁用 provider 要走 `upsert_adapter()` / `remove_adapter()`，否则下一步
-    探测模型报 `provider 'X' is unknown or disabled`（500，极具误导性）
-  - **Key 只进 `.env`**：控制台 `write_env` 写 `.env` 并即时写 `os.environ`（无需重启生效），
-    YAML 只记变量名；`looks_like_secret()` 拦「40+ 位无分隔串填进 ID 栏」（真出过事：
-    Key 曾以 credential id 形态流进 yaml/db/界面/日志）。改已泄露的条目记得连 `.bak`
-    和 `data/gateway.log` 一起清
-  - **Anthropic 系供应商两个坑**：①`/messages` 认 `x-api-key` 但 `/models` 可能只认
-    `Authorization: Bearer`（StepFun 即如此），`list_models`/`model_catalogue` 要带 Bearer
-    回退；②`thinking` 块不能丢——小 `max_tokens` 截断在思考阶段会让客户端拿到空正文，
-    按项目约定进 `reasoning` extra 走 `_recover_reasoning_only_content` 回填
-    （该 helper 在 `ProviderAdapter` 基类；tool_calls 轮不回填，否则给工具调用粘上思考文本）
-  - **启动即用**：`scripts/open_console.py` 等端口后带 `?token=` 开控制台（令牌变了才需重粘）；
-    `scripts/first_run.py` 自动从 `.example` 建 `.env`/`config/*.yaml`；首页「⚠️ 需要处理」
-    面板列出没值的 Key / 没挂模型的供应商，每行一键修复；`/providers/{id}/models` 失败
-    返回带 note 的 200 而不是 500
-  - **模型能力以实测为准**：`app/models/discovery.py` 归一各厂 `GET /models` 的元数据
-    （**未提及的字段恒为 None，绝不编造**），实测压过手写预设，前端区分「实测/预估」；
-    无实测时才退回 `presets.py`
-  - **`upsert_list_entry` 的 `_sync_entry` 会删 payload 里没有的键**——改模型条目必须把
-    `deployments` 原样带回，否则整条被清空（已靠滚动 `.bak` 恢复过一次）
-  - 测试环境（`environment == "test"`）的容器不写 `data/rate_limits.json`（此前一直
-    在污染，旧文档声称的「测试不污染」不成立）
-  - 新增供应商保存后直接弹出加 Key 窗口（不用回首页再想起"供应商还不能直接用"）；
-    加 Key 表单选好供应商后自动起好 id/变量名。前端注意：**先绑定 onclick 再触发
-    click**，否则"自动探测"是空转（实测踩过）
-  - `.gitignore` 的 `config/*.bak` 已放宽为 `config/*.bak*`（`.bak-xxx` 这类后缀
-    原来匹配不到，`git add -A` 会把带密钥的备份带进仓库）
-- 2026-09-20（晚）：①**`/v1/responses` 补齐到 Codex 可用**（`app/api/responses.py`
-  的 `_ResponsesAssembler` + `ResponsesRequest` 全量翻译）：Codex CLI 0.154 起
-  **删掉了 chat wire**（配 `wire_api="chat"` 直接报错），只走 Responses，旧实现
-  （文本子集、无工具、SSE 直接发 `output_text.delta`）会被 codex 报
-  `OutputTextDelta without active item` 丢回复。现在：扁平 tools→嵌套、
-  `function_call`/`function_call_output` input items→assistant.tool_calls/tool
-  消息、输出侧组装 function_call items、流式按标准事件链
-  （created→output_item.added→content_part.added→delta→done→completed 完整
-  负载）。**临时实例 E2E 实测通过**：codex exec 写文件→执行→验证全闭环。
-  codex 接入配置见使用手册 §3.4（`[model_providers.zkai]` 纯增量，不依赖
-  ChatGPT 账号）。测试 `tests/test_responses_api.py`。②**商汤 Key 结构调整**：
-  01/02（同账号 A）已被操作员禁用（DB `credentials` 表 status=disabled），
-  现役 = 03–09 共 **7 账号 7 Key，每账号一把**；`max_credentials_per_deployment`
-  随之改为「单请求可轮换的账号数」，**删这行不会取消限制**（`from_mapping`
-  回落默认 3），加账号时同步 +1。yaml 里 01/02 两条僵尸条目待清理；
-  providers.yaml 注释 / README / 使用手册里「9 把 Key、最多 8 账号」的旧描述
-  已一并更正
-- 2026-09-20（深夜，托盘/桌面版接入实测坑）：
-  - **`CREATE_NO_WINDOW | DETACHED_PROCESS` 会让 powershell 的 CIM 查询静默返回空**
-    （rc=0、stdout 空）——`port_guard` 一直没被发现是因为它有 `/health` HTTP
-    兜底识别。短命探测进程（CIM/taskkill）要用裸 `CREATE_NO_WINDOW`
-    （`launch_hidden._PROBE_FLAGS`）；托盘 spawn 仍可用组合标志
-  - **托盘「重启」原来会卡死菜单**：`_ChildProcess.start()` 最长阻塞 ~40s
-    （terminate + port_guard + spawn）全跑在 pystray 菜单线程上，点击像死了。
-    已改 `restart_child()` 后台线程执行，心跳（3s）负责重绘图标
-  - **`launch_hidden.py` 加了防双开**：双击 cmd 原来会起第二个托盘，新托盘的
-    port_guard 杀掉旧托盘的孩子 → 旧托盘变蓝、通知区留幽灵图标。现在启动前
-    CIM 找同 mode 旧托盘，先 `taskkill`（无 /F，WM_CLOSE 让 pystray 自己撤图标），
-    5s 宽限后 /F /T。测试 `test_launch_helpers.py` / `test_tray_launcher.py`
-  - **ChatGPT 桌面版（26.915）接网关三要素**：`~/.codex/config.toml` 的
-    `[model_providers.zkai]`（wire_api="responses"）+ `ZKAI_API_TOKEN` 必须设为
-    **Windows 用户级环境变量**（app 从 explorer 启动不继承 shell 变量，缺了会回
-    "Missing environment variable"）+ **重启 app**（运行中的实例不重读配置）。
-    该版本桌面版**没有模型选择器**，模型完全由 config 的 `model` 决定；app 会用
-    picker 里的旧官方模型名探测网关（收到 404 model_not_found，无害）后落到
-    config 的 model。API key 登录态存 `~/.codex/auth.json`，重启不丢
-- 2026-09-20（商汤工具历史校验坑，实测复现）：**sensenova 对 chat 工具历史的
-  校验比 OpenAI 严**——①`function_call_output` 的 call_id 没有对应
-  function_call（孤儿输出，如编辑/打断过的会话重放）②对话以未应答的
-  function_call 结尾（悬空调用）——两者都直接 HTTP 400 `inference request is
-  invalid` 且**不故障转移**（400 归类为客户错误），桌面版一旦重放到这种历史就
-  永远打不通。`ResponsesRequest._translate_input` 已修复：连续 function_call
-  合并进单个 assistant 消息、孤儿输出丢弃、悬空调用立刻补一条
-  `(no output recorded)` 的 tool 消息（紧跟其 assistant 消息）。回归测试
-  `tests/test_responses_api.py`。另：本机 .env 设了 `ZKAI_API_TOKEN` 后会泄漏进
-  测试容器导致全体 401——`make_config` 已钉 `api_token=None`（与既有
-  strip_reasoning 钉法同源）
-
-- 2026-09-21（路由两连修）：
-  ①**控制台「实际模型」与供应商/凭据错配**——`resolved_model` 原本写别名计划链第一个
-    （targets[0]），而非实际命中的模型；故障转移时必然与 provider/credential 列打架
-    （例：显示 kimi-k3 但实际走了 StepFun）。`scheduler._final_meta` 已改为
-    `candidate.model.id`。回归测试 `tests/test_api.py::test_resolved_model_reflects_the_served_target`。
-  ②**ChatGPT 热切换原来不生效**——`zk-auto` 用 `strategy=capability`，targets 顺序
-    不决定首选，能力分最高的 kimi-k3 恒赢。新增 `ModelAliasConfig.pin_first`（默认 False），
-    `POST /admin/chatgpt` 切换时置 True，capability 策略检测到 pin 就把 targets[0]
-    钉在首位、其余仍按能力分排。回归测试
-    `tests/test_router.py::test_capability_strategy_pin_first_overrides_the_score_ranking`
-    + `tests/test_api.py::test_chatgpt_hot_swap_takes_effect_on_the_next_request`。
-
-- 2026-09-21（一键换机）：新增 `scripts/migrate.py`（export/import）+ 双击入口
-  `scripts\export_machine.cmd` / `scripts\import_machine.cmd`，README §20.1、
-  使用手册第 1 步均有说明。要搬的 = `.env`（全部 Key）+ `config/*.yaml` +
-  `data/zkai.db`（用量/会话/限额）+ `burn_state.json` / `rate_limits.json`。
-  **坑**：①迁移包和 `imports_backup/` 含明文 Key，`.gitignore` 已收
-  `exports/` 与 `imports_backup/`；②加密只用标准库（XOR + PBKDF2 + 内嵌
-  SHA-256），不为换机引入 `cryptography`/7-Zip 依赖——新机器只有 `.venv`
-  可用；③`_snapshot_database` 走 sqlite3 backup API，网关在写也不会拿到
-  半提交页；④导入默认**拒绝覆盖**，`--overwrite` 才覆盖且先备份到
-  `imports_backup/<时间戳>/`。测试 `tests/test_migrate.py`（12 例：载荷清单、
-  密文无明文 Key、往返、错密码 fail-closed、拒覆盖、备份优先、stale WAL 清理、
-  无库时不动 side-car、网关在跑时拒绝、端口取自 .env、冲突退出码、错密码给人话）。
-
-- 2026-09-21（晚，闪退排查→两处收口）：本机双击后窗口秒关、任务栏无图标，根因是
-  `.venv` 停在 9-12 从未再 `uv sync`，`ruamel-yaml`/`pystray`/`pillow` 全缺（详见
-  已知坑）。修的过程中补了两处能力：
-  ①**启动失败必须说话**：`launch_hidden.py` 不再把托盘输出丢进 DEVNULL，落
-  `data/tray_<mode>.log`，spawn 后 `_SETTLE_SECONDS`（1.5s）内托盘退出就打印退出码 +
-  日志尾部并返回 1；`start_gateway.cmd` 据此分 `:trayfailed`，并把 `open_console.py`
-  从 `--detach` 改成**前台等端口 30s**（`:nolisten` 分支），窗口只在真正失败时留下；
-  `start_burner.cmd` 同步加检查。副作用：正常启动窗口多停 ~1.5s+网关启动时间才关。
-  ②**导入不再制造损坏**：`import_package` 恢复 `data/zkai.db` 时先备份再删除目标机的
-  `-wal`/`-shm`（`_DB_SIDECARS`），CLI 侧 `_gateway_is_listening()` 发现端口有人听直接
-  拒绝（library 函数不探测，保持可脚本化）；`import_machine.cmd` 撞到覆盖守卫会问一句
-  就地带 `--overwrite` 重试。测试共 +9（`test_launch_helpers.py` 托盘崩溃/日志落盘/
-  存活三分支、`test_migrate.py` 上条所列 6 例），门禁 ruff / mypy / **445 passed**。
-  ③**`tests/test_burn_budget.py` 一直在污染真实日志**：`_burner()` 没传 `--log-file`，
-  `parse_args` 默认落到 `data/burn_sensenova.log`，于是每跑一次测试就往运营日志里追加
-  几行「账号 K1 预算触顶 / 永久停靠」——而这个文件正是托盘心跳判绿/蓝的依据。已加
-  autouse fixture 把 `DEFAULT_LOG` / `STATE_FILE` 重定向到 `tmp_path`（与 9-20 修
-  `rate_limits.json` 污染同源，那次只修了网关容器这一处）。
-  ④**migrate 的退出码成了 .cmd 的契约**：`_EXIT_CONFLICTS=3`（文件已存在，只有它才
-  值得问 `--overwrite`）、`_EXIT_BAD_PASSPHRASE=2`（密码错/包损坏——原来直接甩
-  ValueError traceback，手册却写着会给一句人话）、`_EXIT_ERROR=1`（含"网关在跑"拒绝）。
-  改这几个码要同步 `import_machine.cmd` 的 `if errorlevel 3` 分支。
-  **本机数据现状（已恢复）**：操作员 23:47 用 `exports/zkai-machine-20260921-221207.zip`
-  重导，一致快照 `PRAGMA integrity_check -> ok`，9 张表全可读（requests 10402 /
-  usage_records 5420 / request_attempts 29520 行）；导入前的旧文件在
-  `imports_backup/20260921-234749/`，里面能看到被换掉的 `zkai.db-wal`(4.1MB)/`-shm`
-  ——即本节 ② 那条新代码在真实导入里确实跑了。23:48 双击 `start_gateway.cmd`
-  重启，新链路（托盘日志 + 前台等端口 + 自动开控制台）实测走通。
-
-- 2026-09-22（ChatGPT 客户端配置修改 + 换机自动配置）：原来控制台「🤖 ChatGPT」只能把
-  模型提到 `zk-auto` 链首热切换，`~/.codex/config.toml` 全程只读。现在：
-  ①**期望配置落 `config/chatgpt.yaml`**（gitignore，模板 `chatgpt.example.yaml` 可提交；
-  密钥不进去，值永远取 `.env` 的 `ZKAI_API_TOKEN`）。②**`app/services/chatgpt_service.py`**
-  （纯 stdlib+pyyaml，migrate 也复用）：tomllib 读、**文本级外科手术写**——只动
-  `model`/`model_provider`/`model_reasoning_effort` 三个顶层键和 `[model_providers.<名>]`
-  表内的 `name/base_url/wire_api/env_key`，app 自管的 mcp_servers/plugins/projects/
-  desktop 段落**字节级保留**；写前 `config.toml.bak-<时间戳>`；无变更=不写不备份（幂等）；
-  保留 CRLF；支持 `mode: official` 一键切回官方（删 model_provider 行、provider 表留着
-  随时切回）。**auth.json 永远不写**（操作员 2026-09-22 明确决定）。③控制台端点：
-  `GET /admin/chatgpt`（desired/disk/drift/auth/gateway 全量状态）、
-  `PUT /admin/chatgpt/client`（保存期望配置，`apply=true` 同时落盘）、
-  `POST /admin/chatgpt/apply`（按期望配置重写本机）；`POST /admin/chatgpt` 热切换语义不变。
-  ④**换机**：`config/chatgpt.yaml` 进迁移包；`import_package` 恢复后自动 patch 新机
-  `~/.codex/config.toml`（新机器无 app 也先建最小配置）；`main()` 再把 `env_key` 指向的
-  令牌写进 **Windows 用户级环境变量 HKCU\Environment**（winreg + 广播
-  WM_SETTINGCHANGE，旧值备份进 `imports_backup/<stamp>/chatgpt_user_env.json` 并打印还原
-  命令）——explorer 启动的桌面版读不到 shell/.env 变量，这是「上来就能用」最后一环。
-  **09-22 晚事故修正**：provision 原本被 chatgpt.yaml 门控，漏掉「源机没存过它 +
-  操作员手抄 ~/.codex」这条真实换机路径（桌面版报 Missing environment variable）。
-  现改为 `.env` 门控；变量名按「磁盘 config.toml → chatgpt.yaml → 默认」解析
-  （`_resolve_env_key_name`，磁盘是第一真相）；写后**回读校验**，`.env` 缺值时输出直接给
-  setx 修复路径。配套：`GET /admin/chatgpt` 增 `env_key_name/env_key_visible/
-  env_key_matches_gateway` 字段；控制台状态条标红 + 「🔧 同步令牌到用户环境变量」按钮
-  （`POST /admin/chatgpt/sync-env`，写后同样回读校验）。
-  测试：`tests/test_chatgpt_config.py` 44 例 + migrate 24 例 + test_api 11 例；门禁全绿。
-  09-22 深夜对抗审查又加固 `apply_config`（坏 TOML 不碰 / 落盘前 tomllib+re-plan
-  双验证 / 备份时间戳防同秒覆盖 / 替换行尾注释保留 / 标量字段禁换行）+
-  `_provision_chatgpt_env` 接住注册表 OSError；配 9 个对抗回归测试，
-  变异抽查 6/6 被抓（详见当日日志）。
-
-- 2026-09-24（换机后网关起不来 → 定位到 `.env` 换行损坏）：新机双击后托盘转蓝、
-  8317 无监听，日志里 `Application startup complete` 之后紧跟
-  `ERROR: [Errno 11001] getaddrinfo failed` 然后 `Waiting for application shutdown`，
-  两次（23:09:47、23:13:58）逐字一样。**当时收到的诊断是「DNS 解析失败 + 环境变量被
-  顶掉」，两条都不对**——绕了一圈才见底：`.env` 整个文件 115 行全是 `\r\r\n`，
-  `ZKAI_HOST=0.0.0.0\r\r` 的值尾部带着 CR，被托盘原样传成 `--host '0.0.0.0\r'`，
-  死在 `socket.bind()`（细节与判定方法见「已知坑」新增那条）。修复：①`.env` 换行
-  归一为 `\r\n`（备份 + 逐行比对确认内容零差异）；②`_env_or_default` 对 os.environ
-  取值补 `.strip()`；③新增 `malformed_env_names()`，把「文件坏」与「真冲突」分开报
-  ——原来的 `shadowed by pre-existing process environment` 警告点名 `ZKAI_HOST`/
-  `ZKAI_PORT` 时会被读成「去删环境变量」，实际是文件的问题。测试 +6
-  （`test_config.py` 3 例、`test_tray_launcher.py` 3 例），门禁 ruff / mypy / **587 passed**；
-  真实启动验证：`--host 0.0.0.0 --port 8317` 干净、8317 监听、`/health` healthy、
-  `zk-auto → StepFun` 真实推理 200。**换机路径的教训**：迁移包里的 `.env` 可能在
-  源机保存时就写坏了，导入端要有校验（现在启动日志报 ERROR 并指文件）
 - 待办（2026-09-24 发现，未处理）：`MOONSHOT_API_KEY` 在 `.env` 里是空值，
   `kimi-k3-moonshot` 恒为 DISABLED —— 它在 `zk-auto`/`zk-k3` 的故障转移链上
   （`kimi-k3-sensenova` 之后），轮到必然失败，是个**死部署**：要么填 Key，

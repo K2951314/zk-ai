@@ -333,6 +333,9 @@
   .attention .att-msg { flex: 1; min-width: 220px; }
   .attention .att-ico { flex: none; }
   .attention .empty { font-size: 12.5px; color: var(--text-2); }
+  /* 按别名表格的病态行：io 比超阈值时整行着色，不用读数字就知道该看哪条链 */
+  tbody tr.is-warn { background: var(--warn-soft); }
+  tbody tr.is-bad { background: var(--err-soft); }
   .attention.is-warn { border-color: var(--warn-border); border-left-color: var(--warn); background: var(--warn-soft); }
 
   /* ---------- 配置表单（消耗器页） ---------- */
@@ -1467,6 +1470,20 @@ async function loadUsage() {
   const rows = (arr, first) => arr.map(x => `<tr><td>${esc(x[first]) || "—"}</td>
       <td>${num(x.requests)}</td><td>${fmtK(x.tokens)}</td>
       <td>${fmtCost(x.cost_usd)}</td></tr>`).join("");
+  // 按别名：io 比是全站判断「这条链是否在过度重读历史」的抓手。
+  // 全站基线约 132:1（2026-09-26 实测）；某条链显著高于它，通常是路由把它死钉在
+  // 一个慢模型上（zk-k3 实测 640:1，吃掉全站 input 的 72%）。
+  // >200:1 标黄、>500:1 标红：颜色只是提示，阈值写在文案里，不靠猜。
+  const aliasRows = arr => arr.map(x => {
+    const r = x.io_ratio || 0;
+    const tone = r > 500 ? "is-bad" : r > 200 ? "is-warn" : "";
+    const note = r > 500 ? "（严重：每轮几乎都在重读历史）"
+      : r > 200 ? "（偏高：看看是不是死钉了单个模型）" : "";
+    return `<tr class="${tone}"><td>${esc(x.alias)}${note ? `<span class="muted small">${note}</span>` : ""}</td>
+      <td>${num(x.requests)}</td><td>${fmtK(x.input_tokens)}</td>
+      <td>${fmtK(x.output_tokens)}</td><td>${r ? num(r) + ":1" : "—"}</td>
+      <td>${fmtCost(x.cost_usd)}</td></tr>`;
+  }).join("");
   $("#view-usage").innerHTML = `
     <div class="view-head">
       <h2>用量统计</h2>
@@ -1487,6 +1504,11 @@ async function loadUsage() {
     <h4 class="sec">按天</h4>
     <div class="tablewrap"><table><thead><tr><th>日期</th><th>请求数</th><th>Tokens</th></tr></thead>
       <tbody>${daily || '<tr><td colspan="3" class="muted">暂无数据</td></tr>'}</tbody></table></div>
+    <h4 class="sec">按别名（客户端选了哪条链）</h4>
+    <div class="tablewrap"><table><thead><tr>
+      <th>别名</th><th>请求数</th><th>输入 Tokens</th><th>输出 Tokens</th>
+      <th>输入/输出</th><th>成本</th></tr></thead>
+      <tbody>${aliasRows(u.by_alias || [])}</tbody></table></div>
     <h4 class="sec">按供应商</h4>
     <div class="tablewrap"><table><thead><tr><th>供应商</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
       <tbody>${rows(u.by_provider || [], "provider")}</tbody></table></div>

@@ -893,6 +893,44 @@ async def test_oversized_body_is_rejected_with_413(provider_config, fake_adapter
         await harness.container.shutdown()
 
 
+async def test_oversized_body_leaves_a_log_trace(provider_config, fake_adapter, caplog) -> None:
+    """413 早退分支必须写日志。
+
+    以前这条分支直接 return，跳过了中间件末尾统一的 ``logger.info``，于是
+    gateway.log 里 413 一个字都不留（本机 53,402 行实测 0 命中）——客户端只看到
+    一句「请求体过大」，网关侧完全查无实据。
+    """
+    config = make_config(
+        providers=[provider_config], models=[make_model("fake-model")], admin_token="tok"
+    )
+    config.settings.max_request_body_mb = 0.001
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    try:
+        with caplog.at_level("WARNING", logger="zkai.main"):
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://zkai.test"
+            ) as client:
+                resp = await client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "fake-model",
+                        "messages": [{"role": "user", "content": "x" * 10_000}],
+                    },
+                )
+        assert resp.status_code == 413
+        hits = [r for r in caplog.records if "请求体过大" in r.getMessage()]
+        assert hits, "413 必须在日志里留痕，否则现场无法定位"
+        message = hits[0].getMessage()
+        assert "/v1/chat/completions" in message
+        # 得能看出「声明了多少」和「上限多少」，否则还是不知道差在哪
+        assert "上限" in message and "1048" in message
+    finally:
+        await harness.container.shutdown()
+
+
 async def test_finish_preserves_a_previously_recorded_error_type(provider_config) -> None:
     """Second finalize pass without error_type must not wipe the real one."""
     config = make_config(providers=[provider_config], models=[make_model("fake-model")])
@@ -1472,3 +1510,156 @@ async def test_burner_endpoints_require_admin(api, burner_files) -> None:
     _seed(state, config)
     assert (await client.get("/admin/burner")).status_code in (401, 403)
     assert (await client.put("/admin/burner/config", json={"concurrency": 8})).status_code in (401, 403)
+
+
+# --------------------------------------------------------------------------- #
+# token 闸（ZKAI_MAX_INPUT_TOKENS）
+# --------------------------------------------------------------------------- #
+
+
+async def test_input_token_guard_rejects_when_no_deployment_fits(
+    provider_config, fake_adapter
+) -> None:
+    """所有部署都装不下时才拦——那类请求发出去必然失败，拦下不伤质量。"""
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("fake-model", context_window=1_000)],
+    )
+    config.settings.max_input_tokens = 500
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "fake-model",
+                    "messages": [{"role": "user", "content": "x" * 200_000}],
+                },
+            )
+        assert resp.status_code == 413
+        body = resp.json()
+        assert body["error"]["type"] == "context_length_exceeded"
+        # 报错要说人话：指出是哪几段太大 + 怎么调，而不是「请求体过大」
+        message = body["error"]["message"]
+        assert "都装不下" in message and "ZKAI_MAX_INPUT_TOKENS" in message
+        assert fake_adapter.calls == [], "被闸拦下的请求不该产生任何上游调用"
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_input_token_guard_lets_a_fitting_request_through(
+    provider_config, fake_adapter
+) -> None:
+    """超过人为软上限、但仍有部署装得下 -> 必须放行（智能闸的核心契约）。
+
+    这条不是锦上添花：实测现役部署窗口 1M/256K/128K 三档，历史最大 prompt
+    719,090 tokens。若拿一个拍死的数字硬卡（比如 900,000），那条只差 18 万，
+    估算器一偏差就被误杀——拦下的全是本可成功的请求。
+    """
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("fake-model", context_window=128_000)],
+    )
+    config.settings.max_input_tokens = 1_000  # 故意设得很低
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    harness.adapter.queue_status(200)
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "fake-model",
+                    "messages": [{"role": "user", "content": "x" * 200_000}],
+                },
+            )
+        assert resp.status_code == 200, "有部署装得下就不该被人为上限挡住"
+        assert len(fake_adapter.calls) == 1
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_input_token_guard_off_by_default(provider_config, fake_adapter) -> None:
+    """默认（0）必须完全关闭——否则这次改动会凭空拦掉现有请求。"""
+    config = make_config(
+        providers=[provider_config], models=[make_model("fake-model")]
+    )
+    # 显式钉成 0，不依赖本机 .env——上面 api_token 也是这么钉的（本机 .env
+    # 设了真实值，不钉就会随环境变化而失败）。
+    config.settings.max_input_tokens = 0
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    harness.adapter.queue_status(200)
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "fake-model",
+                    "messages": [{"role": "user", "content": "x" * 200_000}],
+                },
+            )
+        assert resp.status_code == 200
+        assert len(fake_adapter.calls) == 1, "闸关闭时请求必须照常发出去"
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_input_token_guard_covers_all_three_paths(provider_config, fake_adapter) -> None:
+    """/v1/chat、/v1/messages、/v1/responses 三条路径都要被同一道闸覆盖。
+
+    为什么强调三条：审查发现只修 /v1/responses 是在修 0.6% 的量——DB 实测
+    >256K tokens 的请求里 ZCode(/v1/chat) 占 1.94 亿、claude-cli(/v1/messages)
+    占 1,593 万，Codex 只占 125 万。闸挂在 RequestService.chat/stream 这个
+    收敛点上，三条路才都覆盖到。
+    """
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("fake-model", context_window=1_000)],
+    )
+    config.settings.max_input_tokens = 500
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    app = create_app(config.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    huge = "x" * 200_000
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
+            chat = await client.post(
+                "/v1/chat/completions",
+                json={"model": "fake-model", "messages": [{"role": "user", "content": huge}]},
+            )
+            anthropic = await client.post(
+                "/v1/messages",
+                json={
+                    "model": "fake-model",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": huge}],
+                },
+                headers={"x-api-key": "k", "anthropic-version": "2023-06-01"},
+            )
+            responses = await client.post(
+                "/v1/responses",
+                json={"model": "fake-model", "input": huge},
+            )
+        for name, resp, expected_type in (
+            ("chat", chat, "context_length_exceeded"),
+            ("messages", anthropic, "invalid_request_error"),
+            ("responses", responses, "context_length_exceeded"),
+        ):
+            assert resp.status_code == 413, f"{name} 路径没被 token 闸覆盖"
+            assert resp.json()["error"]["type"] == expected_type, name
+            # 三种协议的错误词汇表不同（Anthropic 侧 context_length_exceeded
+            # 被映射成 invalid_request_error，见 app/api/messages.py:60），
+            # 但「可操作的文案」是共同契约：必须说清上限与怎么调。
+            assert "ZKAI_MAX_INPUT_TOKENS" in resp.json()["error"]["message"], name
+        assert fake_adapter.calls == []
+    finally:
+        await harness.container.shutdown()

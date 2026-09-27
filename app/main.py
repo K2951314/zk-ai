@@ -128,6 +128,19 @@ def _install_middleware(app: FastAPI) -> None:
             except ValueError:
                 declared = 0
             if declared > max_body_bytes:
+                # 这条分支以前直接 return，跳过了下面统一的 ``logger.info``，
+                # 于是 413 在 gateway.log 里一个字都不留（53,402 行实测 0 命中），
+                # 客户端只看到一句「请求体过大」，网关侧查无实据。
+                # content-length 只有 >0 才算数：chunked 上传不带这个头，
+                # declared=0 时这道闸整个失效，那种情况必须能从日志看出来。
+                logger.warning(
+                    "请求体过大，已拒绝 %s %s | 声明 %d B > 上限 %d B (req=%s)",
+                    request.method,
+                    request.url.path,
+                    declared,
+                    max_body_bytes,
+                    request_id,
+                )
                 request_id_var.reset(token)
                 return JSONResponse(
                     status_code=413,

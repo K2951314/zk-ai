@@ -434,3 +434,178 @@ def test_config_resolve_model_ids_helpers() -> None:
     assert config.resolve_model_ids("ghost") == []
     assert config.is_alias("zk-a") is True
     assert config.known_names() == ["m1", "m2", "zk-a", "zk-nested"]
+
+
+# --------------------------------------------------------------------------- #
+# Per-deployment request gates (DeploymentConfig.request_requires)
+# --------------------------------------------------------------------------- #
+def _flagship_and_cheap() -> Router:
+    """A flagship that only serves strong-reasoning requests + a cheap model that
+    serves everything - the division-of-labour shape from the live config."""
+    from app.models.provider import CapabilityScores, DeploymentConfig, ModelConfig
+
+    flagship = ModelConfig(
+        id="flagship",
+        context_window=1_000_000,
+        capabilities=CapabilityScores(
+            coding=9.5, reasoning=9.5, tool_use=9.0, vision=9.5,
+            long_context=10.0, structured_output=8.5, speed=6.0, cost=9.0,
+        ),
+        deployments=[
+            DeploymentConfig(
+                id="flagship-dep", provider_id="fake", model="flagship",
+                priority=130, context_window=1_000_000,
+                request_requires={"reasoning": 4.0},
+            )
+        ],
+    )
+    cheap = ModelConfig(
+        id="cheap",
+        context_window=1_000_000,
+        capabilities=CapabilityScores(
+            coding=8.5, reasoning=8.5, tool_use=9.0, vision=0.0,
+            long_context=10.0, structured_output=9.0, speed=9.0, cost=10.0,
+        ),
+        deployments=[
+            DeploymentConfig(
+                id="cheap-dep", provider_id="fake", model="cheap",
+                priority=100, context_window=1_000_000,
+            )
+        ],
+    )
+    return Router(
+        make_config(
+            providers=[make_provider("fake", key_ids=("k1",))],
+            models=[flagship, cheap],
+            aliases=[make_alias("zk-mix", ["flagship", "cheap"],
+                                weights={"reasoning": 2.0, "coding": 2.0})],
+        )
+    )
+
+
+def test_flagship_declines_a_plain_request() -> None:
+    router = _flagship_and_cheap()
+    decision = router.plan(request_for("zk-mix"))  # "hello", reasoning weight 2.0 < 4.0
+    flagship = next(c for c in decision.candidates if c.deployment.id == "flagship-dep")
+    assert flagship.eligible is False
+    assert any("reasoning" in gate for gate in flagship.gates_failed)
+    assert decision.eligible_candidates()[0].deployment.id == "cheap-dep"
+
+
+def test_flagship_serves_a_reasoning_request() -> None:
+    router = _flagship_and_cheap()
+    decision = router.plan(
+        request_for(
+            "zk-mix",
+            messages=[ChatMessage(role="user",
+                                  content="please prove step-by-step the root cause")],
+        )
+    )
+    flagship = next(c for c in decision.candidates if c.deployment.id == "flagship-dep")
+    assert flagship.eligible is True
+    assert decision.eligible_candidates()[0].deployment.id == "flagship-dep"
+
+
+def test_image_request_raises_reasoning_so_the_flagship_stays_eligible() -> None:
+    router = _flagship_and_cheap()
+    decision = router.plan(
+        request_for(
+            "zk-mix",
+            messages=[ChatMessage(role="user", content=[
+                {"type": "text", "text": "看这张截图"},
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}},
+            ])],
+        )
+    )
+    assert decision.requirement.weights["reasoning"] >= 4.0
+    flagship = next(c for c in decision.candidates if c.deployment.id == "flagship-dep")
+    assert flagship.eligible is True
+
+
+def test_alias_weight_is_a_floor_not_a_ceiling() -> None:
+    # An alias weight below an inference-raised weight must not drag it back
+    # down - otherwise the requirement becomes request-blind and no downstream
+    # gate can tell "prove step-by-step" from "hi".
+    router = _flagship_and_cheap()
+    decision = router.plan(
+        request_for(
+            "zk-mix",
+            messages=[ChatMessage(role="user", content="prove step-by-step why")],
+        )
+    )
+    assert decision.requirement.weights["reasoning"] == 5.0  # inference won, not the 2.0 floor
+
+
+def test_safety_valve_widens_when_every_deployment_is_gated() -> None:
+    # A single-target alias whose only deployment demands reasoning: a plain
+    # request gates it out, and the valve must widen back instead of failing.
+    router = _flagship_and_cheap()
+    router.aliases.upsert(make_alias("zk-only-flagship", ["flagship"]))
+    decision = router.plan(request_for("zk-only-flagship"))
+    eligible = decision.eligible_candidates()
+    assert eligible, "safety valve should have widened the plan"
+    assert eligible[0].deployment.id == "flagship-dep"
+
+
+def test_request_requires_gate_divides_labour_without_a_pin() -> None:
+    """部署级 ``request_requires`` + 不钉首位 = 真正的按请求性质分工。
+
+    2026-09-27 的教训：``zk-auto`` 一度同时配了
+    ``request_requires: {reasoning: 4.0}``（kimi-k3 三个部署的接活标准）
+    和 ``pin_first: true``（targets[0] = step-5-preview）。结果门槛被 pin
+    完全压过——实测 24 条真实 Codex 轮次（14 条推理型）**100% 落在 step-5**，
+    K3 一次都没轮到，即使它分数更高、即使它过了门槛。
+
+    根因是 ``pin_first`` 只按 ``target_index`` 排序，不看 score，也不看门槛；
+    所以一个低分模型只要站在 targets[0] 就能赢下所有请求。删掉那个静态 pin
+    之后分工立刻恢复：推理请求够格 K3，机械请求被门槛挡在便宜模型上。
+
+    这条测试锁住「门槛能真正发挥作用」这个契约——否则将来谁再给 alias 加一个
+    静态 pin_first，分会白流，而症状是「聪明模型永远不接活」，极难一眼看出。
+    """
+    router = build_router()
+    # thinker 只在强推理时接活——模仿 models.yaml 里 kimi-k3 三个部署的
+    # request_requires: {reasoning: 4.0}（DeploymentConfig 字段，读码确认）。
+    model = router.config.models["thinker"]
+    model.deployments[0].request_requires = {"reasoning": 4.0}
+    router.aliases.upsert(
+        make_alias("zk-divide", ["sprinter", "coder", "thinker", "eye"], pin_first=False)
+    )
+
+    strong = router.plan(request_for("zk-divide", messages=[ChatMessage(role="user",
+        content="请 step-by-step 证明 root cause 与 trade-offs")]))
+    assert strong.eligible_candidates()[0].model.id == "thinker", (
+        "强推理请求应该够格 thinker——门槛不该被 alias 顺序压过"
+    )
+
+    weak = router.plan(request_for("zk-divide", messages=[ChatMessage(role="user",
+        content="把这个文件重命名一下")]))
+    assert weak.eligible_candidates()[0].model.id != "thinker", (
+        "机械请求 thinker 该被门槛挡住，便宜模型接活"
+    )
+
+
+def test_a_static_pin_can_silently_defeat_the_request_requires_gate() -> None:
+    """反面对照：静态 pin_first=True 会让门槛失效、聪明模型永远不接活。
+
+    与上一条是同一现象的两面。2026-09-27 实测：zk-auto 同时有门槛和 pin 时，
+    24 条真实 Codex 轮次 100% 落在 targets[0] 的低分模型上。这条测试把「为什么
+    不能给 alias 配静态 pin_first」钉住——症状太隐蔽，只靠人记不住。
+    """
+    router = build_router()
+    model = router.config.models["thinker"]
+    model.deployments[0].request_requires = {"reasoning": 4.0}
+    # sprinter 站在 targets[0] 并被钉住：它 reasoning 只有 4.0，但 pin 不看门槛。
+    router.aliases.upsert(
+        make_alias("zk-pinned", ["sprinter", "coder", "thinker", "eye"], pin_first=True)
+    )
+
+    strong = router.plan(request_for("zk-pinned", messages=[ChatMessage(role="user",
+        content="请 step-by-step 证明 root cause 与 trade-offs")]))
+    assert strong.eligible_candidates()[0].model.id == "sprinter", (
+        "pin 优先于门槛：这就是 2026-09-27 修掉的眞因"
+    )
+    # thinker 明明够格，却被 pin 压到后面
+    order = [c.model.id for c in strong.eligible_candidates()]
+    assert order.index("thinker") > 0

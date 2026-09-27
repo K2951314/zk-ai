@@ -111,6 +111,43 @@ def _secrets_files() -> list[Path]:
     return [Path(".env")]
 
 
+def _env_newline_problem(raw: bytes) -> tuple[int, int]:
+    """Count (doubled-CR, total LF) in a .env's raw bytes.
+
+    ``\\r\\r\\n`` means every line's *content* ends with a stray CR: the value
+    keeps it through pydantic-settings (``str.splitlines()`` only eats the
+    terminator), and it shows up as wildly misleading downstream errors — the
+    2026-09-24 case surfaced as ``getaddrinfo failed`` on ``socket.bind``.
+    """
+    return raw.count(b"\r\r"), raw.count(b"\n")
+
+
+def _check_env_health(root: Path, *, stage: str) -> list[str]:
+    """Warn when .env has the doubled-CR sickness. Returns the problems found.
+
+    Called from BOTH sides of a transfer, which is the whole point: the damage
+    is done by whatever wrote the file on the *source* machine, so checking at
+    export time is what stops it from ever reaching a new machine. Checking at
+    import time too catches a hand-copied file.
+
+    This is not cosmetic — the identical 115-line damage was found twice in two
+    days (2026-09-24 and 2026-09-26), and the second time it was silent because
+    ``tray_launcher._env_or_default`` happens to ``.strip()`` the value it reads.
+    """
+    env = root / ".env"
+    if not env.exists():
+        return []
+    raw = env.read_bytes()
+    doubled, lf = _env_newline_problem(raw)
+    if doubled == 0:
+        return []
+    problem = (
+        f".env 有 {doubled}/{lf} 行是 \\r\\r\\n（行尾多一个 CR）"
+        f"——{stage}会把这个损坏带过去"
+    )
+    return [problem]
+
+
 def _collect(root: Path) -> tuple[dict[str, Path], list[str]]:
     """Map archive-name -> absolute path for everything that exists.
 
@@ -212,6 +249,17 @@ def export_package(out_path: Path, passphrase: str, root: Path = _ROOT) -> dict:
             "没找到 .env - 这台机器上没有要搬走的密钥。\n"
             "如果你只想搬配置，先随便建一个 .env 再导出，或手动拷 config/。"
         )
+
+    # Stop the transfer from carrying a known landmine. Fixing it here costs one
+    # sed; not fixing it means the new machine fails in a way that looks like a
+    # DNS problem (see the .env/CR entry in AGENTS.md).
+    for problem in _check_env_health(root, stage="导出前：这份 .env 的损坏"):
+        print(f"  [警告] {problem}")
+        print("    症状：ZKAI_HOST='0.0.0.0\\r' 之类，bind 时报 getaddrinfo failed，")
+        print("    但日志里 Application startup complete 之后紧跟着报错，一眼就知道不是 DNS。")
+        print("    修复：把开头的 \\r\\r\\n 全替换成 \\r\\n（改前先备份，改后逐行比对）。")
+        print("    判定：python -c \"raw=open('.env','rb').read();"
+              " print(raw.count(b'\\r\\r'), raw.count(b'\\r\\n'))\" —— 两数相等就是全文件损坏")
 
     tmp = _ROOT / ".migrate_tmp"
     tmp.mkdir(exist_ok=True)
@@ -388,6 +436,14 @@ def import_package(
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(zf.read(rel.as_posix()))
                 restored.append(str(rel))
+            # Second line of defence: the source machine may have had a healthy
+            # .env but the package could still have been built before this check
+            # existed. Fail loudly here rather than letting the operator find out
+            # on first launch as "bind failed / getaddrinfo failed".
+            for problem in _check_env_health(root, stage="导入后：刚恢复的 .env"):
+                print(f"  [警告] {problem}")
+                print("    这台机器上的其它一切看起来都正常，但一启动就会 bind 失败。")
+                print("    修复：把开头的 \\r\\r\\n 全替换成 \\r\\n（改前先备份，改后逐行比对）。")
             # New machine: the ChatGPT/Codex client is configured from the
             # package's desired config (file-level only - the OS env var is the
             # CLI layer's job, see _provision_chatgpt_env).

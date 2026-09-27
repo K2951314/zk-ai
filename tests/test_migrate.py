@@ -584,3 +584,88 @@ def test_import_asks_the_tray_to_restart_the_burner(tmp_path: Path) -> None:
     target.mkdir()
     migrate.import_package(out, "pw", root=target)
     assert (target / "data" / "burner_restart.request").exists()
+
+
+# --------------------------------------------------------------------------- #
+# .env 换行损坏：两天内踩了两次同一个坑（2026-09-24 / 2026-09-26），必须有人拦
+# --------------------------------------------------------------------------- #
+
+
+def _sicken_env(root: Path) -> None:
+    """Give .env the exact damage seen twice: every line ends CR CR LF.
+
+    按字节写，不用 write_text：后者 newline=None 会把 \n 按平台转成 \r\n，
+    文件里就没剩下可替换的裸 \n 了（第一版 helper 就这么静默失效：
+    替换目标是字面反斜杠文本而非换行符，改完双CR=0、LF=0，测试全绿但啥也没测）。
+    """
+    path = root / ".env"
+    body = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    sick = "\r\r\n".join(body.split("\n"))
+    path.write_bytes(sick.encode("utf-8"))
+
+
+def test_env_health_check_flags_doubled_cr(tmp_path: Path) -> None:
+    """坏 .env 必须被认出来——这是整个修复的判据。"""
+    from scripts.migrate import _check_env_health, _env_newline_problem
+
+    healthy = tmp_path / "healthy"
+    healthy.mkdir()
+    (healthy / ".env").write_bytes(b"ZKAI_HOST=0.0.0.0\nZKAI_PORT=8317\n")
+    assert _env_newline_problem((healthy / ".env").read_bytes()) == (0, 2)
+    assert _check_env_health(healthy, stage="测试") == []
+
+    sick = tmp_path / "sick"
+    sick.mkdir()
+    (sick / ".env").write_bytes(b"ZKAI_HOST=0.0.0.0\r\r\nZKAI_PORT=8317\r\r\n")
+    doubled, lf = _env_newline_problem((sick / ".env").read_bytes())
+    assert doubled == 2 and doubled == lf, "全文件损坏的判据就是这两个数相等"
+    problems = _check_env_health(sick, stage="导出前：这份 .env 的损坏")
+    assert problems and "\\r\\r\\n" in problems[0]
+    # 空目录不能误报
+    assert _check_env_health(tmp_path / "nope", stage="测试") == []
+
+
+def test_export_warns_about_a_damaged_env(tmp_path: Path, capsys) -> None:
+    """导出坏 .env 前必须警告——不拦住，损坏就被原样搬去新机器。"""
+    from scripts.migrate import export_package
+
+    root = tmp_path / "src"
+    _populate(root)
+    _sicken_env(root)
+    export_package(tmp_path / "p.zip", "pw", root=root)
+
+    out = capsys.readouterr().out
+    assert "\\r\\r\\n" in out and "getaddrinfo failed" in out
+
+
+def test_round_trip_preserves_the_newline_damage(tmp_path: Path, capsys) -> None:
+    """导入端也要能发现：包可能是在这道检查存在之前打的。"""
+    from scripts.migrate import export_package, import_package
+
+    src = tmp_path / "src"
+    _populate(src)
+    _sicken_env(src)
+    export_package(tmp_path / "p.zip", "pw", root=src)
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    import_package(tmp_path / "p.zip", "pw", root=dst, overwrite=True)
+
+    out = capsys.readouterr().out
+    # 导出与导入两侧各警告一次
+    assert out.count("\\r\\r\\n") >= 2
+    raw = (dst / ".env").read_bytes()
+    doubled, lf = raw.count(b"\r\r"), raw.count(b"\n")
+    assert doubled == lf and doubled > 0, "字节流是原样搬过去的（修不修由人决定）"
+
+
+def test_healthy_env_produces_no_warning(tmp_path: Path, capsys) -> None:
+    """正常 .env 不该有任何噪音——否则这道检查会被训练成「直接忽略」。"""
+    from scripts.migrate import export_package
+
+    root = tmp_path / "src"
+    _populate(root)
+    export_package(tmp_path / "p.zip", "pw", root=root)
+
+    out = capsys.readouterr().out
+    assert "\\r\\r\\n" not in out

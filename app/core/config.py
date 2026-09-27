@@ -12,6 +12,7 @@ anywhere in the YAML, which keeps real API keys out of the repository.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -155,6 +156,22 @@ class Settings(BaseSettings):
     request_timeout: float = 120.0
     stream_idle_timeout: float = 120.0
     max_request_body_mb: float = 10.0
+    #: 估算 input token 的硬上限（0 = 关闭）。超限直接返回可读错误，不发上游。
+    #: 为什么要有它：``max_request_body_mb`` 是**字节**闸且只看 content-length
+    #: 首部，10MB ≈ 290 万 est tokens，是现役最大上游窗口（1M）的 2.9 倍——放过去
+    #: 只会收到上游 400/429；而 chunked 上传不带这个首部，字节闸整个失效。
+    #: 这道闸按 token 算、在 ``RequestService.chat`` 里生效（三条对外路径的收敛点），
+    #: 且报错文案说清「哪一段太大、怎么减」，比 413 有信息量。
+    max_input_tokens: int = 0
+    #: 是否把客户端传来的图片真正转发给上游（默认 true）。
+    #: 背景：Codex 会把截图以 ``input_image`` 塞进 /v1/responses 的 input，
+    #: 而网关以前**静默丢掉**它——上游收到的是空 tool 消息，等于撒谎「这个工具
+    #: 没返回内容」。打开后图会转成 chat 侧的 ``image_url`` part 发上去，
+    #: K3 / StepFun 这类有视觉能力的模型才真的看得见。
+    #: 代价：图片 token 是真实花费（25 张 1440x950 量级的截图 ≈ 3.5 万 tokens），
+    #: 且估算器已按像素计入 ``ZKAI_MAX_INPUT_TOKENS``。设为 false 则回落为
+    #: 「留一行占位文本」，省流量但模型看不到图。
+    forward_images: bool = True
 
     default_max_tokens: int = 1024
 
@@ -197,6 +214,19 @@ class Settings(BaseSettings):
     agent_command_timeout: float = 60.0
     #: Estimated input tokens above which the transcript gets summarised down.
     agent_context_token_limit: int = 120_000
+    # ---- ZK-Agent 子任务派发（spawn_subagent）--------------------------- #
+    #: 派发深度上限。根会话 depth=1，子会话=2；子会话的工具箱里根本没有
+    #: spawn_subagent，所以这是硬边界而非软约定。
+    agent_max_depth: int = 2
+    #: 单个父会话同时在跑的子任务数上限（超出时把「并发已满」回给模型，不抛异常）。
+    agent_max_live_children: int = 2
+    #: 全局同时在跑的子任务数上限。子任务走**独立的**信号量，不占
+    #: ``agent_max_concurrent``——否则父持槽等子、子又等着同一个槽，会死锁。
+    #: 真实并发上界 = agent_max_concurrent + 本项。
+    agent_max_children_total: int = 4
+    #: 角色 -> alias 覆盖，JSON 字符串（坏 JSON 静默按默认表走）。
+    #: 例：{"vision": "zk-vision", "coder": "zk-auto"}
+    agent_role_aliases: str = ""
 
     @property
     def resolved_config_dir(self) -> Path:
@@ -214,6 +244,25 @@ class Settings(BaseSettings):
         """Agent workspace anchored to the project root (like ``data_dir``)."""
         path = Path(self.agent_workspace)
         return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+    def parsed_role_aliases(self) -> dict[str, str]:
+        """``agent_role_aliases`` 的 JSON 解析；坏 JSON / 非对象都回落空 dict。
+
+        解析失败不抛异常：一个写错的环境变量不该让整个 agent 面起不来，
+        此时按 :data:`app.services.agent.roles.DEFAULT_ROLE_ALIASES` 走。
+        """
+        raw = (self.agent_role_aliases or "").strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.warning("ZKAI_AGENT_ROLE_ALIASES 不是合法 JSON，已按默认角色表走")
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("ZKAI_AGENT_ROLE_ALIASES 不是 JSON 对象，已按默认角色表走")
+            return {}
+        return {str(k): str(v) for k, v in data.items() if str(k).strip() and str(v).strip()}
 
     @property
     def resolved_database_url(self) -> str:

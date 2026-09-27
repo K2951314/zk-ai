@@ -1451,6 +1451,13 @@ uv run pytest
 - 新增供应商：实现 `ProviderAdapter`，在 `app/providers/factory.py` 注册，
   再加一组 `FakeAdapter` 驱动的测试。
 - 新增错误码：先改 `classifier.py` 的决策矩阵，再补 `tests/test_errors.py` 契约表。
+- 新增 `ZKAI_*` 配置项：**没有 YAML 桥接**（`_SETTINGS_SECTIONS` 不含它们），
+  改 `config/config.yaml` 是静默无效——必须同时补 `.env.example` 一行中文注释
+  和使用手册排查表，否则用户只能靠猜。
+- 改路由前先查 alias 有没有 `pin_first`：`strategy.py` 的 pin 分支**只按
+  `target_index` 排，不看 score、不看 `request_requires` 门槛**，一个静态 pin 会让
+  低分模型赢下所有请求、门槛完全失效（2026-09-27 实测 24 条真实轮次 100% 打偏）。
+  热切换的 pin 由 `app/api/admin.py` 硬编码，YAML 里不该再静态配它。
 
 ---
 

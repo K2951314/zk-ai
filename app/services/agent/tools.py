@@ -184,8 +184,49 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+SPAWN_TOOL_NAME = "spawn_subagent"
+
+#: ``spawn_subagent`` 的 schema **不**并进 :data:`TOOL_SCHEMAS`：子会话的工具箱里
+#: 不能出现它（递归派发由「根本不发这个 schema」兜底，不靠 prompt 约定）。
+#: loop 按 ``run.parent is None`` 决定要不要拼上去。
+SPAWN_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": SPAWN_TOOL_NAME,
+        "description": (
+            "派一个子任务给独立子会话去做，完成后结果会回传给你。"
+            "适合：需要另一种模型专长（如看图）、或一段可以独立跑完的活儿。"
+            "子任务跑的时候你会一直等它，所以一次只派一个、任务要能独立完成。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "description": (
+                        "角色名，决定派给哪个模型。"
+                        "可用角色由系统在报错时告诉你，不要凭空编。"
+                    ),
+                },
+                "task": {
+                    "type": "string",
+                    "description": "子任务的完整说明，要能脱离上下文读懂（子会话看不到你的对话历史）。",
+                },
+            },
+            "required": ["role", "task"],
+        },
+    },
+}
+
+#: 根会话的工具集；子会话用裸 TOOL_SCHEMAS。
+ROOT_TOOL_SCHEMAS: list[dict[str, Any]] = [*TOOL_SCHEMAS, SPAWN_TOOL_SCHEMA]
+
 SAFE_TOOLS = frozenset({"read_file", "list_dir", "search_files", "grep"})
 DANGEROUS_TOOLS = frozenset({"write_file", "run_command"})
+#: 编排类工具：既不只读也不动工作区，由 loop 自己决定怎么执行，因此**不走审批卡**。
+#: 审批卡的 preview 只认 ``display`` 里的 ``diff`` / ``command`` 两个 key，
+#: 硬塞一个进去等于给用户看一份伪造的 diff。
+SUPERVISOR_TOOLS = frozenset({"spawn_subagent"})
 
 
 def _cap(text: str, limit: int = _MAX_OUTPUT, *, note: str = "…(输出已截断)") -> str:
@@ -498,7 +539,11 @@ def _as_int(value: Any, default: int) -> int:
 
 __all__ = [
     "DANGEROUS_TOOLS",
+    "ROOT_TOOL_SCHEMAS",
     "SAFE_TOOLS",
+    "SPAWN_TOOL_NAME",
+    "SPAWN_TOOL_SCHEMA",
+    "SUPERVISOR_TOOLS",
     "TOOL_SCHEMAS",
     "ToolBox",
     "ToolError",

@@ -70,6 +70,7 @@ async def create_response(
             client_ip=metadata.get("client_ip"),
             user_agent=metadata.get("user_agent"),
             strip_reasoning=container.settings.strip_reasoning,
+            forward_images=container.settings.forward_images,
         )
     except ZKAIError as exc:
         logger.warning("responses call %s failed: %s", request_id, exc.error_type)
@@ -354,7 +355,9 @@ async def _stream_response(
     request_id: str,
     metadata: dict[str, str | None],
 ) -> Any:
-    chat_payload = payload.to_chat_request()
+    chat_payload = payload.to_chat_request(
+        forward_images=container.settings.forward_images
+    )
     chat_payload.stream = True
     generator = container.request_service.stream(
         chat_payload,

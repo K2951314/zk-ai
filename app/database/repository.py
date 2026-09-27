@@ -671,9 +671,29 @@ class RequestRepository:
             return closed
 
     async def purge_older_than(self, days: int) -> int:
-        """Delete request history older than *days* (returns rows removed)."""
+        """Delete request history older than *days* (returns rows removed).
+
+        ``usage_records`` 里指向它们的行**必须一起删**。以前只删 requests，
+        于是 usage 永久保留而它的 request 没了——任何要 join requests 的统计
+        （按别名、按客户端）都会让这些行凭空消失。2026-09-26 实测：30 天窗口下
+        by_alias 比 KPI 少算 15%（1.51 亿 input tokens），而 KPI 不 join 所以
+        照单全收，两个数并排显示差的正是最早那一段。
+
+        ⚠ 必须用 ``in_(select(...))`` 子查询，**不能**先 select 出 id 再
+        ``in_(id_list)``：SQLite 的 MAX_VARIABLE_NUMBER=32766，网关连续跑十几天
+        不重启就会超，而那个异常会被 container 的 ``except Exception`` 吞掉，
+        结果是请求历史**永久停止清理**——比现在这个统计缺口严重得多。
+        """
         cutoff = utcnow() - dt.timedelta(days=days)
         async with self.db.session() as session:
+            # 先删明细：它们是依赖 requests 的那一方。
+            await session.execute(
+                delete(UsageRecord).where(
+                    UsageRecord.request_id.in_(
+                        select(RequestRecord.id).where(RequestRecord.started_at < cutoff)
+                    )
+                )
+            )
             result = await session.execute(
                 delete(RequestRecord).where(RequestRecord.started_at < cutoff)
             )
@@ -794,6 +814,25 @@ class UsageRepository:
                 .where(UsageRecord.created_at >= cutoff)
                 .group_by(UsageRecord.credential_id)
             )
+
+            # 按别名聚合：这是「客户端配了哪条链」的唯一口径，也是定位浪费的入口。
+            # 2026-09-26 实测：zk-k3 上 2,956 条请求平均 input 228,745、output 仅 357
+            # （640:1），吃掉全站 9.44 亿 input 的 72%——而这个维度此前在控制台看不到，
+            # 只能靠 SQL 手工查，所以浪费长期隐形。
+            # input/output 比一起查：比高得离谱就说明「每轮都在重读历史」。
+            by_alias = await session.execute(
+                select(
+                    RequestRecord.alias,
+                    func.count(UsageRecord.id),
+                    func.coalesce(func.sum(UsageRecord.input_tokens), 0),
+                    func.coalesce(func.sum(UsageRecord.output_tokens), 0),
+                    func.coalesce(func.sum(UsageRecord.cost_usd), 0.0),
+                )
+                .join(RequestRecord, RequestRecord.id == UsageRecord.request_id)
+                .where(UsageRecord.created_at >= cutoff)
+                .group_by(RequestRecord.alias)
+                .order_by(func.coalesce(func.sum(UsageRecord.input_tokens), 0).desc())
+            )
             return {
                 "window_days": days,
                 "requests": int(count or 0),
@@ -827,6 +866,20 @@ class UsageRepository:
                         "cost_usd": round(float(row[3]), 6),
                     }
                     for row in by_credential
+                ],
+                # ``io_ratio`` = input/output。全站基线约 132:1（2026-09-26 实测），
+                # 某一条显著高于它就是在过度重读历史——那是路由配置问题，
+                # 不是「这个客户端话多」。前端按 >200:1 标红。
+                "by_alias": [
+                    {
+                        "alias": row[0] or "（无别名）",
+                        "requests": int(row[1]),
+                        "input_tokens": int(row[2]),
+                        "output_tokens": int(row[3]),
+                        "cost_usd": round(float(row[4]), 6),
+                        "io_ratio": round(int(row[2]) / max(1, int(row[3])), 1),
+                    }
+                    for row in by_alias
                 ],
             }
 

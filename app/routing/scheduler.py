@@ -104,6 +104,7 @@ class Scheduler:
         classifier: ErrorClassifier | None = None,
         sleeper: Sleeper | None = None,
         request_timeout: float = 120.0,
+        max_input_tokens: int = 0,
     ) -> None:
         self.router = router
         self.pool = pool
@@ -111,6 +112,9 @@ class Scheduler:
         self.classifier = classifier or ErrorClassifier()
         self._sleep: Sleeper = sleeper or asyncio.sleep
         self.request_timeout = request_timeout
+        #: 估算 input token 的硬上限，0 = 不限制。语义见
+        #: ``RequestService._guard_input_size``（按 token 而非字节判定的那道闸）。
+        self.max_input_tokens = max(0, max_input_tokens)
         #: Deployment-level cooldowns applied by 529/503 style errors.
         self._deployment_cooldowns: dict[str, float] = {}
 

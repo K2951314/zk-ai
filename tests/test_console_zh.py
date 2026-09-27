@@ -164,6 +164,24 @@ def test_agent_page_keeps_untouched_dom_contract() -> None:
         assert f'id="{hook}"' in text, f"钩子 {hook} 必须保留"
 
 
+def test_agent_page_renders_spawn_cards_in_chinese() -> None:
+    """子任务派发的卡片必须有，且保持中文 + 单文件零依赖。
+
+    spawn_subagent 是唯一不走审批卡的工具（它的 display 里没有 diff/command），
+    所以前端必须认 `d.tool === "spawn_subagent"` 单独渲染——否则子任务结论会
+    掉进通用 tool 分支，用户看到的是一堵 <pre>。
+    """
+    text = _html("agent.html")
+    assert 'd.tool === "spawn_subagent"' in text, "spawn 卡片分支不能少"
+    assert "派生子任务" in text and "查看子会话" in text
+    # 子会话进度透传也要有对应分支，否则父页面完全看不到子在干什么
+    assert 'case "child_event":' in text
+    assert "childEventLabel" in text
+    # 新样式必须真的定义了（少了就是渲染出来一坨没样式的原文）
+    for css in (".spawn-body {", ".linklike {"):
+        assert css in text, f"缺少 {css}"
+
+
 def test_wide_tables_keep_actions_reachable_without_scrolling() -> None:
     """表格再宽，操作按钮也必须一直在手边。
 

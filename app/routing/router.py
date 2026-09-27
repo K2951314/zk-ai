@@ -26,10 +26,16 @@ from typing import Any
 from app.core.config import AppConfig
 from app.core.errors import AliasNotFoundError, ModelNotFoundError, ProviderNotFoundError
 from app.core.logging import get_logger
-from app.models.provider import ModelAliasConfig, ModelConfig, ProviderConfig
+from app.models.provider import (
+    DeploymentConfig,
+    ModelAliasConfig,
+    ModelConfig,
+    ProviderConfig,
+)
 from app.models.request import ChatCompletionRequest
 from app.providers.base import ProviderAdapter
 from app.providers.factory import create_adapter
+from app.routing.agent_auto import rewrite_model
 from app.routing.aliases import AliasRegistry
 from app.routing.capability import (
     CapabilityRequirement,
@@ -195,7 +201,21 @@ class Router:
     def plan(self, request: ChatCompletionRequest) -> RoutingDecision:
         """Build the ordered attempt plan for *request*."""
         requested = request.model
-        model_ids, alias_name = self.resolve_model_ids(requested)
+        # agent-auto: rewrite the requested alias by request *shape* before the
+        # scorer sees it. This is what makes "reasoning must stay on K3" hard:
+        # the rewrite happens before candidate expansion, so the scorer only
+        # ever ranks models inside the chain the shape picked. A mechanical
+        # request sent to zk-long has no K3 in its candidate list at all, so
+        # no weight vector can resurrect it.
+        rewrite = rewrite_model(request)
+        if rewrite.changed:
+            logger.info(
+                "agent-auto: %s -> %s (%s)",
+                rewrite.original,
+                rewrite.rewritten,
+                rewrite.reason,
+            )
+        model_ids, alias_name = self.resolve_model_ids(rewrite.rewritten)
         alias = self.aliases.get(alias_name) if alias_name else None
 
         primary_model = self.config.models.get(model_ids[0])
@@ -235,12 +255,48 @@ class Router:
         strategy = get_strategy(strategy_name)
         ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
 
+        # Safety valve: per-deployment ``request_requires`` gates can leave a
+        # request with zero eligible deployments (e.g. every deployment on the
+        # list demands reasoning, but this request is a plain "hi"). That is an
+        # operator misconfiguration, not a request error, so we fall back to
+        # considering the gated-out deployments rather than returning nothing.
+        # The gates still order (gated candidates sort after eligible ones), so
+        # this only ever *widens* the fallback chain.
+        if ordered and not any(c.eligible for c in ordered):
+            relaxed: list[RoutingCandidate] = []
+            for candidate in candidates:
+                card = score_candidate(
+                    model=candidate.model,
+                    deployment=_without_request_gate(candidate.deployment),
+                    requirement=requirement,
+                )
+                relaxed.append(
+                    RoutingCandidate.from_scorecard(
+                        model=candidate.model,
+                        deployment=candidate.deployment,
+                        provider=candidate.provider,
+                        card=card,
+                        target_index=candidate.target_index,
+                    )
+                )
+            ordered = strategy.order(
+                relaxed, requirement, pin_first=bool(alias and alias.pin_first)
+            )
+            logger.warning(
+                "alias '%s' left no eligible deployment (all request_requires gates failed); "
+                "falling back to the ungated ranking - this usually means the deployment "
+                "gates are over-tight",
+                alias_name,
+            )
+
         reason_parts = [
             f"requested={requested}",
             f"alias={alias_name or '-'}",
             f"strategy={strategy.name}",
             f"order={[c.deployment.id for c in ordered if c.eligible][:4]}",
         ]
+        if rewrite.changed:
+            reason_parts.append(f"agent_auto={rewrite.rewritten}({rewrite.reason})")
         if requirement.notes:
             reason_parts.append("hints: " + "; ".join(requirement.notes))
         blocked = [c.deployment.id for c in ordered if not c.eligible]
@@ -363,6 +419,16 @@ class Router:
             "providers": {provider.id: provider.type.value for provider in self.config.providers.values()},
             "adapters": sorted(self._adapters),
         }
+
+
+def _without_request_gate(deployment: DeploymentConfig) -> DeploymentConfig:
+    """Copy of *deployment* with the per-deployment request gate removed.
+
+    Used only by :meth:`Router.plan`'s safety valve, so the rest of the gate
+    stays authoritative. Cheaper than ``model_copy(update=...)`` because the
+    field set is tiny and we only need the gate cleared.
+    """
+    return deployment.model_copy(update={"request_requires": {}})
 
 
 def _card_from_candidate(candidate: RoutingCandidate):

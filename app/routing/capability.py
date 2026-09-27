@@ -116,6 +116,13 @@ def infer_requirement(
             minimums["vision"] = 1.0
             if "vision" not in notes:
                 notes.append("request contains an image -> vision required")
+            # Looking at a screenshot and diagnosing it is a reasoning act, not a
+            # mechanical transform. Raising reasoning here keeps the flagship
+            # deployment eligible for image traffic even when its
+            # ``request_requires`` gate demands strong reasoning - otherwise a
+            # pure "看这张截图" (reasoning weight stays at the alias floor) would
+            # be turned away from the only strong-vision model.
+            weights["reasoning"] = max(weights.get("reasoning", 0.0), 5.0)
 
     combined = "\n".join(user_text_parts)
 
@@ -161,13 +168,20 @@ def infer_requirement(
         requirement.weights[name] = max(requirement.weights.get(name, 0.0), GATE_WEIGHT)
 
     if alias is not None:
-        # Explicit alias weights are applied last so they always win.
+        # Alias weights act as a **floor**, applied last so they always win over
+        # the defaults - but they never drag an inference-raised weight back down.
+        # The old behaviour (unconditional replace) made the requirement
+        # request-blind: the moment an alias carried ``reasoning: 2.0``, a
+        # step-by-step proof request (inferred 5.0) and a plain "hi" (inferred 1.0)
+        # both ended up at 2.0, so no downstream gate could ever tell them apart.
+        # A floor keeps the operator's intent ("this alias cares about coding")
+        # while letting the request itself raise the flagship dimensions further.
         for name, value in alias.weights.items():
             if name in requirement.weights:
-                requirement.weights[name] = float(value)
+                requirement.weights[name] = max(requirement.weights[name], float(value))
         if alias.weights or alias.requires:
             requirement.notes.append(
-                f"alias '{alias.name}' overrides weights/gates (strategy={alias.strategy.value})"
+                f"alias '{alias.name}' sets weight floors/gates (strategy={alias.strategy.value})"
             )
 
     if model is not None and estimated > model.context_window:
@@ -209,6 +223,27 @@ class ScoreCard:
         return f"score={self.total:.3f} ({parts})"
 
 
+def request_gate_failures(
+    deployment: DeploymentConfig, requirement: CapabilityRequirement
+) -> list[str]:
+    """Dimensions where *deployment* asks for a stronger request than this one.
+
+    The mirror image of :meth:`CapabilityRequirement.minimums`: instead of the
+    request demanding a capability of the model, the *deployment* demands that
+    the request already cares about a dimension. This is what makes "reasoning
+    requests must go to K3" a hard rule rather than a weight tuning exercise -
+    see :attr:`DeploymentConfig.request_requires`.
+    """
+    failed: list[str] = []
+    for name, wanted in deployment.request_requires.items():
+        actual = requirement.weight(name)
+        if actual < float(wanted):
+            failed.append(
+                f"needs {name}>={wanted:g} importance, request has {actual:g}"
+            )
+    return failed
+
+
 def score_candidate(
     *,
     model: ModelConfig,
@@ -229,6 +264,13 @@ def score_candidate(
 
     if not deployment.enabled:
         gates_failed.append("deployment disabled")
+
+    # The deployment's own bar for the request: a flagship deployment may
+    # decline plain requests (why pay flagship rates for "hi"), and a cheap one
+    # may decline those that demand deep reasoning. Both directions express a
+    # hard rule that no weight tuning can produce, because a linear weighted
+    # sum can only ever rank - never partition.
+    gates_failed.extend(request_gate_failures(deployment, requirement))
 
     total = 0.0
     breakdown: dict[str, float] = {}

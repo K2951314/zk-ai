@@ -51,6 +51,10 @@ models:
         model: gpt-5
         # 同类部署中越大越优先
         priority: 120
+        # （可选）该部署的「接活标准」：只有请求本身被判定为强推理（对应维度
+        # 的请求权重达到此值）时才轮到它；空 = 来者不拒。用于把旗舰模型留给
+        # 高难度请求、让便宜模型接机械请求——例如 request_requires: {reasoning: 4.0}。
+        # request_requires: {reasoning: 4.0}
         # 该部署允许的最大输出 token
         max_output_tokens: 8192
         # 输入价格（美元 / 百万 token），仅用于统计
