@@ -63,6 +63,10 @@ config/*.bak*
 
 # --- agent / 调试产物（非交付物）---------------------------------------------
 # WorkBuddy 项目数据（会话记忆等），各机器本地生成，不进仓库
+# ⚠ 实际目录名是 `.workbuddy-ai/`（带 -ai）。原来只写了 `.workbuddy/`，
+#   匹配不上，于是记忆目录一直以「未跟踪」形式挂在 git status 里、随时可能被
+#   误提交（2026-09-29 发现）。两个都写上，避免再踩。
 .workbuddy/
+.workbuddy-ai/
 # 诊断会话留下的临时调试脚本（自带 ruff/mypy 历史错误，去留未定，先排除出提交）
 scripts/probe_upstream_path.py

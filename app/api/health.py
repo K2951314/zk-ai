@@ -42,4 +42,8 @@ async def health(container: ContainerDep) -> dict:
         "models": len(container.config.models),
         "aliases": sorted(container.config.aliases),
         "health_check_mode": container.settings.health_check_mode,
+        # 被自动隔离的部署（连续失败到阈值）。留空 = 一切正常。
+        # 为什么值得暴露：隔离是**自动**的，运营者必须能看见「谁被屏蔽了、
+        # 为什么、还有多久」——否则一个渠道悄悄消失会让人以为是路由 bug。
+        "quarantined_deployments": container.scheduler.quarantined_deployments(),
     }

@@ -70,6 +70,96 @@ _PRESETS: tuple[ModelPreset, ...] = (
         description="智谱旗舰（长程 Coding 与推理）",
         providers=("sensenova", "nvidia"),
     ),
+    # 2026-09-29 补：日日新 Token Plan 官方公告（2026-09-22）——
+    #   DeepSeek V4.1 Flash 正式上线，Model ID 是 deepseek-flash。
+    # 缺这一行时 match_preset(deepseek-flash) 返回 None，市场只能把它显示成
+    # 裸 ID，于是没人知道它就是 DeepSeek V4.1 Flash —— 运营者被迫去翻官方
+    # 公告才能把产品名和 ID 对上。这正是「探测没探到正确模型」的真正原因：
+    # 探针能判「这个 ID 能不能调」，但判不了「你要的产品是哪个 ID」。
+    ModelPreset(
+        family="qwen3.8-flash-next",
+        display_name="Qwen3.8 Flash Next",
+        context_window=256_000,
+        capabilities={
+            "coding": 8.0, "reasoning": 8.0, "tool_use": 8.5, "vision": 0.0,
+            "long_context": 8.0, "structured_output": 8.5, "speed": 9.0, "cost": 9.5,
+        },
+        input_price=0.40, output_price=1.20,
+        description="通义轻量档（魔搭上游 id 带 Qwen/ 前缀）",
+        providers=("modelscope",),
+    ),
+    # deepseek-v4-pro 于 2026-10-08 下线，过渡期内平台自动重定向到
+    # deepseek-flash。留一条预设只是为了让市场显示友好名而不是裸 ID；
+    # 新配置应直接用 deepseek-flash。
+    ModelPreset(
+        family="deepseek-v4-pro",
+        display_name="DeepSeek V4 Pro（2026-10-08 下线）",
+        context_window=1_000_000,
+        capabilities={
+            "coding": 9.0, "reasoning": 9.5, "tool_use": 9.0, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 7.0, "cost": 9.0,
+        },
+        input_price=0.55, output_price=2.20,
+        description="旗舰推理档，即将下线，新配置请用 deepseek-flash",
+        providers=("sensenova",),
+    ),
+    ModelPreset(
+        family="qwen3.8-flash-next",
+        display_name="Qwen3.8 Flash Next",
+        context_window=256_000,
+        capabilities={
+            "coding": 8.0, "reasoning": 8.0, "tool_use": 8.5, "vision": 0.0,
+            "long_context": 8.0, "structured_output": 8.5, "speed": 9.0, "cost": 9.5,
+        },
+        input_price=0.40, output_price=1.20,
+        description="通义轻量档（魔搭上游 id 带 Qwen/ 前缀）",
+        providers=("modelscope",),
+    ),
+    # deepseek-v4-pro 于 2026-10-08 下线，过渡期内平台自动重定向到
+    # deepseek-flash。留一条预设只是为了让市场显示友好名而不是裸 ID；
+    # 新配置应直接用 deepseek-flash。
+    ModelPreset(
+        family="deepseek-v4-pro",
+        display_name="DeepSeek V4 Pro（2026-10-08 下线）",
+        context_window=1_000_000,
+        capabilities={
+            "coding": 9.0, "reasoning": 9.5, "tool_use": 9.0, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 7.0, "cost": 9.0,
+        },
+        input_price=0.55, output_price=2.20,
+        description="旗舰推理档，即将下线，新配置请用 deepseek-flash",
+        providers=("sensenova",),
+    ),
+    ModelPreset(
+        family="deepseek-flash",
+        display_name="DeepSeek V4.1 Flash",
+        context_window=1_000_000,
+        capabilities={
+            "coding": 9.0, "reasoning": 9.0, "tool_use": 9.0, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 9.0, "cost": 10.0,
+        },
+        input_price=0.27, output_price=1.10,
+        description="V4.1 Flash：日常主力，1M 上下文（公告 id 为 deepseek-flash）",
+        providers=("sensenova",),
+    ),
+    # 2026-09-29 补：日日新 Token Plan 官方公告（2026-09-22）——
+    #   DeepSeek V4.1 Flash 正式上线，Model ID 是 deepseek-flash。
+    # 缺这一行时 match_preset(deepseek-flash) 返回 None，市场只能把它显示成
+    # 裸 ID，于是没人知道它就是 DeepSeek V4.1 Flash —— 运营者被迫去翻官方
+    # 公告才能把产品名和 ID 对上。这正是「探测没探到正确模型」的真正原因：
+    # 探针能判「这个 ID 能不能调」，但判不了「你要的产品是哪个 ID」。
+    ModelPreset(
+        family="deepseek-flash",
+        display_name="DeepSeek V4.1 Flash",
+        context_window=1_000_000,
+        capabilities={
+            "coding": 9.0, "reasoning": 9.0, "tool_use": 9.0, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 9.0, "cost": 10.0,
+        },
+        input_price=0.27, output_price=1.10,
+        description="V4.1 Flash：日常主力，1M 上下文（公告 id 为 deepseek-flash）",
+        providers=("sensenova",),
+    ),
     ModelPreset(
         family="deepseek-v4-flash",
         display_name="DeepSeek V4 Flash",
@@ -79,7 +169,7 @@ _PRESETS: tuple[ModelPreset, ...] = (
             "long_context": 10.0, "structured_output": 9.0, "speed": 9.0, "cost": 10.0,
         },
         input_price=0.27, output_price=1.10,
-        description="日常主力，1M 上下文，便宜快",
+        description="V4 Flash（上一代 0731）。别与 V4.1 Flash 混——后者的公告 id 是 deepseek-flash",
         providers=("sensenova", "modelscope", "nvidia"),
     ),
     ModelPreset(

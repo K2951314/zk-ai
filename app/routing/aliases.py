@@ -149,6 +149,8 @@ class AliasRegistry:
                 "requires": alias.requires,
                 "weights": alias.weights,
                 "description": alias.description,
+                "front_model": alias.front_model,
+                "pin_first": alias.pin_first,
             }
             for alias in self.all()
         }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from app.core.config import AppConfig
@@ -11,6 +13,7 @@ from app.models.request import ChatCompletionRequest, ChatMessage
 from app.routing.aliases import BUILTIN_ALIASES, AliasRegistry
 from app.routing.capability import infer_requirement, score_candidate
 from app.routing.router import Router
+from app.routing.scheduler import Scheduler
 from app.routing.strategy import (
     CapabilitySelection,
     CostSelection,
@@ -609,3 +612,278 @@ def test_a_static_pin_can_silently_defeat_the_request_requires_gate() -> None:
     # thinker 明明够格，却被 pin 压到后面
     order = [c.model.id for c in strong.eligible_candidates()]
     assert order.index("thinker") > 0
+
+
+# --------------------------------------------------------------------------- #
+# front_model：接口模型永远排第一，手动指定、随时可改（2026-09-28）
+# --------------------------------------------------------------------------- #
+
+def test_front_model_always_leads_the_attempt_order() -> None:
+    """接口模型压过能力分——这是它存在的全部理由。"""
+    config = make_config(
+        providers=[make_provider("p1"), make_provider("p2")],
+        models=[
+            make_model("slow-but-strong", provider_id="p1", priority=200,
+                       capabilities={"coding": 10.0, "reasoning": 10.0}),
+            make_model("fast-reliable", provider_id="p2", priority=50,
+                       capabilities={"coding": 5.0, "reasoning": 5.0}),
+        ],
+        aliases=[make_alias("zk-test", ["slow-but-strong", "fast-reliable"],
+                            weights={"coding": 3.0, "reasoning": 3.0},
+                            front_model="fast-reliable")],
+    )
+    router = Router(config)
+    ordered = [c.model.id for c in router.plan(_req("zk-test")).candidates if c.eligible]
+    assert ordered[0] == "fast-reliable"
+    # 压过的模型没被丢掉，仍在链里当备用
+    assert "slow-but-strong" in ordered
+
+
+def test_front_model_leaves_the_rest_to_capability_routing() -> None:
+    """接口模型只排第一，后面的顺序仍由能力分决定（否则就等于静态钉死）。"""
+    config = make_config(
+        providers=[make_provider("p1"), make_provider("p2"), make_provider("p3")],
+        models=[
+            make_model("front", provider_id="p1", capabilities={"coding": 1.0}),
+            make_model("strong", provider_id="p2", priority=10,
+                       capabilities={"coding": 9.0, "reasoning": 9.0}),
+            make_model("weak", provider_id="p3", priority=10,
+                       capabilities={"coding": 2.0, "reasoning": 2.0}),
+        ],
+        aliases=[make_alias("zk-test", ["front", "strong", "weak"],
+                            weights={"coding": 3.0, "reasoning": 3.0},
+                            front_model="front")],
+    )
+    router = Router(config)
+    ordered = [c.model.id for c in router.plan(_req("zk-test")).candidates if c.eligible]
+    assert ordered[0] == "front"
+    assert ordered[1:] == ["strong", "weak"]      # 内容路由的结果，没被改写
+
+
+def test_front_model_that_is_not_on_the_alias_is_ignored() -> None:
+    """配错的 front_model 必须静默回落，而不是把路由弄坏。"""
+    config = make_config(
+        providers=[make_provider("p1")],
+        models=[make_model("only", provider_id="p1")],
+        aliases=[make_alias("zk-test", ["only"], front_model="typo-model")],
+    )
+    router = Router(config)
+    ordered = [c.model.id for c in router.plan(_req("zk-test")).candidates if c.eligible]
+    assert ordered == ["only"]
+
+
+def test_front_model_gated_out_is_not_promoted() -> None:
+    """接口模型被门槛淘汰时不能硬提到第一——那会把能跑的请求变成必败。"""
+    config = make_config(
+        providers=[make_provider("p1"), make_provider("p2")],
+        models=[
+            make_model("front", provider_id="p1", capabilities={"vision": 0.0}),
+            make_model("vision-ok", provider_id="p2", capabilities={"vision": 9.0}),
+        ],
+        aliases=[
+            make_alias("zk-test", ["front", "vision-ok"]),
+            make_alias("zk-vis", ["front", "vision-ok"], requires={"vision": 9.0},
+                       front_model="front"),
+        ],
+    )
+    router = Router(config)
+    # 普通请求：front 有资格，排第一
+    plain = [c.model.id for c in router.plan(_req("zk-test")).candidates if c.eligible]
+    assert plain[0] == "front"
+    # 带图请求：front 被 vision 门槛挡掉，必须让位，否则图片请求必败
+    image_req = ChatCompletionRequest(
+        model="zk-vis",
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]}],
+    )
+    ordered = [c.model.id for c in router.plan(image_req).candidates if c.eligible]
+    assert ordered[0] == "vision-ok"
+    assert "front" not in ordered
+
+
+def test_no_front_model_keeps_the_old_behaviour() -> None:
+    """不配 front_model 的alias行为完全不变（向后兼容）。"""
+    config = make_config(
+        providers=[make_provider("p1")],
+        models=[make_model("a", provider_id="p1", priority=100),
+                make_model("b", provider_id="p1", priority=50,
+                           capabilities={"coding": 9.0, "reasoning": 9.0})],
+        aliases=[make_alias("zk-test", ["a", "b"], weights={"coding": 3.0})],
+    )
+    router = Router(config)
+    ordered = [c.model.id for c in router.plan(_req("zk-test")).candidates if c.eligible]
+    assert ordered[0] == "b"          # 能力分赢，没有被任何前置逻辑改写
+
+
+def _req(model: str) -> ChatCompletionRequest:
+    return ChatCompletionRequest(model=model, messages=[{"role": "user", "content": "hi"}])
+
+
+def test_front_model_switch_off_falls_back_to_pure_weights() -> None:
+    """关闭接口模型 = 越过首位，回到纯能力权重排序（运营者的原话）。
+
+    ``ModelAliasConfig.strategy`` 默认是 PRIORITY 而非 CAPABILITY，所以这个测试
+    必须走 ``make_alias``（默认 capability）——早先我直接构造 ModelAliasConfig
+    复现「关闭后首位没变」，查了半天才发现是策略不同，不是 bug。
+    """
+    def ordered(front: str | None) -> tuple[list[str], str]:
+        config = make_config(
+            providers=[make_provider("p1"), make_provider("p2")],
+            models=[
+                make_model("front", provider_id="p1",
+                           capabilities={"coding": 1.0, "reasoning": 1.0}),
+                make_model("strong", provider_id="p2", priority=10,
+                           capabilities={"coding": 9.0, "reasoning": 9.0}),
+            ],
+            aliases=[make_alias("zk-test", ["front", "strong"],
+                                weights={"coding": 3.0, "reasoning": 3.0},
+                                front_model=front)],
+        )
+        decision = Router(config).plan(_req("zk-test"))
+        chain = [c.model.id for c in decision.candidates if c.eligible]
+        return chain, decision.reason
+
+    on, on_reason = ordered("front")
+    assert on == ["front", "strong"]                # 接口模型压过权重
+    assert "front_model=front" in on_reason
+
+    off, off_reason = ordered(None)
+    assert off == ["strong", "front"]                # 越过首位，权重赢家上台
+    assert "front_model=" not in off_reason
+
+
+# --------------------------------------------------------------------------- #
+# 部署级自动隔离：连续失败才屏蔽，偶发事件不误伤（2026-09-29）
+# --------------------------------------------------------------------------- #
+
+def _info(exc=None, *, status=None, body=None):
+    from app.retry.classifier import ErrorClassifier
+
+    c = ErrorClassifier()
+    if exc is not None:
+        return c.classify(exc)
+    return c.classify_status(status, body=body or {})
+
+
+def _bare_scheduler():
+    """只要失败记账，不跑完整路由——用 __new__ 绕开依赖注入。"""
+    s = Scheduler.__new__(Scheduler)
+    s._deployment_health = {}
+    s._deployment_cooldowns = {}
+    return s
+
+
+def test_quarantine_only_counts_evidence_of_a_broken_deployment() -> None:
+    """判别的核心：只认「这个部署坏了」，不认偶发与调用方的错。
+
+    实测动机：NVIDIA 的 glm-5.3 每次挂死 60s，旧逻辑只给 30s 冷却，
+    「撞 60s → 冷 30s → 再撞 60s」无限循环，累计烧掉 60.9 小时。
+    但反过来，一次网络抖动不该屏蔽一个健康渠道——所以计数只认这几类。
+    """
+    import httpx
+
+    from app.routing.scheduler import is_quarantine_worthy
+
+    # 该计入：反复的传输/上游故障 + 模型在上游不存在
+    assert is_quarantine_worthy(_info(httpx.ReadTimeout("x"))) is True
+    assert is_quarantine_worthy(_info(httpx.ConnectTimeout("x"))) is True
+    assert is_quarantine_worthy(_info(status=503)) is True
+    assert is_quarantine_worthy(_info(status=504)) is True
+    assert is_quarantine_worthy(
+        _info(status=404, body={"detail": "Function 'x' Not Found"})
+    ) is True
+
+    # 不该计入：限流（偶发，属凭据层）、无权限（换把 Key 可能就好）、调用方的错
+    assert is_quarantine_worthy(
+        _info(status=429, body={"error": {"message": "tpm exhausted"}})
+    ) is False
+    assert is_quarantine_worthy(
+        _info(status=403, body={"error": {"message": "not available in token plan"}})
+    ) is False
+    assert is_quarantine_worthy(
+        _info(status=400, body={"error": {"message": "Invalid model id"}})
+    ) is False
+
+
+def test_quarantine_needs_consecutive_failures_then_escalates() -> None:
+    """前两次不隔离（容忍抖动），第三次起按阶梯升级。"""
+    import httpx
+
+    from app.routing.scheduler import QUARANTINE_LADDER, QUARANTINE_THRESHOLD
+
+    s = _bare_scheduler()
+    timeout = _info(httpx.ReadTimeout("x"))
+    for i in range(1, QUARANTINE_THRESHOLD):
+        s._note_deployment_failure("dep", timeout)
+        assert s.deployment_cooling_down("dep") is False, f"第 {i} 次就隔离太激进"
+    s._note_deployment_failure("dep", timeout)
+    assert s.deployment_cooling_down("dep") is True, "到阈值必须隔离"
+    assert s._deployment_health["dep"].consecutive_failures == QUARANTINE_THRESHOLD
+
+    # 继续失败 → 时长逐级上涨，封顶在阶梯最后一级
+    seen = []
+    for _ in range(len(QUARANTINE_LADDER) + 2):
+        s._note_deployment_failure("dep", timeout)
+        seen.append(round(s._deployment_health["dep"].quarantined_until - time.time()))
+    assert seen == sorted(seen), "隔离时长必须单调递增"
+    assert seen[-1] >= QUARANTINE_LADDER[-1] - 2
+
+
+def test_quarantine_ignores_rate_limits_even_repeatedly() -> None:
+    """连续 10 次 429 也不隔离——限流是偶发的，且属凭据层的处置范围。"""
+    s = _bare_scheduler()
+    rate = _info(status=429, body={"error": {"message": "tpm exhausted"}})
+    for _ in range(10):
+        s._note_deployment_failure("dep", rate)
+    assert s.deployment_cooling_down("dep") is False
+    assert "dep" not in s._deployment_health, "连记账都不该留"
+
+
+def test_any_success_lifts_the_quarantine() -> None:
+    """半开恢复：修好后任意一次成功即清零并解除（否则恢复也进不来）。"""
+    import httpx
+
+    s = _bare_scheduler()
+    timeout = _info(httpx.ReadTimeout("x"))
+    for _ in range(5):
+        s._note_deployment_failure("dep", timeout)
+    assert s.deployment_cooling_down("dep") is True
+
+    s._note_deployment_success("dep")
+    assert s.deployment_cooling_down("dep") is False
+    health = s._deployment_health["dep"]
+    assert health.consecutive_failures == 0
+    assert health.quarantined_until == 0.0
+
+
+def test_stale_failure_counts_decay() -> None:
+    """距上次失败超过衰减窗口，计数归零——避免陈旧计数让一次抖动重罚。"""
+    import httpx
+
+    from app.routing.scheduler import QUARANTINE_DECAY_SECONDS
+
+    s = _bare_scheduler()
+    timeout = _info(httpx.ReadTimeout("x"))
+    for _ in range(4):
+        s._note_deployment_failure("dep", timeout)
+    # 伪造「上次失败是很久以前」
+    s._deployment_health["dep"].last_failure_at = time.time() - QUARANTINE_DECAY_SECONDS - 1
+    s._note_deployment_failure("dep", timeout)
+    assert s._deployment_health["dep"].consecutive_failures == 1, "陈旧计数必须先衰减"
+
+
+def test_quarantined_deployments_are_reportable() -> None:
+    """隔离是自动的，必须能看见「谁被屏蔽、为什么、还有多久」。"""
+    import httpx
+
+    s = _bare_scheduler()
+    assert s.quarantined_deployments() == {}
+    timeout = _info(httpx.ReadTimeout("x"))
+    for _ in range(3):
+        s._note_deployment_failure("glm53-nvidia", timeout)
+    report = s.quarantined_deployments()
+    assert "glm53-nvidia" in report
+    entry = report["glm53-nvidia"]
+    assert entry["quarantined"] is True
+    assert entry["quarantine_seconds_left"] > 0
+    assert entry["last_error_type"] == "timeout"

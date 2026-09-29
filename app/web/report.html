@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZK-AI 体检 · 一眼看穿网关在干什么</title>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#fff;--panel-2:#f1f3f5;--border:#e3e8ee;--strong:#d3dae3;
+  --text:#1a2230;--text-2:#4a5666;--muted:#7a8798;
+  --accent:#2563eb;--accent-soft:#eff4ff;
+  --ok:#15803d;--ok-soft:#ecfdf3;--ok-border:#bbf7d0;
+  --warn:#b45309;--warn-soft:#fffbeb;--warn-border:#fde68a;
+  --err:#b42318;--err-soft:#fef3f2;--err-border:#fecdca;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  padding:24px 16px 64px}
+.wrap{max-width:1080px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:15px;margin:0 0 12px;color:var(--text-2);font-weight:600}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.back{font-size:12.5px;color:var(--accent);text-decoration:none}
+.back:hover{text-decoration:underline}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+  padding:18px 20px;margin-bottom:16px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.kpi{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.kpi .l{font-size:12px;color:var(--muted)}
+.kpi .v{font-size:24px;font-weight:650;margin-top:2px;letter-spacing:-.02em}
+.kpi .s{font-size:11.5px;color:var(--muted);margin-top:2px}
+.kpi.is-warn .v{color:var(--warn)}.kpi.is-ok .v{color:var(--ok)}.kpi.is-err .v{color:var(--err)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+th{font-size:12px;color:var(--muted);font-weight:600;background:var(--panel-2)}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.is-slow td{background:var(--warn-soft)}
+tr.is-err td{background:var(--err-soft)}
+.bar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden;min-width:60px}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.note{font-size:12.5px;color:var(--text-2);background:var(--accent-soft);
+  border-left:3px solid var(--accent);padding:10px 14px;border-radius:0 8px 8px 0;margin-top:12px}
+.note.warn{background:var(--warn-soft);border-color:var(--warn)}
+.note.ok{background:var(--ok-soft);border-color:var(--ok)}
+.tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:20px;
+  border:1px solid var(--border);color:var(--text-2);background:var(--panel-2);margin-left:6px}
+.tag.k{background:#f5f3ff;border-color:#ddd6fe;color:#5b21b6}
+.tag.f{background:#ecfeff;border-color:#a5f3fc;color:#155e75}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+details{margin-top:8px}summary{cursor:pointer;font-size:12.5px;color:var(--accent)}
+.hint{font-size:12px;color:var(--muted);margin-top:6px}
+label input,label select{font:inherit;padding:5px 8px;border:1px solid var(--strong);
+  border-radius:7px;background:var(--panel);color:var(--text)}
+button{font:inherit;padding:7px 14px;border:1px solid var(--strong);border-radius:8px;
+  background:var(--panel);color:var(--text);cursor:pointer}
+button:hover{background:var(--panel-2)}
+pre{background:var(--panel-2);padding:12px;border-radius:8px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/ui">← 返回控制台</a>
+  <h1 style="margin-top:10px">ZK-AI 体检</h1>
+  <div class="sub">一眼看穿：请求慢在哪、派给了谁、为什么派给它。数据来自网关自己的库，全程只读。</div>
+
+  <div class="card">
+    <h2>① 选择时间范围</h2>
+    <div style="display:flex;gap:14px;align-items:end;flex-wrap:wrap">
+      <label>看几天
+        <select id="days"><option>1</option><option selected>7</option><option>30</option></select>
+      </label>
+      <button id="go">开始体检</button>
+      <span class="hint" style="margin:0">令牌不用填——自动用控制台里存的那个</span>
+    </div>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<script>
+// 与控制台同源：从 /ui 打开时同域，直接用相对路径；令牌复用 localStorage 里那份。
+const BASE = location.origin;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = n => (n ?? 0).toLocaleString();
+const sec = ms => ms >= 60000 ? (ms/60000).toFixed(1)+' 分'
+  : ms >= 1000 ? (ms/1000).toFixed(1)+' 秒' : Math.round(ms)+' 毫秒';
+
+function token() {
+  try { return localStorage.getItem('zkai_admin_token') || ''; } catch { return ''; }
+}
+
+async function api(path) {
+  const tok = token();
+  const r = await fetch(BASE + path, {
+    headers: tok ? {'X-Admin-Token': tok, 'Authorization': 'Bearer ' + tok} : {}
+  });
+  if (!r.ok) {
+    let m = `HTTP ${r.status}`;
+    try { m = (await r.json()).error?.message || m; } catch {}
+    throw new Error(m);
+  }
+  return r.json();
+}
+
+// 模型 -> 人话标签：帮非程序员认出谁是谁、谁快谁慢
+function label(model) {
+  if (/kimi-k3/i.test(model)) return 'Kimi K3<span class="tag k">旗舰·慢但强</span>';
+  if (/glm-5\.3-flash/i.test(model)) return 'GLM-5.3 Flash<span class="tag f">快·便宜</span>';
+  if (/glm-5\.3/i.test(model)) return 'GLM-5.3<span class="tag f">快·便宜</span>';
+  if (/step-5/i.test(model)) return 'Step 5<span class="tag f">快·便宜</span>';
+  if (/deepseek/i.test(model)) return 'DeepSeek V4<span class="tag f">快·便宜</span>';
+  if (/flash-lite|qwen|nemotron/i.test(model)) return '轻量模型<span class="tag f">快·便宜</span>';
+  return esc(model);
+}
+
+$('go').onclick = async () => {
+  const days = $('days').value;
+  const out = $('out');
+  out.innerHTML = '<div class="card">正在读网关数据…</div>';
+  try {
+    const [stats, reqs] = await Promise.all([
+      api(`/admin/stats?days=${days}&recent=0`),
+      api(`/admin/requests?status=success&limit=500`),
+    ]);
+    render(stats, reqs, days);
+  } catch (e) {
+    out.innerHTML = `<div class="card"><div class="note warn">
+      <b>读不到数据：</b>${esc(e.message)}<br><br>
+      最常见的原因：控制台还没登录（回 <a class="back" href="/ui">/ui</a> 点右上角「🔑 令牌」填一次），
+      或者网关没起来（双击 <span class="mono">scripts\\start_gateway.cmd</span>）。</div></div>`;
+  }
+};
+
+function render(stats, reqs, days) {
+  const u = stats.usage || {};
+  const list = reqs.requests || reqs.items || [];
+  const slow = list.filter(r => r.latency_ms > 30000).length;
+  const verySlow = list.filter(r => r.latency_ms > 60000).length;
+  const avgLat = list.length ? list.reduce((s, r) => s + (r.latency_ms || 0), 0) / list.length : 0;
+  const maxLat = list.reduce((m, r) => Math.max(m, r.latency_ms || 0), 0);
+
+  const rows = list.slice(0, 60).map(r => {
+    const big = (r.input_tokens || 0) > 100000;
+    const slowCls = r.latency_ms > 60000 ? 'is-err' : r.latency_ms > 30000 ? 'is-slow' : '';
+    return `<tr class="${slowCls}">
+      <td class="mono">${esc((r.id || '').slice(0, 12))}</td>
+      <td>${label(r.resolved_model || r.requested_model || '?')}</td>
+      <td class="n">${num(r.input_tokens)}</td>
+      <td class="n">${num(r.output_tokens)}</td>
+      <td class="n">${sec(r.latency_ms || 0)}</td>
+      <td>${esc(r.alias || '—')}${big ? '<span class="tag">大请求</span>' : ''}</td>
+      <td class="mono" style="font-size:11px">${esc((r.user_agent || '').slice(0, 18))}</td>
+    </tr>`;
+  }).join('');
+
+  const byModel = {};
+  for (const r of list) {
+    const k = r.resolved_model || r.requested_model || '?';
+    byModel[k] = byModel[k] || {n: 0, tok: 0, lat: 0, max: 0};
+    byModel[k].n++; byModel[k].tok += r.input_tokens || 0;
+    byModel[k].lat += r.latency_ms || 0;
+    byModel[k].max = Math.max(byModel[k].max, r.latency_ms || 0);
+  }
+  const maxTok = Math.max(1, ...Object.values(byModel).map(m => m.tok));
+  const modelRows = Object.entries(byModel).sort((a, b) => b[1].tok - a[1].tok)
+    .map(([m, v]) => `<tr>
+      <td>${label(m)}</td><td class="n">${num(v.n)}</td>
+      <td class="n">${num(v.tok)}</td>
+      <td><div class="bar"><i style="width:${v.tok/maxTok*100}%"></i></div></td>
+      <td class="n">${sec(v.lat/v.n)}</td><td class="n">${sec(v.max)}</td>
+    </tr>`).join('');
+
+  const slowBig = list.filter(r => r.latency_ms > 30000 && (r.input_tokens || 0) > 100000).length;
+  const slowSmall = list.filter(r => r.latency_ms > 30000 && (r.input_tokens || 0) <= 100000).length;
+
+  $('out').innerHTML = `
+  <div class="kpis">
+    <div class="kpi"><div class="l">请求数（近 ${days} 天）</div><div class="v">${num(u.requests)}</div>
+      <div class="s">输入 ${num(u.input_tokens)} tok</div></div>
+    <div class="kpi"><div class="l">平均等待</div><div class="v">${sec(avgLat)}</div>
+      <div class="s">最长 ${sec(maxLat)}</div></div>
+    <div class="kpi ${slow > 0 ? 'is-warn' : 'is-ok'}"><div class="l">等过 30 秒的</div>
+      <div class="v">${num(slow)}</div><div class="s">其中 ${num(verySlow)} 次超过 1 分</div></div>
+    <div class="kpi"><div class="l">输出/输入 比</div>
+      <div class="v">${u.input_tokens ? (u.input_tokens/Math.max(1,u.output_tokens)).toFixed(0) : '—'} : 1</div>
+      <div class="s">越高＝越多 token 花在读历史</div></div>
+  </div>
+
+  <div class="card">
+    <h2>② 谁在干活、慢不慢</h2>
+    <table><thead><tr><th>模型</th><th>请求数</th><th>输入 tokens</th>
+      <th>占比</th><th>平均等</th><th>最长等</th></tr></thead>
+      <tbody>${modelRows || '<tr><td colspan="6" class="muted">暂无数据</td></tr>'}</tbody></table>
+    <div class="note">「平均等」是这个模型的真实响应时长。<b>Kimi K3 明显慢，是因为它本来就不是速度杯</b>
+      （能力强但 speed 只有 6.0/10）；快的是 GLM / Step / DeepSeek 那几个（9.0+/10）。
+      所以「慢」常常不是故障，是它分到了重活。</div>
+  </div>
+
+  <div class="card">
+    <h2>③ 慢的请求，卡在「大」还是别的</h2>
+    <div class="note ${slowBig > slowSmall ? 'warn' : 'ok'}">
+      最近 500 条里：<b>${num(slowBig)} 条</b>是「又大又慢」（超 10 万 token 的请求），
+      <b>${num(slowSmall)} 条</b>是「不大但慢」。<br>
+      ${slowBig > slowSmall
+        ? '→ <b>主因是请求体量大</b>：一次要把几十万 token 喂进去，任何模型都快不了。这通常说明会话历史太长了——<b>适时开新会话</b>比什么优化都管用。'
+        : '→ 慢的主因不在请求大小，更可能是上游网络或模型排队。这类慢，重启网关没有帮助。'}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>④ 每一条请求的明细（最近 60 条）</h2>
+    <table><thead><tr><th>ID</th><th>派给</th><th>输入 tok</th><th>输出 tok</th>
+      <th>等了</th><th>链路</th><th>客户端</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" class="muted">暂无数据</td></tr>'}</tbody></table>
+    <div class="hint">黄行＝等过 30 秒，红行＝等过 1 分。「链路」是客户端填的模型名/别名；
+      「派给」是网关实际选的模型——两列不同就说明发生了分流或故障转移。</div>
+  </div>
+
+  <div class="card">
+    <h2>⑤ 为什么派给这个模型（规则说人话）</h2>
+    <table><thead><tr><th>如果你要…</th><th>网关会派</th><th>为什么</th></tr></thead><tbody>
+      <tr><td>带图片的请求</td><td><b>Kimi K3</b> 或 <b>Step 5</b></td>
+        <td>只有这两个「看得见图」（vision 能力 ≥8），其它模型结构上不可能入选</td></tr>
+      <tr><td>超大请求（≥10 万 token）</td><td><b>GLM-5.3 / Step 5 / DeepSeek</b></td>
+        <td>长上下文；K3 唯一的 1M 窗口已经吃满，机械长读该走空闲的链</td></tr>
+      <tr><td>带工具、且上下文 ≥2.4 万 token</td><td><b>GLM-5.3 / Step 5 / DeepSeek</b></td>
+        <td>重放几十个工具定义 + 几万历史，只为回一句「跑完了」——不需要旗舰推理</td></tr>
+      <tr><td>短问短答、或正经推理</td><td><b>Kimi K3</b></td>
+        <td>K3 有「接活标准」：请求本身得是强推理（证明 / 为什么 / 根因）才够格接</td></tr>
+      <tr><td>客户端直接写 <span class="mono">zk-k3</span></td><td><b>只用 Kimi K3</b></td>
+        <td>你明确指定就听你的，网关不插手</td></tr>
+    </tbody></table>
+    <div class="note ok">这套规则的用意：<b>强的模型只用来干它擅长的活</b>；
+      跑命令、读日志、批量改写这类机械活交给又快又不要钱的模型。
+      83% 的 token 走的是免费额度（商汤 / NVIDIA / 魔搭）。</div>
+  </div>
+
+  <details><summary>⑥ 我想看更技术的（一次请求的完整决策过程）</summary>
+    <div class="card" style="margin-top:10px">
+      <p class="hint">在项目目录跑这句，把任意一句话的决策打出来——选了谁、挡了谁、各多少分：</p>
+      <pre class="mono">.venv\\Scripts\\python.exe -c "
+from app.core.config import get_app_config
+from app.models.request import ChatCompletionRequest, ChatMessage
+from app.routing.router import Router
+q = ChatCompletionRequest(model='zk-auto',
+    messages=[ChatMessage(role='user', content='你的问题')])
+for c in Router(get_app_config()).plan(q).candidates:
+    print(c.model.id, c.provider.id, round(c.score,3),
+          'OK' if c.eligible else 'BLOCKED')"
+</pre>
+      <p class="hint">真实请求的决策原因，控制台「请求记录」每一行的 routing_reason 里也有。</p>
+    </div>
+  </details>`;
+}
+</script>
+</body>
+</html>

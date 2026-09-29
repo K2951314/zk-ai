@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from app.core.errors import AuthenticationError, ModelNotFoundError
 from app.models.provider import DeploymentConfig, ProviderConfig
 from app.providers.base import OpenAICompatibleAdapter
 
@@ -607,3 +608,109 @@ class TestAnthropicThinkingBlocks:
         assert reasoning_chunks[0].choices[0].delta.model_extra["reasoning"] == "先想"
         assert any("你好" in (c.choices[0].delta.content or "") for c in text_chunks)
 
+
+
+# ---------------------------------------------------------------------------
+# 健康检查必须测「推理」，不能只测「目录」（2026-09-29）
+# ---------------------------------------------------------------------------
+
+class _CatalogueOnlyAdapter(OpenAICompatibleAdapter):
+    """目录能列、推理必挂——NVIDIA 的真实形态。
+
+    实测：`/v1/models` 返回 200（81 个模型），但**所有**推理请求要么挂死
+    （glm-5.3，121s 无响应）要么 404（`Function '...' not found`）。
+    旧健康检查只调 `list_models`，于是把一个 100% 不可用的供应商一直报成绿灯，
+    它因此留在所有故障转移链上，累计烧掉 60.9 小时纯等待。
+    """
+
+    def __init__(self, *args: Any, models: list[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._models = models
+
+    async def list_models(self, credential: Any = None) -> list[str]:
+        return list(self._models)
+
+    async def chat(self, request: Any, ctx: Any) -> Any:
+        raise ModelNotFoundError("Function 'abc-123' not found", model=ctx.deployment.model)
+
+
+def _catalogue_only(models: list[str]) -> _CatalogueOnlyAdapter:
+    return _CatalogueOnlyAdapter(
+        ProviderConfig(id="nvidia", type="openai_compatible",
+                       base_url="https://example.invalid/v1"),
+        models=models,
+    )
+
+
+async def test_health_check_flags_a_provider_that_cannot_infer() -> None:
+    """目录可达但推理全失败 → 必须报不健康，并说清「目录里有 ≠ 能调用」。"""
+    adapter = _catalogue_only(["z-ai/glm-5.3", "moonshotai/kimi-k3"])
+    result = await adapter.health_check(None)
+    assert result.ok is False, "目录通了就报健康——这正是 NVIDIA 假绿的成因"
+    assert result.models, "仍应带上目录，便于对照"
+    assert "目录可达" in (result.detail or "")
+    assert "不等于" in (result.detail or "")
+
+
+async def test_health_check_passes_when_any_probe_model_works() -> None:
+    """目录里混着无权限条目时，只要有一个能推理就算健康（别误杀）。"""
+    class _Mixed(OpenAICompatibleAdapter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.tried: list[str] = []
+
+        async def list_models(self, credential: Any = None) -> list[str]:
+            return ["dead-model", "live-model"]
+
+        async def chat(self, request: Any, ctx: Any) -> Any:
+            self.tried.append(ctx.deployment.model)
+            if ctx.deployment.model == "dead-model":
+                raise ModelNotFoundError("nope", model=ctx.deployment.model)
+            return _live_response()
+
+    adapter = _Mixed(ProviderConfig(id="sensenova", type="openai_compatible",
+                                    base_url="https://example.invalid/v1"))
+    result = await adapter.health_check(None)
+    assert result.ok is True
+    assert adapter.tried == ["dead-model", "live-model"], "要逐个试到成功为止"
+
+
+async def test_health_check_probe_budget_zero_restores_catalogue_only() -> None:
+    """``health_probe_models=0`` 回到旧行为（只查目录）——给不想付探测成本的场景。"""
+    adapter = _catalogue_only(["a"])
+    adapter.health_probe_models = 0
+    result = await adapter.health_check(None)
+    assert result.ok is True
+    assert result.models == ["a"]
+
+
+async def test_health_check_reports_the_catalogue_failure_first() -> None:
+    """目录本身就不通时，报的是目录错误（鉴权/网络），不是推理错误。"""
+    class _Dead(OpenAICompatibleAdapter):
+        async def list_models(self, credential: Any = None) -> list[str]:
+            raise AuthenticationError("bad key")
+
+    adapter = _Dead(ProviderConfig(id="x", type="openai_compatible",
+                                   base_url="https://example.invalid/v1"))
+    result = await adapter.health_check(None)
+    assert result.ok is False
+    assert result.error_type == "authentication_error"
+
+
+def _live_response() -> Any:
+    from app.models.request import ChatMessage
+    from app.models.response import (
+        ChatCompletionChoice,
+        ChatCompletionResponse,
+        Usage,
+    )
+
+    return ChatCompletionResponse(
+        id="x", model="live-model", created=0,
+        choices=[ChatCompletionChoice(
+            index=0,
+            message=ChatMessage(role="assistant", content="ok"),
+            finish_reason="stop",
+        )],
+        usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )

@@ -34,7 +34,7 @@ from app.core.logging import get_logger
 from app.core.security import redact_mapping
 from app.models.credential import CredentialRuntime
 from app.models.provider import DeploymentConfig, ModelConfig, ProviderConfig, ProviderType
-from app.models.request import ChatCompletionRequest
+from app.models.request import ChatCompletionRequest, ChatMessage
 from app.models.response import (
     ChatCompletionChunk,
     ChatCompletionChunkChoice,
@@ -156,6 +156,21 @@ class ProviderAdapter(abc.ABC):
                 limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
                 follow_redirects=True,
                 headers={"user-agent": "ZK-AI/0.1 (+personal-ai-gateway)"},
+                # ``ProviderConfig.max_retries`` used to be read by nothing at
+                # all - the field existed, providers.yaml set NVIDIA to 0 and
+                # documented why, and the adapter still built a default client
+                # with retries=2. That is how a "documented" fix silently does
+                # nothing. It is a *connection*-level retry (a refused/reset
+                # socket), which is why NVIDIA's 0 is safe and SenseNova's 2 is
+                # not: a hung request is not a dead socket, and re-dialling does
+                # not rescue it - the read timeout has to fire and let the
+                # scheduler fail over instead.
+                # ``trust_env=True`` is explicit because replacing the default
+                # transport is exactly how one loses the Windows system proxy.
+                transport=httpx.AsyncHTTPTransport(
+                    retries=max(0, int(self.config.max_retries)),
+                    trust_env=True,
+                ),
             )
         return self._client
 
@@ -288,8 +303,25 @@ class ProviderAdapter(abc.ABC):
     # ------------------------------------------------------------------ #
     # Optional overrides
     # ------------------------------------------------------------------ #
+    #: 健康检查里最多拿几个模型做真实推理探测。0 = 只查目录（旧行为）。
+    #: 取 3 是因为目录里可能混着账号无权限的条目（商汤目录就同时列了能用的
+    #: `deepseek-flash` 和 403 的 `deepseek-v4.1-flash`），只探一个会误报。
+    health_probe_models: int = 3
+
     async def health_check(self, credential: CredentialRuntime | None = None) -> HealthCheckResult:
-        """Cheap probe: list models and measure latency."""
+        """Cheap probe: list models, then **actually run a tiny inference**.
+
+        2026-09-29 修的坑：原来只调 :meth:`list_models`（即 ``/v1/models``），
+        而那只证明「鉴权通过、目录可达」。NVIDIA 的推理**100% 不可用**
+        （glm-5.3 挂死、kimi-k3 报 Function not found、81 个模型全废），
+        健康检查却一直报绿灯——于是它留在所有故障转移链上，累计烧掉
+        **60.9 小时**的纯等待。**和「模型市场只看目录」是同一个错**：
+        把「目录里有」当成了「能调用」。
+
+        现在：目录通了之后，再对前 N 个模型各发一次 ``max_tokens=1`` 的真实
+        请求；**任意一个成功即判定健康**（目录里可能混着无权限条目），
+        全失败则如实报不健康并带上最后一次的错误原因。
+        """
         started = time.perf_counter()
         try:
             models = await self.list_models(credential)
@@ -302,6 +334,24 @@ class ProviderAdapter(abc.ABC):
                 error_type=exc.error_type,
                 detail=exc.message,
             )
+
+        probe_budget = max(0, int(self.health_probe_models))
+        if probe_budget and models:
+            verdict = await self._probe_inference(models[:probe_budget], credential)
+            if verdict is not None:
+                return HealthCheckResult(
+                    provider_id=self.provider_id,
+                    credential_id=credential.id if credential else None,
+                    ok=False,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    error_type=verdict.error_type,
+                    detail=(
+                        f"目录可达（{len(models)} 个模型）但推理全部失败——"
+                        f"「目录里有」不等于「能调用」。最后错误：{verdict.message}"
+                    ),
+                    models=models,
+                )
+
         return HealthCheckResult(
             provider_id=self.provider_id,
             credential_id=credential.id if credential else None,
@@ -309,6 +359,43 @@ class ProviderAdapter(abc.ABC):
             latency_ms=(time.perf_counter() - started) * 1000,
             models=models,
         )
+
+    async def _probe_inference(
+        self, candidates: list[str], credential: CredentialRuntime | None
+    ) -> ZKAIError | None:
+        """对候选模型各发一次最小推理请求。
+
+        全部失败时返回**最后一个** ZKAIError（最有代表性的原因），
+        任意一个成功则返回 ``None``。探测本身出意外也不抛出——健康检查不该
+        因为探测代码而崩，把异常当作一次失败记录即可。
+        """
+        last_error: ZKAIError | None = None
+        for upstream in candidates:
+            deployment = DeploymentConfig(
+                id=f"__health__{upstream}", provider_id=self.provider_id, model=upstream
+            )
+            model = ModelConfig(id=f"__health__{upstream}", display_name=upstream)
+            request = ChatCompletionRequest(
+                model=model.id,
+                messages=[ChatMessage(role="user", content="ping")],
+                max_tokens=1,
+            )
+            ctx = ProviderContext(
+                request_id=f"health_{upstream}",
+                deployment=deployment,
+                model=model,
+                credential=credential,
+                timeout=min(20.0, self.config.timeout or 20.0),
+                stream=False,
+            )
+            try:
+                await self.chat(request, ctx)
+                return None
+            except ZKAIError as exc:
+                last_error = exc
+            except Exception as exc:  # 探测失败本身就是结论，不向上抛
+                last_error = self.normalize_error(exc)
+        return last_error
 
     def normalize_error(self, exc: BaseException) -> ZKAIError:
         """Translate any exception into the gateway's error hierarchy."""

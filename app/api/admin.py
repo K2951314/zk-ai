@@ -9,9 +9,11 @@ Credential responses never contain secret material - only a masked fingerprint.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any
@@ -40,6 +42,8 @@ from app.models.provider import (
     ModelConfig,
 )
 from app.models.request import ChatCompletionRequest, ChatMessage
+from app.providers.base import ProviderContext
+from app.retry.classifier import ErrorClassifier
 from app.routing.aliases import AliasRegistry
 from app.routing.limits import RateLimitRule
 from app.services import burner_service, chatgpt_service
@@ -76,6 +80,21 @@ def _source_file(container: ContainerDep, stem: str) -> Path | None:
 
 
 def _file_write_failed(exc: Exception) -> HTTPException:
+    # 陈旧配置是**可操作**的状态，不是服务器故障：给 409 + 明确指引，
+    # 而不是把「请先 reload」埋在 500 的堆栈里。
+    from app.core.config_writer import ConfigStaleError
+
+    if isinstance(exc, ConfigStaleError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": {
+                    "message": str(exc),
+                    "type": "config_stale",
+                    "hint": "POST /admin/config/reload 之后再重试本次保存",
+                }
+            },
+        )
     return HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail={
@@ -170,6 +189,144 @@ async def list_providers(container: ContainerDep) -> dict[str, Any]:
             }
         )
     return {"object": "list", "data": providers}
+
+
+@router.post(
+    "/providers/{provider_id}/models/verify",
+    summary="逐个实测供应商模型是否真的可调用",
+)
+async def verify_provider_models(
+    provider_id: str,
+    container: ContainerDep,
+    payload: VerifyModelsRequest,
+) -> dict[str, Any]:
+    """Probe each model with a **real minimal call** and report what actually works.
+
+    为什么必须补这一环（2026-09-29 实测）：``/v1/models`` 列的是**供应商目录**，
+    不是你账号能调的东西。三个真实反例，三个都通过了目录检查：
+
+    * 商汤 ``deepseek-v4.1-flash``：目录里有，调用返回 403
+      ``model is not available in the current token plan``
+    * NVIDIA ``z-ai/glm-5.3``：目录里有，生成请求**挂死**（121s 仍无响应）
+    * NVIDIA ``moonshotai/kimi-k3``：目录里有，调用返回 404
+      ``Function id ... Not Found``
+
+    市场原来只看目录，于是运营者会把死模型加进来，直到第一次真请求才暴露——
+    而那时它已经在别名的故障转移链里，或者被设成了接口模型。
+
+    探测用 ``max_tokens=1`` 的最小请求，且给一个**短超时**（默认 20s）：
+    "挂死"本身就是结论，没必要陪它等 60 秒。串行执行（并发探测会被供应商
+    当成滥用，也分不清限流是谁引起的）。
+    """
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
+        )
+    credential = next(iter(container.pool.for_provider(provider_id)), None)
+    if credential is None and provider.requires_credential:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": f"供应商 '{provider_id}' 还没有可用的 Key，无法验证",
+                    "type": "no_credential",
+                }
+            },
+        )
+    adapter = container.router.adapter(provider_id)
+    timeout = max(3.0, float(payload.timeout_seconds or 20.0))
+
+    results: list[dict[str, Any]] = []
+    for upstream in payload.models[: payload.limit]:
+        results.append(
+            await _verify_one_model(container, adapter, provider, credential, upstream, timeout)
+        )
+    ok = sum(1 for r in results if r["ok"])
+    return {
+        "object": "list",
+        "provider_id": provider_id,
+        "checked": len(results),
+        "usable": ok,
+        "timeout_seconds": timeout,
+        "results": results,
+        "note": (
+            "「目录里有」不等于「你账号能调」。ok=false 的模型加进配置后只会在"
+            "请求时才失败，别把它放进别名链，更别设成接口模型。"
+        ),
+    }
+
+
+async def _verify_one_model(
+    container: ContainerDep,
+    adapter: Any,
+    provider: Any,
+    credential: Any,
+    upstream: str,
+    probe_seconds: float,
+) -> dict[str, Any]:
+    """One probe. Never raises: a probe that blows up is itself the verdict."""
+    # 用最小成本构造一次真实调用：1 个 token、无工具、无历史。
+    model = ModelConfig(id=f"__probe__{upstream}", display_name=upstream, context_window=8192)
+    deployment = DeploymentConfig(id=f"__probe__{upstream}", provider_id=provider.id, model=upstream)
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=1,
+    )
+    ctx = ProviderContext(
+        request_id=f"probe_{upstream}",
+        deployment=deployment,
+        model=model,
+        credential=credential,
+        timeout=probe_seconds,
+        stream=False,
+    )
+    started = time.perf_counter()
+    try:
+        async with asyncio.timeout(probe_seconds):
+            await adapter.chat(request, ctx)
+    except TimeoutError:
+        return {
+            "upstream_model": upstream,
+            "ok": False,
+            "verdict": "hang",
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "message": f"{probe_seconds:.0f} 秒内无任何响应——不是慢，是挂死。加进链里等于每次都白等。",
+        }
+    except Exception as exc:
+        info = ErrorClassifier().classify(exc)
+        return {
+            "upstream_model": upstream,
+            "ok": False,
+            "verdict": _probe_verdict(info),
+            "http_status": info.http_status,
+            "error_type": info.error_type,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "message": (info.message or str(exc))[:300],
+        }
+    return {
+        "upstream_model": upstream,
+        "ok": True,
+        "verdict": "ok",
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "message": "",
+    }
+
+
+def _probe_verdict(info: Any) -> str:
+    """把 ErrorInfo 收敛成运营者看得懂的四种结论。"""
+    msg = (info.message or "").lower()
+    if info.http_status == 404 or "not found" in msg or "function id" in msg:
+        return "not_found"
+    if info.http_status in (401, 403) or "entitlement" in msg or "token plan" in msg:
+        return "no_entitlement"
+    if info.http_status == 429:
+        return "rate_limited"
+    if info.error_type == "timeout":
+        return "timeout"
+    return "error"
 
 
 @router.get("/providers/{provider_id}/models", summary="列出供应商的上游模型")
@@ -887,6 +1044,16 @@ async def router_preview(
     return preview
 
 
+class VerifyModelsRequest(BaseModel):
+    """Body for ``POST /admin/providers/{id}/models/verify``."""
+
+    models: list[str] = Field(default_factory=list)
+    #: 单模型探测上限。短是刻意的——「挂死」本身就是结论。
+    timeout_seconds: float = 20.0
+    #: 一次最多探几个，防止误传 81 个模型把供应商惹毛。
+    limit: int = 12
+
+
 class AliasUpsertRequest(BaseModel):
     """Body for creating/replacing an alias at runtime."""
 
@@ -897,6 +1064,10 @@ class AliasUpsertRequest(BaseModel):
     description: str | None = None
     weights: dict[str, float] = Field(default_factory=dict)
     requires: dict[str, float] = Field(default_factory=dict)
+    #: 接口模型（永远排第一）。不传 = 不改动；传 null = 清除，交还能力路由。
+    #: 走同一个 POST /admin/aliases 就能热改，不用重排 targets、不用重启——
+    #: 这就是运营者「随时调整」的入口。
+    front_model: str | None = None
 
 
 @router.post("/aliases", summary="新建或替换别名")
@@ -922,6 +1093,24 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
             detail={
                 "error": {
                     "message": f"未知的目标模型/别名：{'、'.join(unknown)}",
+                    "type": "invalid_alias",
+                    "known_models": container.config.public_model_ids(),
+                }
+            },
+        )
+    # ``front_model`` 是运营者显式指定的接口模型：写错必须当场报错。
+    # 路由层对配置文件里的拼写错误是静默回落（见 Router._promote_front_model），
+    # 因为那可能是历史遗留；但一次显式的 API 调用静默无效更糟——运营者会以为
+    # 换成功了，然后继续被同一个超时的模型卡住。
+    if alias.front_model and alias.front_model not in alias.targets:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": (
+                        f"front_model '{alias.front_model}' 不在 targets 里。"
+                        "接口模型必须同时是链上的一员，否则它没有可用的部署。"
+                    ),
                     "type": "invalid_alias",
                     "known_models": container.config.public_model_ids(),
                 }

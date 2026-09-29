@@ -25,6 +25,13 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - **`.cmd`/`.bat` 必须纯 ASCII + CRLF**：中文会让 cmd 字节错位误解析（生成乱码文件/跳行）；
   CRLF 由 `.gitattributes` 强制，ASCII 靠自觉；中文文案放对应 Python 脚本里
 - 文档入口：`使用手册.md`（面向使用，先看这个）→ `README.md`（全量参考）
+- `docs/` 放**一次性的排查/审查报告**（带日期的 `*.md`），不是常读文档——
+  结论该沉淀的往上写进本文件或 `使用手册.md`，报告本身只作过程留档。
+  另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
+  （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
+- `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
+  中间态及时删——堆到 18 个时已经分不清哪个能回滚。
+  ⚠ 纯 `.bak`（不带日期）是 `config_writer.atomic_write` 的**滚动备份，功能性，别删**。
 
 ## 已知坑（不看会犯错）
 
@@ -36,9 +43,220 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - 商汤窗口刷新模型默认按滚动记账；控制台显示的每账号「重置时间」可能是固定锚点
   （判定方法见使用手册），确认后用 `--anchors "1=HH:MM;..."` 切固定窗口爆发模式
 - 商汤额度按**账号**算：01+02 同账号，07~09 归属待核对；额度上限见 providers.yaml 注释
-- **消耗器会挤占 K3 的 TPM**（2026-09-19 实测）：满速烧 flash-lite 时同账号 K3 报
-  `inference exceeds tpm/rpm limit`（疑似账号级 TPM 跨模型共享）——K3 频繁 429 先查
-  消耗器是否在烧，用它时把消耗器停掉或调低 `--per-account-max`
+- **商汤的 tpm/rpm 桶是按「账号」分的，不是全供应商共享**（2026-09-28 实测推翻
+  旧结论）：同一时刻账号 04/05 正以并发 16 稳定烧穿，而 03/06/07/08/09 全部 429。
+  所以 `cooldown.throttle_scopes` 的 `quota`/`throughput` 默认是 **account** 不是
+  provider。曾按「账号间共享」判成 provider，代价实测很重：网关一次 kimi-k3 撞 429
+  （那把 Key 与积分消耗器**共用同一个账号**，见下条）→ 8 把 sensenova 全部停靠 52s，
+  其中 6 个账号本来健康 → 请求被迫去打已经超时死的 nvidia → 客户端十几分钟收不到
+  任何字节。**既然后来发现是按账号分，就别再改回 provider**；真看到全供应商一起 429
+  再改，并且先确认不是同一个账号的多把 Key。
+- **网关和积分消耗器共用同一批商汤 Key**：`config/providers.yaml` 的
+  `sensenova-02` 用的就是 `SENSENOVA_API_KEY_02`，而消耗器 `config/burner.yaml` 的
+  `only:` 列的是 `SENSENOVA_API_KEY_02`~`_10`——9 把里 8 把重合（只有不带后缀的
+  `SENSENOVA_API_KEY` 是网关独享）。消耗器满速烧时，网关打这些账号的 kimi-k3 必然
+  撞 tpm/rpm 429。**诊断网关 429 先看消耗器是否在烧**，这不是网关的错。
+- **探针能判「这个 ID 能不能调」，判不了「你要的产品是哪个 ID」**（2026-09-29
+  被用户当面纠正）：`deepseek-v4.1-flash` 403 之后，我据一篇 **09-04 的二手文章**
+  断言「正确 id 是 deepseek-v4-flash」。用户拿出 **09-22 的官方公告**：
+  「DeepSeek V4.1 Flash 正式上线，**Model ID：deepseek-flash**」——我是错的，
+  而且 `deepseek-flash` 就在我拉到的 `/v1/models` 列表**第一行**，我看漏了。
+  **两条教训**：①查资料先看**发布日期**，二手转述会被官方公告推翻；
+  ②`/v1/models` 里同名家族的多个条目（deepseek-flash / -v4-flash / -v4-pro /
+  -v4.1-flash）必须逐个实测，不能只看一个就下结论。
+  **真正的缺口是产品名↔ID 的映射**：预设表原来只有 `deepseek-v4-flash`，
+  没有 `deepseek-flash`，于是市场把它显示成裸 ID，没人知道它就是 V4.1 Flash。
+  已补 `deepseek-flash → DeepSeek V4.1 Flash`、`qwen3.8-flash-next`、
+  `deepseek-v4-pro`（标注 2026-10-08 下线）三条预设，并加回归测试。
+  另：市场**探测后自动验证**（目录 ≤20 个时），不再等运营者手动点——
+  死 ID 和可用 ID 长得一样，必须替他把结论摆出来。
+- **`deepseek-v4-pro` 于 2026-10-08 下线**：过渡期内平台自动把它重定向到
+  `deepseek-flash`。现役配置未用它。
+- **核对官方文档后修正的三个 model id**（2026-09-29，先实测再查官方，两者缺一不可）：
+  | 配置里的 | 官方/上游正确的 | 症状 |
+  |---|---|---|
+  | `deepseek-v4.1-flash` | **`deepseek-v4-flash`** | 403 套餐无权限 |
+  | `qwen38-flash-next` | **`Qwen/Qwen3.8-Flash-Next`**（缺 `Qwen/` 前缀） | 400 Invalid model id |
+  | `z-ai/glm-5.3` | 名字对，但**账号没权限**（见下条） | 挂死 / 404 |
+  商汤公测**可调用列表**（官方文档）：`deepseek-v4-pro`、`deepseek-v4-flash`、
+  `glm-5.2`、`kimi-k3`、`sensenova-6.8-flash-lite`、`sensenova-u1-fast`、
+  `sensenova-u1.5-lite` —— **没有** `deepseek-v4.1-flash`，但目录里列了它。
+  顺带证实积分规则就是「5h 6 万 / 周 60 万」，与 burner.yaml 一致。
+  已把 `glm-5.2`（实测 200）加进链，补 NVIDIA 失效后的 GLM 档位。
+- **NVIDIA 404「Function Not Found」是账号权限问题，不是模型问题**（2026-09-29
+  查官方 + 论坛确认）：官方 developer.nvidia.com/nim 明确写「**Developer Program
+  会员**才能用 NVIDIA-hosted NIM API」；论坛同名帖
+  「Request to enable Public API Endpoints ... 404 Function Not Found」讲的是
+  组织需要开通 Public API Endpoints。实测佐证：`/v1/models` 正常（鉴权 OK），
+  但**全部 81 个模型**（不只是 glm-5.3）要么 404 要么挂死 → 账号级失效。
+  **这修不了配置，得去 build.nvidia.com 查账号/组织权限。**
+- **部署级自动隔离：连续失败才屏蔽，偶发事件不误伤**（2026-09-29，运营者要求
+  「总是检测失败的模型应该自动屏蔽，而不是每次都重新检测，但要智能一些」）：
+  旧逻辑只有 `_deployment_cooldowns` 的**单次 30s 冷却**，于是 NVIDIA 的 glm-5.3
+  「撞 60s → 冷 30s → 再撞 60s」无限循环。新增 `DeploymentHealth`（跨请求连续计数）+
+  `is_quarantine_worthy()` 判别：
+  | 计入隔离 | 不计入 |
+  |---|---|
+  | `timeout`（ReadTimeout/ConnectTimeout） | 429 限流（偶发，属凭据层） |
+  | 503 / 504（availability / transient） | 401/403（换把 Key 可能就好） |
+  | 404 / `model_not_found`（上游没这个模型） | 400/413/422（调用方的错） |
+  **阈值 3 次**（容忍单次抖动）→ 阶梯 `60s → 5m → 30m → 2h → 6h` 封顶；
+  **任意一次成功立即清零并解除**（半开恢复，否则修好也进不来）；
+  **距上次失败超 1 小时则计数衰减归零**（避免陈旧计数让一次抖动重罚）。
+  `quarantined_deployments()` 暴露到 `/health` + 控制台顶部横幅——
+  隔离是自动的，**必须让运营者看见谁被屏蔽、为什么、还有多久**，否则渠道悄悄消失
+  会被当成路由 bug 去查。回归测试 8 例（含端到端「隔离后不再调用它一次」）。
+- **健康检查必须真跑一次推理，不能只查目录**（2026-09-29 修）：`health_check` 原来只调
+  `list_models()`（即 `GET /v1/models`），只证明「鉴权通过、目录可达」。NVIDIA 推理
+  **100% 不可用**（glm-5.3 挂死、kimi-k3 报 `Function not found`、换 5 个家族全废），
+  健康检查却**一直报绿灯** → 它留在所有故障转移链上，累计烧掉 **60.9 小时**纯等待。
+  **和「模型市场只看目录」是同一个错**：把「目录里有」当成了「能调用」。同一会话里
+  修了市场那处却漏了健康检查这处。现在目录通了再对前 N 个模型各发一次
+  `max_tokens=1` 真实推理，**任意一个成功即健康**（目录可能混着无权限条目，
+  只探一个会误报），全失败则如实报红。`health_probe_models=0` 回到旧行为。
+- **NVIDIA 挂死/404 不是网关配置问题**（2026-09-29 逐项排除，见
+  `docs/NVIDIA排查-20260929.md`）：适配器 payload 与裸请求逐字一致、官方文档
+  原始示例同样超时（49.7s）、两个 Key 完全相同地失败且报**同一个 function id**、
+  有无代理都超时、`/v1/models` 正常而推理全废 → **账号/组织的 NVCF function
+  未部署**。论坛同名帖「Request to enable **Public API Endpoints** ... 404 Function
+  Not Found」；官方页写明需 **Developer Program 会员**。改配置解决不了，
+  要去 build.nvidia.com 查权限。
+- **外部改配置文件会被长命进程静默回滚**（2026-09-29 实测，同类 bug 本会话第 2 次）：
+  网关**不监听**配置文件，内存里是启动时的值；控制台表单**用内存值渲染**，
+  保存时把旧值写回文件。实测：08:20 在文件里禁用 nvidia，09:15 运营者在控制台
+  打开 nvidia 页签并保存 → `enabled` 被改回 true（日志：
+  `provider nvidia upserted via console` + `config file updated`）。
+  **同日同型**：消耗器把 `burn_state.json` 的费率 761/2292 写回 830/2500。
+  共同点：长命进程把内存状态写回文件，外部编辑在它看来不存在。
+  已修：`config_writer` 陈旧检测闸（`ConfigStaleError`）——`load_app_config` 记 mtime，
+  写前比对，文件更新过就**拒绝写入**并返回 **409 + 「先 reload」指引**；
+  写后刷新记录，自己写的不会被自己判陈旧。`stale_config_files()` 供体检/健康检查用。
+  **未修**：根治要网关监听文件自动 reload（行为变更，待定）。
+- **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
+  「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
+  只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
+  已建 `scripts/check_config.py`：改完配置跑一次，查悬空部署、不可解析 target、
+  **模型 enabled 但 0 可用部署**、别名单供应商、外部改动未 reload。
+  它本可以第一时间抓住我误删 `deepseek-v4.1-flash` 模型块那次事故。
+- **别用 shell heredoc 写含转义序列的脚本**（本会话栽了四次）：Git-Bash 会改写
+  heredoc 里的反斜杠——反斜杠-d 变斜杠-d（Python 正则静默失效，害我得出过错误结论）、
+  反斜杠-n 变斜杠-n（YAML 首行坏掉）、内容被重复追加（测试文件三次重复定义 F811）。
+  **第四次就发生在这条注释本身**：我用 heredoc 写这段文字时，`\n` 被替换成了真实换行，
+  于是文档里出现了一个断成两行的反引号。**改用 Write / Edit 工具，不经 shell。**
+- **供应商的 `/v1/models` 是「目录」不是「你账号能调的」**（2026-09-29 实测，
+  补上缺失的验证环节）：市场原来只看目录，于是死模型被加进来，直到第一次真请求
+  才暴露。三个真实反例，三个都通过了目录检查：
+  | 供应商 | 模型 | 目录里有 | 实际调用 |
+  |---|---|---|---|
+  | 商汤 | `deepseek-v4.1-flash` | ✅ | 403 `model is not available in the current token plan` |
+  | NVIDIA | `z-ai/glm-5.3` | ✅ | **挂死**（121s 无响应，不是慢） |
+  | NVIDIA | `moonshotai/kimi-k3` | ✅ | 404 `Function id ... Not Found` |
+  | 魔搭 | `qwen38-flash-next` | ✅ | 400 `Invalid model id` |
+  新增 `POST /admin/providers/{id}/models/verify`：对每个模型发一次
+  `max_tokens=1` 的真实请求，短超时（默认 20s，「挂死」本身就是结论），
+  返回 `ok / hang / not_found / no_entitlement / rate_limited / error`。
+  控制台「🧺 模型市场 → 🔬 验证可调用」按结论标注并禁用「＋ 添加」。
+  **一次扫描查出 9 个部署里 5 个是死的。**
+- **NVIDIA 实测 0/3 全死，但运营者决定保持启用**（2026-09-29）：推理全废
+  （glm-5.3 挂死 121s、kimi-k3 报 `Function not found`、换 5 个家族全废），
+  而 `/v1/models` 正常——**不是网关配置问题**（见上面「NVIDIA 挂死/404」那条的
+  逐项排除）。历史代价：超时 3,313 次 × 均 66s = **60.9 小时纯等待**。
+  `providers.yaml` 的 `enabled` 保持 `true`（运营者要求「不要着急限制，先排查」），
+  但要恢复真正可用得去 build.nvidia.com 开账号/组织的 Public API Endpoints 权限。
+  **现在靠自动隔离兜底**（连续 3 次失败即屏蔽，见「部署级自动隔离」那条），
+  所以它不会再像以前那样每个请求白等 60 秒。`glm-5.3`/`glm-5.3-flash` 当前
+  **不在任何别名链里**，要用就点名模型名。
+- **moonshot 已整块删除**（无 Key，3,102 次尝试 0 成功，纯 `no_available_credential`
+  噪音）。要恢复需同时加回 providers.yaml 的供应商与 models.yaml 的部署。
+- **接口模型 `front_model`：永远排第一、手动指定、随时可改**（2026-09-28 新增，
+  `ModelAliasConfig.front_model`）：`zk-auto`/`zk-long` 已设 `step-5-preview`，
+  因为 `glm-5.3` 在 NVIDIA 上持续 60s 超时、打头等于每个长上下文请求先赔 180 秒。
+  三条设计约束：①只提升**有资格**的候选——被 `request_requires` 挡掉的接口模型
+  绝不能硬提到第一，那会把能跑的请求变成必败；②是**重排不是过滤**，能力路由的
+  结果完整留在后面当备用与故障转移顺序；③拼错时静默回落（配置文件容忍历史遗留），
+  但 `POST /admin/aliases` 显式调用会 400——运营者显式换模型不该静默无效。
+  **开关**：控制台「模型与别名 → 编辑别名」里有开关+下拉框，关掉 = 不送
+  front_model = 越过首位回纯权重排序。语义上「有没有值」就是开关，服务端**不额外
+  存布尔位**——两处状态必然不一致（开关关着但字段还有值）。别名表多一列显示
+  `📌 模型名` / `权重排序`。⚠ 复现路由行为时注意：
+  `ModelAliasConfig.strategy` 默认是 **PRIORITY**（只有 `tests/conftest.py` 的
+  `make_alias` 默认 CAPABILITY）；直接构造 ModelAliasConfig 忘写 strategy 会走到
+  按 targets 顺序的优先级策略，看起来像「关闭开关没生效」，其实是策略不同。
+  与 `pin_first` 的区别：`pin_first` 钉 `targets[0]` 且由控制台热切换托管，
+  `front_model` 独立于 targets 顺序，换它不用重排列表。
+- **消耗器改费率：改 `burner.yaml` 必须重启，改 `burn_state.json` 不用**（2026-09-29
+  踩到）：加载顺序是 `args`(yaml) → `_load_rates_from_state()` 用 state **覆盖** args →
+  进内存；而 `save_state()` 又把内存值**写回** state。这个环意味着
+  **手工改 `burn_state.json` 会长命进程的下一次保存抹掉**——看起来「校准生效过又没了」。
+  已加 `_rate_fields()` 守护：进程记住自己加载时见过的费率，发现文件被外部改过就
+  保留文件值并打 WARN（要生效仍需重启，因为记账用的是内存里的旧值）。
+  回归测试 `test_external_rate_calibration_survives_a_running_process`。
+  ⚠ 别把 `_loaded_rate_in == 0` 当成「外部改成了 0」——那只是本进程还没加载过账本。
+- **`ModelAliasConfig.front_model` 以控制台为准，且会写回 `models.yaml`**：
+  `POST /admin/aliases` 走 `_write_alias_file()` 落盘，所以「配置文件里是 A、实际
+  生效是 B」通常不是 bug，而是有人在控制台改过。排查前先 `grep front_model= data/gateway.log`
+  看它实际用的是什么、什么时候变的。
+- **`max_total_attempts` 是次数上限，不是时间上限**（2026-09-28 补
+  `ZKAI_MAX_REQUEST_SECONDS`，默认 300s）：20 次尝试 × 60s（nvidia read timeout）
+  = 最坏 20 分钟。实测一次请求磨了十几分钟、客户端一个字节都没收到——每次尝试单独看
+  都没超时，所以次数闸认为还有预算。墙钟预算只在**两次尝试之间**检查，不会打断已在
+  飞的流（那会截断客户端还能读的响应）。默认 300s = 现役最大上游超时（商汤 300s），
+  一次成功的慢生成不会被误杀。
+- **429 不能再默认「换一把兄弟 Key」**（2026-09-28 修）：分类器按正文分出
+  `ThrottleKind`（`quota` 额度用尽 / `throughput` tpm / `frequency` rpm·rps /
+  `unknown`），`cooldown.throttle_scopes` 决定冷却覆盖到哪：
+  `credential` 只冷却这把（rpm 类，NVIDIA 按 Key 计 40rpm 就属这类）、
+  `account` 同 `account-*` 标签一起冷、`provider` 整个供应商一起冷并**直接故障转移**。
+  默认 `quota`/`throughput` 是 `provider`——商汤这两个桶账号间共享，扫 7 个账号
+  只会拿回同一个 429（19.7% 尝试纯空转的由来）。判「换 Key 还是换部署」只看
+  `CredentialPool.effective_throttle_scope()` 一个方法，池子与调度器共用，
+  否则两边判断会漂移。
+- **K3 的 `request_requires: {reasoning: 4.0}` 已删除**（2026-09-28）：它拿
+  `capability.py` 的**关键词命中**当硬门槛，而 zk-auto 别名地板把 reasoning 权重
+  钉在 2.0，于是非推理关键词请求永远 `gated_out`——「你好」、短代码、工具回执
+  全落到同一个模型，显式调 `kimi-k3` 还会触发「全部门槛失败、回退无门槛排序」。
+  机械流量改由**形状**接管：`agent_auto.rewrite_model` 见「历史里已有工具结果」
+  就改写成 `zk-long`（tool 轮 84% 是 ack/diff/status），另有超长 / 批量工具 /
+  有图三条。关键词是软信号，只能加权，不能当闸。
+- **`zk-long`/`zk-vision` 不存在时改写要降级**，不能让整个 agent 工作负载 404：
+  改写目标从罕见边角（长上下文）变成常规路径（每个工具轮）之后，
+  `models.yaml` 里没定义 `zk-long` 就是全量故障。`Router.plan` 传
+  `known_aliases` 给 `rewrite_model`，缺目标就回落 `zk-auto` 并打 WARNING。
+  回归测试 `tests/test_agent_auto.py` 的 missing-* 三例（`tests/test_agent.py`
+  的 16 个失败就是这么发现的）。
+- **历史裁剪默认关闭**（`ZKAI_TRIM_HISTORY_TOKENS`，0=关）：删上下文可能改变
+  答案，是产品决策不是默认值。开启后 `app/services/history.py` 只删旧轮次，
+  system 前言 / 最近若干轮 / 未闭合 tool_call 配对一律保留。
+  **后缀不许以 `tool` 开头**（其 assistant call 已被丢，上游直接 400）；
+  `assistant` 开头是合法的——占位符本身是 `user`，由它来合法开场，
+  这一点以前搞错，白丢了 40% 预算。
+- **`ProviderConfig.max_retries` 曾经是死配置**（2026-09-28 修）：字段存在、
+  providers.yaml 给 NVIDIA 设 0 还写了理由，但适配器建 `httpx.AsyncClient` 时
+  根本没读它。现已接 `AsyncHTTPTransport(retries=...)`（**连接级**重试，
+  不是读重试——挂起的请求仍旧只能靠上层冷却+换渠道）。注意 `trust_env=True`
+  必须显式写，替换默认 transport 正是丢掉 Windows 系统代理的方式。
+- **消耗器的账号间 TPM/RPM 争抢，以及 AIMD 会饿死账号**（2026-09-19 首见、
+  2026-09-28 修）：商汤的 `tpm`/`rpm`/`rps` 是**账号间共享的桶**，一个实例里多个
+  账号在烧就是在互相挤。
+  - 现象：某个账号稳定吃到高并发（实测并发 16、43 次采样全是 16 从不回落），
+    其余账号撞 429 → AIMD 减半 → 锁在 1 → 永远挤不进来。实测五个账号连续
+    77 次采样 **0 成功**，全站 19,714 次 429 对 80,345 次成功（19.7% 纯空转）。
+  - 根因：`scripts/burn_sensenova.py` 的加性增只看「自己 60s 没撞 429」就 +1，
+    **不看同实例其他账号占了多少**——马太效应，零让出机制。
+  - 修法（`_rebalance_concurrency`）：饥饿救济。饿超 `--starve-after`（默认 300s）
+    的账号临时借 1~2 级并发，成功一次收回；**三条限制必须一起看**：
+    ①`--starve-grace`（默认 120s）启动宽限期——旧账本没 `last_ok`，不宽限会让
+    所有账号同时算「从未成功」、一秒内一起借出（实测 7 个账号同时借出后
+    tpm 35 / rpm 20 / rps 19 三种 429 齐炸）；
+    ②**频率类限流不救**——`rpm`/`rps`/`qps`/`tps` 卡的是"发得多频"，加并发只会
+    撞得更狠，只救 `tpm`（吞吐类）；
+    ③借出后仍撞 429 立刻收回，不爬到硬顶。
+  - **诊断时先分清 429 类型**：`tpm exhausted`=吞吐不够，
+    `rpm/rps exhausted`=发得太频，`entitlement exhausted`=额度真用尽（长停靠）。
+    控制台「积分消耗器」页已把三者拆开显示（限流 / 额度用尽 / 已救济）。
+  - 老坑仍然有效：满速烧 flash-lite 时同账号 K3 报 `inference exceeds tpm/rpm
+    limit`——K3 频繁 429 先查消耗器是否在烧，用它时把消耗器停掉或调低
+    `--per-account-max`
 - **`retry.max_deployments` 是路由计划硬顶**：按 zk-k3 的 3 部署估成 4，zk-auto 全链
   6 部署时 DeepSeek/Qwen 根本进不了计划，坏渠道烧光 `max_total_attempts` 就整体失败
   （已改 8）。**NVIDIA `max_retries` 会让挂起重试翻倍墙钟**（60s 超时→120s+/次），
@@ -277,4 +495,3 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `kimi-k3-moonshot` 恒为 DISABLED —— 它在 `zk-auto`/`zk-k3` 的故障转移链上
   （`kimi-k3-sensenova` 之后），轮到必然失败，是个**死部署**：要么填 Key，
   要么把 `models.yaml` 里 `kimi-k3-moonshot` / `kimi-k3-nvidia` 从别名链摘掉
-

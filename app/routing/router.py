@@ -207,7 +207,7 @@ class Router:
         # ever ranks models inside the chain the shape picked. A mechanical
         # request sent to zk-long has no K3 in its candidate list at all, so
         # no weight vector can resurrect it.
-        rewrite = rewrite_model(request)
+        rewrite = rewrite_model(request, known_aliases=set(self.aliases.names()))
         if rewrite.changed:
             logger.info(
                 "agent-auto: %s -> %s (%s)",
@@ -254,6 +254,7 @@ class Router:
         strategy_name = alias.strategy if alias else None
         strategy = get_strategy(strategy_name)
         ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
+        front_applied = self._promote_front_model(ordered, alias)
 
         # Safety valve: per-deployment ``request_requires`` gates can leave a
         # request with zero eligible deployments (e.g. every deployment on the
@@ -282,6 +283,11 @@ class Router:
             ordered = strategy.order(
                 relaxed, requirement, pin_first=bool(alias and alias.pin_first)
             )
+            # The front-line model must survive the safety valve too: if it were
+            # dropped here, a request whose gates all fail would silently lose the
+            # only model that answers, which is exactly the case where the
+            # operator needs it most.
+            self._promote_front_model(ordered, alias)
             logger.warning(
                 "alias '%s' left no eligible deployment (all request_requires gates failed); "
                 "falling back to the ungated ranking - this usually means the deployment "
@@ -297,6 +303,8 @@ class Router:
         ]
         if rewrite.changed:
             reason_parts.append(f"agent_auto={rewrite.rewritten}({rewrite.reason})")
+        if front_applied:
+            reason_parts.append(f"front_model={front_applied}")
         if requirement.notes:
             reason_parts.append("hints: " + "; ".join(requirement.notes))
         blocked = [c.deployment.id for c in ordered if not c.eligible]
@@ -319,6 +327,50 @@ class Router:
             decision.reason,
         )
         return decision
+
+    def _promote_front_model(
+        self,
+        ordered: list[RoutingCandidate],
+        alias: ModelAliasConfig | None,
+    ) -> str | None:
+        """Float *alias.front_model* to the head of the attempt order.
+
+        Returns the promoted model id (for the routing reason) or ``None`` when
+        nothing was promoted.
+
+        Deliberately conservative, because the whole point is *reliability*:
+
+        * only an **eligible** candidate is promoted. A model gated out by
+          ``request_requires`` (or with no deployment at all) must not be forced
+          to the front - that would turn a working request into a guaranteed
+          failure, which is the opposite of what a front-line model is for;
+        * the promotion is a reorder, not a filter: everything the capability
+          router ranked stays in the chain behind it, so content-based selection
+          still decides the *backup* and the failover order;
+        * when the front model is missing or ineligible the chain is returned
+          untouched, so a typo in ``front_model`` degrades to the old behaviour
+          instead of breaking routing.
+
+        Callers hold no locks; ``ordered`` is mutated in place because it is a
+        freshly built list owned by ``plan()``.
+        """
+        if alias is None or not alias.front_model:
+            return None
+        wanted = alias.front_model
+        for index, candidate in enumerate(ordered):
+            if candidate.model.id != wanted or not candidate.eligible:
+                continue
+            if index == 0:
+                return wanted  # already leading, nothing to do
+            ordered.insert(0, ordered.pop(index))
+            return wanted
+        logger.debug(
+            "alias '%s' front_model '%s' is not an eligible candidate; "
+            "keeping the routed order",
+            alias.name,
+            wanted,
+        )
+        return None
 
     def eligible_candidates(self, decision: RoutingDecision) -> list[RoutingCandidate]:
         """Eligible candidates in attempt order."""

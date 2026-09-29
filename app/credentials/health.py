@@ -17,6 +17,10 @@ failure class                 transition
 success                       -> HEALTHY, counters reset, latency EMA updated
 cooldown expiry               -> HEALTHY (lazy recovery on next selection)
 ============================  ==========================================
+
+The 429 row is the interesting one: how far that COOLDOWN reaches is decided by
+:meth:`app.credentials.cooldown.CooldownPolicy.throttle_scope` and applied by the
+pool, because the sibling credentials to park are not visible from here.
 """
 
 from __future__ import annotations
@@ -49,6 +53,10 @@ class Transition:
     current: CredentialStatus
     reason: str
     cooldown_until: float | None = None
+    #: Duration of the cooldown in seconds. Carried on the transition so the pool
+    #: can park *sibling* credentials for exactly the same stretch instead of
+    #: recomputing (and drifting from) the leader's value.
+    cooldown_seconds: float = 0.0
 
     @property
     def changed(self) -> bool:
@@ -206,6 +214,7 @@ class CredentialHealthTracker:
                 current=credential.status,
                 reason=f"{info.error_type} cooldown",
                 cooldown_until=credential.cooldown_until,
+                cooldown_seconds=duration,
             )
 
         # Transient / availability failures: count, and only park the key after

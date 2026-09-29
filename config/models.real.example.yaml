@@ -172,9 +172,9 @@ aliases:
     weights: { vision: 5.0, coding: 1.0 }
 
   - name: zk-long
-    description: 超长上下文（>256K）：只留 1M 级别的模型
+    description: 超长上下文与机械轮次（>256K 或已带工具结果）；不含 K3——要 K3 请用 zk-k3
     strategy: capability
-    targets: [kimi-k3, deepseek-v4-flash, glm-5.2]
+    targets: [deepseek-v4-flash, glm-5.2]
     requires: { long_context: 9.0 }
 
   - name: zk-fast
@@ -188,6 +188,18 @@ aliases:
     targets: [deepseek-v4-flash, sensenova-6.8-flash-lite, kimi-k3]
 
   - name: zk-auto
-    description: 默认入口：均衡
+    description: 默认入口：均衡，由能力路由按每次请求的内容选模型
     strategy: capability
     targets: [kimi-k3, deepseek-v4-flash, glm-5.2, sensenova-6.8-flash-lite]
+    # pin_first 必须显式写 false：2026-09-27 之前静态配了 true，strategy 的
+    # pin 分支只按 targets 位置排、不看分数也不看 request_requires 门槛，
+    # 结果列表第一名赢下所有请求（实测 25,642 次打给一个模型）。控制台的热切换
+    # 仍会在 app/api/admin.py 里硬编码 pin_first=true，那是操作员的显式意图。
+    pin_first: false
+    # 接口模型：永远排第一、手动指定、随时可改（改这一行，或
+    # POST /admin/aliases 热改，都不用重排 targets）。
+    # 背景：glm-5.3 在 NVIDIA 上持续 60s 超时，打头时每个长上下文请求要先赔
+    # 三轮 60 秒才故障转移，客户端几分钟收不到一个字节。用一个真能答的模型顶
+    # 在前面，后面仍交给能力路由按内容排序；它挂掉/超时就自动往下走。
+    # 换机器后按实际可用的渠道填这个值——这是最该先确认的一行。
+    front_model: deepseek-v4-flash

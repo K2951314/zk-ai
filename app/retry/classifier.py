@@ -35,11 +35,20 @@ Decision matrix (the single source of truth for retry / rotation / failover)::
 
 Note that ``switch_credential`` means "after the per-credential retry budget is
 spent, try a sibling key of the *same* deployment before failing over".
+
+A 429 additionally carries :attr:`ErrorInfo.throttle_kind` (see
+:class:`ThrottleKind`). When the kind turns out to be ``quota`` or
+``throughput`` the cooldown is *shared* across the provider's accounts and the
+scheduler fails over to the next deployment instead of sweeping sibling keys -
+the ``switch_credential``/``switch_provider`` columns above are rewritten at
+dispatch time by ``Scheduler._normalize_throttle``. ``frequency`` and ``unknown``
+keep the row as printed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -100,6 +109,59 @@ def looks_like_quota_exhaustion(message: str | None) -> bool:
     return any(pattern.lower() in lowered for pattern in QUOTA_EXHAUSTION_PATTERNS)
 
 
+class ThrottleKind(str, Enum):
+    """Which limiter a 429 came from.
+
+    The three kinds need *different* scheduling reactions, which is why they are
+    separated here instead of lumping everything into "rate_limit_error":
+
+    ``quota``       plan/credit gone until a hours/week reset. Nothing to do but
+                    park and fail over.
+    ``throughput``  too many *tokens* per window (``tpm``). Adding concurrency or
+                    sweeping sibling keys only makes it worse - the bucket is
+                    usually shared across the provider's accounts.
+    ``frequency``   too many *requests* per window (``rpm``/``rps``/``qps``).
+                    Usually counted per key, so a sibling key on another account
+                    really can serve the next attempt.
+    ``unknown``     no recognisable marker. Treated as per-key (the safe,
+                    backwards-compatible default).
+    """
+
+    QUOTA = "quota"
+    THROUGHPUT = "throughput"
+    FREQUENCY = "frequency"
+    UNKNOWN = "unknown"
+
+
+#: "Too many tokens in the window" markers. ``\btpm\b`` deliberately matches the
+#: combined SenseNova message "inference exceeds tpm/rpm limit": that string is
+#: ambiguous, and the expensive mistake is calling it per-key and sweeping a
+#: provider whose bucket is shared (measured 19.7% of all attempts spinning on
+#: exactly that). A false "throughput" costs one failover; a false "frequency"
+#: burns every sibling key of the deployment.
+_THROUGHPUT_RE = re.compile(
+    r"\btpm\b|tokens? per (?:minute|second|hour)|throughput|token limit exceeded",
+    re.IGNORECASE,
+)
+#: "Too many requests in the window" markers - checked *after* throughput.
+_FREQUENCY_RE = re.compile(
+    r"\b(?:rpm|rps|qps|tps)\b|requests? per (?:minute|second|hour)|per minute|per second"
+    r"|too many requests|request rate|请求过于频繁|每分钟|每秒|频率超限",
+    re.IGNORECASE,
+)
+
+
+def classify_throttle(message: str | None) -> ThrottleKind:
+    """Map a 429 body onto the limiter that produced it."""
+    if looks_like_quota_exhaustion(message):
+        return ThrottleKind.QUOTA
+    if _THROUGHPUT_RE.search(message or ""):
+        return ThrottleKind.THROUGHPUT
+    if _FREQUENCY_RE.search(message or ""):
+        return ThrottleKind.FREQUENCY
+    return ThrottleKind.UNKNOWN
+
+
 class ErrorClass(str, Enum):
     """Coarse buckets surfaced in statistics."""
 
@@ -132,6 +194,10 @@ class ErrorInfo:
     #: exhaustion gets a long flat cooldown instead of exponential back-off, so
     #: the scheduler stops sweeping every sibling key on every request.
     quota_exhausted: bool = False
+    #: Which limiter produced a 429 (see :class:`ThrottleKind`). Decides whether
+    #: the cooldown is per-key or shared across the provider's accounts, and
+    #: whether the scheduler should sweep sibling keys or fail over outright.
+    throttle_kind: ThrottleKind = ThrottleKind.UNKNOWN
     raw: dict[str, Any] = field(default_factory=dict)
 
     def is_request_error(self) -> bool:
@@ -347,6 +413,7 @@ class ErrorClassifier:
                 cooldown_scope="credential", cooldown_seconds=cooldown,
                 client_status=429, retry_after=retry_after, raw=raw,
                 quota_exhausted=quota,
+                throttle_kind=classify_throttle(detail),
             )
         if status == 500:
             # Internal upstream error: retry with backoff, then try a sibling key

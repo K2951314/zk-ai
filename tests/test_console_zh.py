@@ -164,6 +164,40 @@ def test_agent_page_keeps_untouched_dom_contract() -> None:
         assert f'id="{hook}"' in text, f"钩子 {hook} 必须保留"
 
 
+def test_report_page_is_self_contained_and_explains_the_division() -> None:
+    """/ui/report 体检页：单文件零依赖，且真的把「分工」讲成人话。
+
+    存在的理由是运营者（非程序员）看不懂网关把活派给了谁、为什么慢——
+    此前要回答这类问题只能查数据库。这页用控制台同源的两个端点
+    （/admin/stats + /admin/requests）把决策摊开，所以它**不该**自带令牌输入框：
+    令牌复用控制台存在 localStorage 里那份，少一步操作就少一个出错点。
+    """
+    text = _html("report.html")
+    # 与其它页面同源：不许引外部资源（test_page_has_no_external_assets 也守这点）
+    for marker in ('<link rel="stylesheet"', "<script src=", "@import url(",
+                   "fonts.googleapis", "unpkg.", "jsdelivr."):
+        assert marker not in text, f"report.html 不该引入外部资源（{marker}）"
+    # 令牌必须从控制台复用，不自己造输入框
+    assert "localStorage.getItem('zkai_admin_token')" in text
+    assert 'id="tok"' not in text, "别让运营者再手填一次令牌"
+    # 数据端点与延迟归因都要在
+    assert "/admin/stats" in text and "/admin/requests" in text
+    assert "latency_ms" in text
+    # 讲的是人话：规则的每一条都要落在页面上
+    for phrase in ("派给", "平均等", "接活标准", "Kimi K3"):
+        assert phrase in text, f"体检页该解释「{phrase}」"
+    # 能回控制台（运营者需要退回去）
+    assert 'href="/ui"' in text
+
+
+def test_console_links_to_the_report_page() -> None:
+    """控制台要有一个入口，否则这页只能靠背路径。"""
+    text = _html("index.html")
+    assert 'href="/ui/report"' in text, "侧栏该有「体检」入口"
+    # 它是跳转（<a>）不是切视图（<button>），样式得跟上其它 nav-item
+    assert "a.nav-item" in text, "跳转型导航项要去掉下划线并继承外观"
+
+
 def test_agent_page_renders_spawn_cards_in_chinese() -> None:
     """子任务派发的卡片必须有，且保持中文 + 单文件零依赖。
 
@@ -203,7 +237,8 @@ def test_wide_tables_keep_actions_reachable_without_scrolling() -> None:
         '<th class="acts">操作</th><th>别名</th>',
         '<th class="acts">操作</th><th>凭据</th>',
         '<th class="acts">操作</th><th>供应商</th>',
-        '<th class="acts">操作</th><th>模型</th><th>上下文</th>',
+        # 模型市场：2026-09-29 在「模型」与「上下文」之间插了「可调用」列
+        '<th class="acts">操作</th><th>模型</th><th>可调用</th>',
     ):
         assert thead in text, f"表头缺少左置操作列: {thead[:40]}"
     # 主键列要能换行，否则照样把表撑宽

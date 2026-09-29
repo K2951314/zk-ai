@@ -23,6 +23,18 @@ once: false
 concurrency: 64
 per_account_start: 8
 per_account_max: 24
+
+# ---- 饥饿救济（2026-09-28 加，治「一个账号独吃 TPM、其余饿死刷 429」）----
+# 商汤的 tpm/rpm 是账号间共享的桶：AIMD 原本只看「自己 60s 没撞 429」就 +1，
+# 于是抢到配额的账号一路涨到 per_account_max，被压住的账号撞 429 减半后锁在 1、
+# 永远挤不进来（实测五个账号连续 77 次采样 0 成功）。
+# starve_after：饿这么久（秒）就临时借 1~2 级并发，成功一次即收回
+# starve_grace：重启后多久内不救济（旧账本没有 last_ok，不宽限会让所有账号
+#               同时算「从未成功」、一秒内一起借出，反而把桶挤爆）
+# 频率类限流（rpm/rps）时不借——那类卡的是「发得多频」，加并发只会撞得更狠
+starve_after: 300
+starve_grace: 120
+
 max_tokens: 16384
 filler_chars: 6000
 

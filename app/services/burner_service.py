@@ -37,6 +37,10 @@ CONFIG_KEYS: dict[str, type] = {
     "concurrency": int,
     "per_account_max": int,
     "per_account_start": int,
+    # 饥饿救济（2026-09-28 加，治 AIMD 饿死账号）。不加进白名单的话，
+    # 写在 burner.yaml 里会被静默忽略——运营者以为调了，其实没生效。
+    "starve_after": float,
+    "starve_grace": float,
     "max_tokens": int,
     "filler_chars": int,
     "window_credits": float,
@@ -64,6 +68,9 @@ FORM_FIELDS: tuple[str, ...] = (
     "concurrency",
     "per_account_start",
     "per_account_max",
+    # 饥饿救济放在并发后面（它本来就是并发的补充调节），默认值即推荐值。
+    "starve_after",
+    "starve_grace",
     "max_tokens",
     "filler_chars",
     "rate_in",
@@ -226,6 +233,9 @@ class AccountStatus:
     ok: int = 0
     fail: int = 0
     rate_limited: int = 0
+    quota_hits: int = 0
+    starve_boost: int = 0
+    last_ok: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
 
@@ -284,6 +294,10 @@ def read_status(state_file: Path, config: dict[str, Any]) -> BurnerStatus:
             ok=int(k.get("ok") or 0),
             fail=int(k.get("fail") or 0),
             rate_limited=int(k.get("rate_limited") or 0),
+            # 其中权益用尽的次数；旧账本没有这个键，回落 0（不做猜测）
+            quota_hits=int(k.get("quota_hits") or 0),
+            starve_boost=int(blob.get("starve_boost") or 0),
+            last_ok=float(blob.get("last_ok") or 0.0),
             tokens_in=int(k.get("tokens_in") or 0),
             tokens_out=int(k.get("tokens_out") or 0),
         ))
@@ -336,6 +350,15 @@ def account_view(acct: AccountStatus, now: float, global_week_anchor: float,
         "ok": acct.ok,
         "fail": acct.fail,
         "rate_limited": acct.rate_limited,
+        # 429 的两种含义分开给前端：限流（tpm exhausted，等窗口滑过）与
+        # 额度用尽（entitlement exhausted，停靠到周刷新）。前者是争抢、
+        # 后者是真用完，处置和预期都相反——混成一个数字会让人以为号坏了。
+        "quota_hits": acct.quota_hits,
+        "freq_hits": max(0, acct.rate_limited - acct.quota_hits),
+        # 饥饿救济是否正在借出额度（账本里的 starve_boost > 0）。
+        # 运营者看到「已救济」就知道这不是号坏了，是网关在帮它抢配额。
+        "starved": bool(getattr(acct, "starve_boost", 0)),
+        "last_ok": getattr(acct, "last_ok", 0.0),
         "tokens_in": acct.tokens_in,
         "tokens_out": acct.tokens_out,
         "requests_left_5h": int(left5 / request_cost) if request_cost > 0 else 0,

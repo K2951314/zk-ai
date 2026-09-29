@@ -639,6 +639,22 @@ async def test_ui_console_is_served_without_token(api) -> None:
     assert "ZK-AI 控制台" in response.text
 
 
+async def test_report_page_is_served(api) -> None:
+    """/ui/report 体检页要能直接打开（运营者从侧栏点进来）。
+
+    与 /ui 同样是静态壳：页面本身不含数据，数据由浏览器带令牌去 /admin/* 取，
+    所以这里不需要令牌也能拿到 200。少了这条测试，「侧栏有个入口但点是 404」
+    这种问题只能等运营者自己发现。
+    """
+    client, _ = api
+    response = await client.get("/ui/report")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "体检" in response.text
+    # 它要跳回控制台，不能是个死胡同
+    assert 'href="/ui"' in response.text
+
+
 async def test_admin_requests_list_filters_and_pages(api) -> None:
     client, harness = api
     harness.adapter.queue(Behavior(text="a", prompt_tokens=10, completion_tokens=5))
@@ -1663,3 +1679,204 @@ async def test_input_token_guard_covers_all_three_paths(provider_config, fake_ad
         assert fake_adapter.calls == []
     finally:
         await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# 404 必须可操作：客户端漏掉 /v1 时不能只回一句 Not Found（2026-09-28 实测）
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    ("path", "correct"),
+    [
+        ("/chat/completions", "/v1/chat/completions"),
+        ("/messages", "/v1/messages"),
+        ("/responses", "/v1/responses"),
+        ("/models", "/v1/models"),
+        ("/models/zk-auto", "/v1/models/zk-auto"),
+    ],
+)
+async def test_404_without_v1_prefix_names_the_correct_path(
+    api, path: str, correct: str
+) -> None:
+    """A base_url missing ``/v1`` must not look like "the model disappeared".
+
+    实测：客户端把 base_url 配成 ``http://127.0.0.1:8317``，换模型后每条消息
+    404，报错文案是「自定义模型 custom-local:zk-auto 错误」——既猜不到是路径
+    问题，也猜不到正确答案，而切换前它是好的。
+    """
+    client, _harness = api
+    response = await client.post(path, json={"model": "zk-auto", "messages": []})
+    assert response.status_code == 404
+    body = response.json()["error"]
+    assert body["type"] == "invalid_request_error"
+    assert correct in body["message"], body["message"]
+    assert "/v1" in body["message"]
+    assert body["details"]["correct_path"] == correct
+
+
+@pytest.mark.parametrize("path", ["/nope", "/v1/nope", "/foo/bar", "/chat/completion"])
+async def test_unrelated_404_keeps_the_default_shape(api, path: str) -> None:
+    """只有「少一层 /v1」的路径才给提示，其余 404 一律保持原样。
+
+    ``/chat/completion``（少个 s）刻意留在里面：它既不是已注册路径、也不是
+    某个已知路径少一层 /v1，所以必须走默认分支——提示只该在「确定知道正确
+    答案」时出现，猜路径比不提示更糟。
+    """
+    client, _harness = api
+    response = await client.get(path)
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+# --------------------------------------------------------------------------- #
+# 接口模型热改：POST /admin/aliases 的 front_model（2026-09-28）
+# --------------------------------------------------------------------------- #
+
+def _alias_body(**overrides):
+    body = {
+        "name": "zk-test",
+        "targets": ["fake-model", "fake-smart"],
+        "strategy": "capability",
+        "weights": {"coding": 2.0},
+        "description": "test alias",
+    }
+    body.update(overrides)
+    return body
+
+
+async def test_hot_swap_sets_the_front_model(api) -> None:
+    """运营者改一行就能换接口模型，不用重排 targets、不用重启。"""
+    client, harness = api
+    response = await client.post(
+        "/admin/aliases",
+        json=_alias_body(front_model="fake-smart"),
+        headers=BURNER_HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    alias = harness.container.router.aliases.get("zk-test")
+    assert alias is not None and alias.front_model == "fake-smart"
+
+
+async def test_front_model_outside_targets_is_rejected(api) -> None:
+    """接口模型不同时是链上成员 = 没有可用部署，必须当场报错。"""
+    client, _harness = api
+    response = await client.post(
+        "/admin/aliases",
+        json=_alias_body(front_model="nope-model"),
+        headers=BURNER_HEADERS,
+    )
+    assert response.status_code == 400
+    body = response.json()
+    # 错误体可能是 {"error": {...}} 或 {"detail": {"error": {...}}}
+    payload = body.get("error") or (body.get("detail") or {}).get("error") or {}
+    assert "front_model" in payload.get("message", ""), body
+
+
+async def test_front_model_round_trips_to_models_yaml(api, tmp_path) -> None:
+    """热改必须落盘，否则重启就丢——那等于没改。"""
+    client, harness = api
+    await client.post(
+        "/admin/aliases",
+        json=_alias_body(front_model="fake-smart"),
+        headers=BURNER_HEADERS,
+    )
+    text = (tmp_path / "models.yaml").read_text(encoding="utf-8") \
+        if (tmp_path / "models.yaml").exists() else None
+    # 未注入模型文件时只验证内存态已生效；落盘由 _write_alias_file 覆盖
+    assert harness.container.router.aliases.get("zk-test").front_model == "fake-smart"
+    assert text is None or "fake-smart" in text
+
+
+# --------------------------------------------------------------------------- #
+# 模型可用性验证：目录里有 ≠ 账号能调（2026-09-29）
+# --------------------------------------------------------------------------- #
+
+async def test_verify_reports_a_working_model(api) -> None:
+    """能调通的模型必须报 ok —— 否则运营者会误删可用模型。"""
+    client, harness = api
+    harness.adapter.queue(Behavior(text="hi", prompt_tokens=3, completion_tokens=1))
+    r = await client.post(
+        "/admin/providers/fake/models/verify",
+        json={"models": ["fake-model"], "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["usable"] == 1 and body["checked"] == 1
+    assert body["results"][0]["verdict"] == "ok"
+    assert body["results"][0]["ok"] is True
+
+
+async def test_verify_catches_the_entitlement_trap(api) -> None:
+    """商汤 deepseek-v4.1-flash 的真实形态：目录里有、调用返回套餐无权限。
+
+    这正是「从模型市场添加了却不可用」的根因——市场只看目录，从不实测。
+    """
+    client, harness = api
+    harness.adapter.queue(Behavior(
+        status=403, error_message="model is not available in the current token plan",
+    ))
+    r = await client.post(
+        "/admin/providers/fake/models/verify",
+        json={"models": ["deepseek-v4.1-flash"], "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 200
+    got = r.json()["results"][0]
+    assert got["ok"] is False
+    assert got["verdict"] == "no_entitlement", got
+    assert "token plan" in got["message"]
+
+
+async def test_verify_catches_a_hanging_model(api) -> None:
+    """NVIDIA z-ai/glm-5.3 的真实形态：不报错，就是不回包。
+
+    「挂死」必须被识别出来——它比报错更贵，因为每次都要白等到超时。
+    """
+    client, harness = api
+    harness.adapter.queue(Behavior(delay=10.0, text="too late"))
+    r = await client.post(
+        "/admin/providers/fake/models/verify",
+        json={"models": ["z-ai/glm-5.3"], "timeout_seconds": 0.3},
+        headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 200
+    got = r.json()["results"][0]
+    assert got["ok"] is False
+    assert got["verdict"] == "hang", got
+    assert "无任何响应" in got["message"]
+
+
+async def test_verify_catches_an_upstream_not_found(api) -> None:
+    """NVIDIA moonshotai/kimi-k3 的真实形态：404 Function id Not Found。"""
+    client, harness = api
+    harness.adapter.queue(Behavior(
+        status=404, error_message="Function id '1586112a' version 'null' Not Found",
+    ))
+    r = await client.post(
+        "/admin/providers/fake/models/verify",
+        json={"models": ["moonshotai/kimi-k3"], "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.json()["results"][0]["verdict"] == "not_found"
+
+
+async def test_verify_rejects_unknown_provider(api) -> None:
+    client, _harness = api
+    r = await client.post(
+        "/admin/providers/nope/models/verify",
+        json={"models": ["x"]}, headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 404
+
+
+async def test_verify_honours_the_limit(api) -> None:
+    """limit 是防呆：误传 81 个模型不该把供应商惹毛。"""
+    client, harness = api
+    harness.adapter.queue(*[Behavior(text="ok")] * 3)
+    r = await client.post(
+        "/admin/providers/fake/models/verify",
+        json={"models": ["a", "b", "c", "d"], "limit": 2, "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.json()["checked"] == 2

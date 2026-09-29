@@ -67,8 +67,60 @@ def load_document(path: Path) -> CommentedMap:
     return doc
 
 
+class ConfigStaleError(RuntimeError):
+    """Raised when the on-disk config changed after we loaded it.
+
+    见模块顶部「陈旧检测」的说明：网关不监听配置文件，所以外部编辑在 reload
+    之前对内存不可见；此时若把控制台表单（基于旧内存值）写回文件，就会**静默
+    回滚**那次外部编辑。宁可拒绝写入并让运营者先 reload，也不要悄悄覆盖。
+    """
+
+
+#: path -> 我们最后一次「加载或写入」它时看到的 mtime。
+_loaded_mtimes: dict[Path, float] = {}
+
+
+def note_loaded(path: Path) -> None:
+    """记录 *path* 当前的 mtime（加载时、以及我们自己写完时各调一次）。"""
+    try:
+        _loaded_mtimes[Path(path)] = Path(path).stat().st_mtime
+    except OSError:  # 文件不存在（新建）时无需记录
+        _loaded_mtimes.pop(Path(path), None)
+
+
+def stale_config_files() -> list[str]:
+    """返回「磁盘上比我们记录的新」的配置文件名，供健康检查展示。"""
+    out: list[str] = []
+    for path, recorded in _loaded_mtimes.items():
+        try:
+            if path.stat().st_mtime > recorded + 1e-6:
+                out.append(path.name)
+        except OSError:
+            continue
+    return out
+
+
+def _guard_not_stale(path: Path) -> None:
+    """写前闸门：文件被外部改过就拒绝，别用旧内存覆盖它。"""
+    recorded = _loaded_mtimes.get(Path(path))
+    if recorded is None:
+        return  # 没记录过（测试/首次写入），无从判断，放行
+    try:
+        current = Path(path).stat().st_mtime
+    except OSError:
+        return
+    if current > recorded + 1e-6:
+        raise ConfigStaleError(
+            f"{Path(path).name} 在网关启动后被外部修改过，内存里还是旧配置。"
+            "继续保存会把那次外部改动静默覆盖掉（实测踩过：文件里禁用了 nvidia，"
+            "控制台一保存又被启用回去）。请先 POST /admin/config/reload 让网关"
+            "重新读取，再重试本次保存。"
+        )
+
+
 def atomic_write(path: Path, document: CommentedMap) -> None:
     """Persist *document* to *path* atomically, keeping one rolling ``.bak``."""
+    _guard_not_stale(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as fh:
@@ -84,6 +136,7 @@ def atomic_write(path: Path, document: CommentedMap) -> None:
         except OSError as exc:  # rolling backup is best-effort; don't block the write
             logger.warning("could not rotate backup for %s: %s", path, exc)
     os.replace(tmp, path)
+    note_loaded(path)  # 自己写的文件不该被自己判成陈旧
     logger.info("config file updated: %s", path)
 
 
@@ -257,6 +310,7 @@ def _trim_trailing_header(lines: list[str], end_index: int, floor: int) -> int:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
+    _guard_not_stale(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="") as fh:
@@ -272,6 +326,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
         except OSError as exc:
             logger.warning("could not rotate backup for %s: %s", path, exc)
     os.replace(tmp, path)
+    note_loaded(path)
     logger.info("config file updated: %s", path)
 
 

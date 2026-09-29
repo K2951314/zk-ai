@@ -18,6 +18,7 @@ router = APIRouter(tags=["web"])
 _WEB = Path(__file__).resolve().parent.parent / "web"
 _INDEX = _WEB / "index.html"
 _AGENT = _WEB / "agent.html"
+_REPORT = _WEB / "report.html"
 
 
 @router.get("/ui", include_in_schema=False, response_class=HTMLResponse)
@@ -42,6 +43,24 @@ async def agent_console() -> HTMLResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "Agent 任务台页面文件缺失"}},
+        ) from exc
+    return HTMLResponse(html)
+
+
+@router.get("/ui/report", include_in_schema=False, response_class=HTMLResponse)
+async def health_report() -> HTMLResponse:
+    """The plain-language gateway report (who serves what, and why it is slow).
+
+    Same data endpoints as the console (``/admin/stats`` + ``/admin/requests``),
+    so it stays protected by ``require_admin``; this shell carries no data of its
+    own and reuses the token already stored in the browser by the console.
+    """
+    try:
+        html = _REPORT.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - file ships with the package
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": {"message": "体检页面文件缺失"}},
         ) from exc
     return HTMLResponse(html)
 

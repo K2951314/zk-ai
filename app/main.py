@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, StarletteHTTPException
 from fastapi.responses import JSONResponse, Response
 
 from app.api import admin, agent, chat, health, messages, models, responses, ui
@@ -38,6 +38,31 @@ ZK-AI is a personal AI gateway / model router.
 * Model aliases (`zk-auto`, `zk-coding`, ...) and a capability router
 * Request, attempt, usage and health statistics
 """
+
+
+#: Paths that exist, but only under ``/v1``. A request to the bare path is a
+#: client whose base_url is missing the ``/v1`` suffix - the single most common
+#: misconfiguration for this gateway, and one the project's own providers.yaml
+#: comments warn about twice.
+_VERSIONED_PATHS: tuple[str, ...] = (
+    "/chat/completions",
+    "/messages",
+    "/responses",
+    "/models",
+)
+
+
+def _missing_v1_hint(path: str) -> tuple[str, str] | None:
+    """Return ``(correct_path, base_url_with_v1)`` when *path* only lacks ``/v1``.
+
+    ``None`` for every other 404, so unrelated unknown routes keep Starlette's
+    default ``{"detail": "Not Found"}`` and no existing behaviour changes.
+    """
+    if not path.startswith("/v1/") and path != "/v1":
+        for known in _VERSIONED_PATHS:
+            if path == known or path.startswith(known + "/"):
+                return f"/v1{path}", "/v1"
+    return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -176,6 +201,49 @@ def _install_exception_handlers(app: FastAPI) -> None:
     async def zkai_error_handler(_request: Request, exc: ZKAIError) -> JSONResponse:
         # Shared with the chat routes so every error path carries Retry-After.
         return chat.error_response(exc)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def not_found_handler(request: Request, exc: StarletteHTTPException) -> Response:
+        """Say *what* was wrong with the path, not just "Not Found".
+
+        2026-09-28 实测：客户端把 base_url 配成 ``http://127.0.0.1:8317``（漏了
+        ``/v1``），网关只回 ``{"detail":"Not Found"}``。调用方看到的是
+        「自定义模型 custom-local:zk-auto 错误，404」，既猜不到是路径问题，也
+        猜不到正确答案——而同一次切换模型前它是好的，所以表面像「模型没了」。
+
+        本项目自己的配置也踩过同一个坑（providers.yaml 里 sensenova / NVIDIA 的
+        base_url 都必须以 /v1 结尾），所以这里对「少了一层 /v1」的路径直接给出
+        正确的完整 URL，其余 404 保持 Starlette 原样，不改变任何既有契约。
+        """
+        if exc.status_code == 404:
+            hint = _missing_v1_hint(request.url.path)
+            if hint is not None:
+                suggested, actual = hint
+                logger.warning(
+                    "404：%s %s 少了 /v1 前缀，正确路径是 %s",
+                    request.method, request.url.path, suggested,
+                )
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": {
+                            "message": (
+                                f"路径 '{request.url.path}' 不存在。"
+                                f"OpenAI 兼容接口都挂在 /v1 下，正确路径是 "
+                                f"'{suggested}'。请把客户端的 base_url 改成 "
+                                f"'{actual}'（注意结尾要带 /v1）。"
+                            ),
+                            "type": "invalid_request_error",
+                            "code": 404,
+                            "details": {"correct_path": suggested},
+                        }
+                    },
+                )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None),
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:

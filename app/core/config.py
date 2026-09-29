@@ -163,6 +163,22 @@ class Settings(BaseSettings):
     #: 这道闸按 token 算、在 ``RequestService.chat`` 里生效（三条对外路径的收敛点），
     #: 且报错文案说清「哪一段太大、怎么减」，比 413 有信息量。
     max_input_tokens: int = 0
+    #: 单次客户端请求的墙钟预算（秒），0 = 关闭。
+    #: 为什么不是只用次数上限：``max_total_attempts`` 数的是**次数**，20 次 ×
+    #: 60s（nvidia read timeout）= 最坏 20 分钟。2026-09-28 实测一次 zk-auto
+    #: 首条消息磨了十几分钟、客户端一个字节都没收到——每次尝试都「还没超」，
+    #: 所以次数闸认为还有预算。默认 300s = 现役最大上游超时（商汤 300s）再留
+    #: 余量，一次成功的慢生成不会被误杀，只有「反复失败累计」会被截断。
+    max_request_seconds: float = 300.0
+    #: 历史裁剪预算（估算 tokens），0 = 关闭。
+    #: 背景：zk-auto / Codex 客户端每轮重发整段对话，turn 30 要为 turn 1..29
+    #: 再付一遍，而实测 84% 的工具轮是 ack/diff/status 这类再也不会被引用的机械轮。
+    #: 开启后 ``app/services/history.py`` 只删「旧」轮次：system 前言、最近若干轮、
+    #: 以及未闭合的 tool_call 配对一律保留，被删部分用一行占位说明，绝不静默。
+    #: **默认关闭**：删上下文可能改变答案（turn 4 读过的文件 turn 40 还要用），
+    #: 要不要这个换血是产品决策，不该藏在默认值里。想省就先设成一个保守的大数
+    #: （例如 120000），再看日志里的「历史裁剪」WARNING 与路由 reason 核对效果。
+    trim_history_tokens: int = 0
     #: 是否把客户端传来的图片真正转发给上游（默认 true）。
     #: 背景：Codex 会把截图以 ``input_image`` 塞进 /v1/responses 的 input，
     #: 而网关以前**静默丢掉**它——上游收到的是空 tool 消息，等于撒谎「这个工具
@@ -442,6 +458,10 @@ _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     "admin.token": ("admin", "admin_token"),
     "request.timeout": ("request", "request_timeout"),
     "request.default_max_tokens": ("request", "default_max_tokens"),
+    # 2026-09-28：补上桥接。AGENTS.md 记着 ZKAI_MAX_REQUEST_BODY /
+    # ZKAI_MAX_INPUT_TOKENS 没有桥接的坑——改 config.yaml 静默无效，用户只能
+    # 改 .env。新的 config.yaml 键一律同时登记在这里，别再犯第二次。
+    "request.trim_history_tokens": ("request", "trim_history_tokens"),
     "health_check.mode": ("health_check", "health_check_mode"),
     "health_check.interval_seconds": ("health_check", "health_check_interval"),
     "health_check.on_startup": ("health_check", "health_check_on_startup"),
@@ -767,6 +787,13 @@ def load_app_config(settings: Settings | None = None) -> AppConfig:
                 f"credential env var {name} is shadowed by a stale process "
                 "environment variable with a different value - the .env entry is ignored"
             )
+    # 记下这三个文件此刻的 mtime：config_writer 靠它判断「有没有人在外面改过」。
+    # 不记的话，控制台保存会把内存里的旧值写回文件、静默回滚外部编辑（实测踩过）。
+    from app.core import config_writer as _cw
+
+    for _path in (config_path, providers_path, models_path):
+        if _path:
+            _cw.note_loaded(_path)
     return app_config
 
 

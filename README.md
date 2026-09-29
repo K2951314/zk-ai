@@ -498,8 +498,19 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 ### 3.5.7 关于 429
 
 商汤免费额度是「滚动 5 小时 + 周」双周期，跑推理模型几分钟就能烧完一个窗口，
-撞 429 属正常。网关会按 §11 的决策矩阵自动处理：**换同家下一把 Key → 全部冷却则
-转移到下一个部署**。所以最有效的三件事是：
+撞 429 属正常。网关会先读上游返回的**正文**判断是哪种 429，再决定动作
+（`cooldown.throttle_scopes` 可逐类改口径）：
+
+| 429 正文里的信号 | 含义 | 默认动作 |
+|---|---|---|
+| `entitlement exhausted` / `quota` / `余额不足` | 套餐额度真用尽，几小时才重置 | 该供应商的 Key 一起冷却 30 分钟，**直接换模型** |
+| `tpm` / `tokens per minute` | 每分钟 token 吞吐超了 | 同上，整体冷却 + 换模型 |
+| `rpm` / `rps` / `Too Many Requests` | 发得太频 | 只冷这一把，换同部署的另一把 Key |
+
+第三类才是「换同家下一把 Key → 全部冷却则转移到下一个部署」；前两类**不扫
+兄弟 Key**——商汤的 `tpm` 桶是账号间共享的，扫 7 个账号只会拿回同一个 429
+（本机实测 19,714 次 429 对 80,345 次成功，19.7% 的尝试纯空转）。
+所以最有效的三件事是：
 
 1. **多用几个账号**——额度按**账号**算，不是按 Key 算，见下方说明；
 2. 把 `kimi-k3` 的第二部署指到 Kimi 官方（免费窗口用尽时自动花钱兜底）；
@@ -510,21 +521,49 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 > 同账号的多把 Key **共享同一份配额**，撞限流会一起撞；只有**跨账号**的 Key
 > 才是互相独立的额度。所以「10 把同账号的 Key」并不比「1 把」多出多少余量。
 >
-> 网关对此的处理是**逐把独立冷却**：某把 Key 429 只冷却它自己，调度器立刻
-> 换下一把。因此跨账号的额度会**自动叠加**，不需要额外配置。
+> 网关按 429 类型决定冷却范围：`quota` / `throughput` 默认 `provider`
+> （整个供应商一起冷 + 换部署），`frequency` / `unknown` 默认 `credential`
+> （只冷这把）。**额度类 429 会把同 `account-*` 标签的 Key 一起冷却**
+> （`tags` 在 `quota` + `account` 口径下才参与调度，见 `cooldown.throttle_scopes`）。
 > 唯一要确认的是 `config.yaml` 的 `retry.max_credentials_per_deployment`
 > 不小于实际账号数（否则试到一半就停了）——本仓库已配成 `8`（≥ 现役 7 账号，
 > 全可达；加账号时同步 +1，删这行不会取消限制，会回落到代码默认 3）。
 >
 > 本项目商汤现役 **7 把 Key = 7 个账号，每账号正好一把**（03~09；01/02 原同属
 > 账号 A，2026-09-20 已禁用），所以有 7 份独立额度。`config/providers.yaml` 里
-> 用 `tags: ["account-x"]` 标出归属（**只是给人看的标签，不参与调度**）。
+> 用 `tags: ["account-x"]` 标出归属。
 >
 > 实测效果：`zk-k3` 在 try 到第 4 把（跨 4 个账号）时才拿到额度并成功返回。
 
 > 注意：商汤与 Kimi 官方对 `kimi-k3` 的**计费方式不同**（积分 vs 按量付费）。
 > 免费窗口里看起来「不要钱」，切到兜底部署就会真实扣费——`fallback_used: true`
 > 就是发生转移的信号，`/admin/stats` 里能复盘每次转移。
+
+### 3.5.8 `zk-auto` 按请求形状分派 + 历史裁剪
+
+`zk-auto` 不是「永远打 targets[0]」。`app/routing/agent_auto.py` 在能力打分**之前**
+按请求**形状**改写入口别名，形状是客观的，关键词不是：
+
+| 形状信号 | 改写为 | 理由 |
+|---|---|---|
+| 历史里已有工具返回结果 | `zk-long` | Codex 84% 的工具轮只是 ack/diff/状态回执 |
+| 估算 ≥ 100K tokens | `zk-long` | 1M 窗口才放得下 |
+| 带工具 schema 且 ≥ 24K tokens | `zk-long` | 批量机械活 |
+| 带图片 | `zk-vision` | 视觉是硬门槛，不是偏好 |
+| 其余 | `zk-auto` | 短问题 / 代码 / 推理 / 规划轮，质量优先 |
+
+改写只影响「哪条链参与排序」，不影响候选资格；`zk-long` 的目标列表里**根本没有
+K3**，所以没有任何权重向量能把它捞回来。`TOOL_TURN_IS_MECHANICAL = False`
+可关掉第一条（最常用）规则。改写目标别名不存在时**回落 `zk-auto` 并打
+WARNING**，不会让整个 agent 工作负载 404。
+
+**历史裁剪**（`ZKAI_TRIM_HISTORY_TOKENS`，默认 0 = 关闭）：zk-auto / Codex 客户端
+每轮重发整段对话，turn 30 要为 turn 1..29 再付一遍。开启后
+`app/services/history.py` 只删**旧**轮次，硬不变量有五条：system 前言、最后一轮、
+未闭合的 `tool_call` 配对一律保留；后缀不许以 `tool` 开头（其 assistant call 已被
+丢，上游直接 400）；裁剪后的估算不许超过预算（否则宁可不动）。
+被删部分以一行 `[ZK-AI] 已省略更早的 N 条历史消息` 说明，并打 WARNING 日志。
+**默认关闭**：删上下文可能改变答案，要不要这个换血是产品决策。
 
 ---
 
@@ -609,6 +648,7 @@ admin:
 request:
   timeout: 120
   default_max_tokens: 1024
+  trim_history_tokens: 0         # 历史裁剪预算（估算 tokens），0=关闭；见 §3.5.8
 credential_rotation: priority   # priority | round_robin | weighted | least_failures | fastest
 retry:
   max_retries_per_credential: 2
@@ -634,6 +674,11 @@ cooldown:                       # 凭据冷却（秒）
   server_error_cooldown: 15
   deployment_cooldown: 30
   jitter: 0.15                  # ±15%，避免全池锁步复活
+  throttle_scopes:              # 429 的冷却覆盖范围（按 ThrottleKind）
+    quota: provider             #   额度用尽：整供应商一起冷 + 换部署
+    throughput: provider        #   tpm 打满：桶账号间共享，扫兄弟 Key 无意义
+    frequency: credential       #   rpm/rps：按 Key 计（NVIDIA 40rpm）
+    unknown: credential         #   认不出来：维持旧的逐把行为
 security:
   allow_inline_secrets: false   # true 允许 providers.yaml 内联密钥（仅开发）
 ```
@@ -877,8 +922,8 @@ curl -s -X POST http://127.0.0.1:8317/admin/aliases \
 |---|---|
 | 401 认证失败 | → `UNHEALTHY`（需健康检查或运维恢复） |
 | 403 无权限 | → `UNHEALTHY` |
-| 429 分钟级限流（tpm/rpm） | → `COOLDOWN`，尊重 `Retry-After`，连续限流指数增长（60→900s） |
-| 429 额度耗尽（`entitlement exhausted` 等） | → `COOLDOWN` **固定长休**（`quota_cooldown` 默认 30 分钟），不指数放大 |
+| 429 分钟级限流（tpm/rpm） | → `COOLDOWN`，尊重 `Retry-After`，连续限流指数增长（60→900s）。**范围**见 `cooldown.throttle_scopes`：`throughput` 默认 `provider`（整供应商一起冷，请求直接换部署），`frequency` 默认 `credential`（只冷这把） |
+| 429 额度耗尽（`entitlement exhausted` 等） | → `COOLDOWN` **固定长休**（`quota_cooldown` 默认 30 分钟），不指数放大；默认 `provider` 范围，同 `account-*` 标签的 Key 一并冷却 |
 | 5xx / 超时 / 连接错误 | 只计数；**连续**达到 `max_consecutive_failures` 才 → `COOLDOWN` |
 | 400 / 404 / 413 / 409 / 422 | **不计数、不迁移**（调用方的错，见 §11） |
 | 网关内部错误（INTERNAL：解析失败等） | **不计数、不迁移**——自家 bug 不惩罚健康的 Key |

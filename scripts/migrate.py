@@ -130,9 +130,11 @@ def _check_env_health(root: Path, *, stage: str) -> list[str]:
     export time is what stops it from ever reaching a new machine. Checking at
     import time too catches a hand-copied file.
 
-    This is not cosmetic — the identical 115-line damage was found twice in two
-    days (2026-09-24 and 2026-09-26), and the second time it was silent because
-    ``tray_launcher._env_or_default`` happens to ``.strip()`` the value it reads.
+    Damage history, stated correctly: it happened **once** for real (2026-09-24,
+    after the machine swap - 115 lines all ``\\r\\r\\n``). On 2026-09-26 the file
+    was overwritten with a 38-byte UTF-16LE stub by a test script, which is a
+    different failure (not this pattern, and not a recurrence). Either way a bad
+    .env reaches a new machine through this path, so the check stays.
     """
     env = root / ".env"
     if not env.exists():

@@ -38,6 +38,7 @@ from app.models.response import (
     message_output_item,
 )
 from app.routing.scheduler import ExecutionResult, Scheduler
+from app.services.history import trim_history
 from app.services.usage_service import UsageService
 
 logger = get_logger("services.request")
@@ -52,14 +53,33 @@ class RequestService:
         scheduler: Scheduler,
         request_repository: RequestRepository | None = None,
         usage_service: UsageService | None = None,
+        trim_history_tokens: int = 0,
     ) -> None:
         self.scheduler = scheduler
         self.requests = request_repository
         self.usage = usage_service
+        #: 历史裁剪预算，0 = 关闭。见 ``app/services/history.py`` 的模块文档：
+        #: 默认关是因为删上下文可能改变答案，开启与否是运营决策。
+        self.trim_history_tokens = max(0, trim_history_tokens)
 
     # ------------------------------------------------------------------ #
     # Input size guard
     # ------------------------------------------------------------------ #
+    def _budget_history(self, request: ChatCompletionRequest) -> None:
+        """Trim an over-long history *before* the token gate sees it.
+
+        Ordering matters: the gate asks ``Router.plan`` whether any deployment
+        can still hold the request. Trimming first means a 120K-token Codex
+        session can be served by a 256K deployment after the old turns are
+        dropped, instead of being rejected - or, worse, passed through whole.
+
+        Runs on both ``chat()`` and ``stream()`` because those are the two
+        convergence points for all three public paths (chat / responses / stream).
+        """
+        if self.trim_history_tokens <= 0:
+            return
+        trim_history(request, budget=self.trim_history_tokens)
+
     def _guard_input_size(self, request: ChatCompletionRequest) -> None:
         """估算 token 超限就拒，不发上游（``ZKAI_MAX_INPUT_TOKENS``，0=关闭）。
 
@@ -153,6 +173,7 @@ class RequestService:
     ) -> ChatCompletionResponse:
         """Run a non-streaming completion and return the canonical response."""
         request_id_var.set(request_id)
+        self._budget_history(request)
         self._guard_input_size(request)
         await self._start(request_id, request, client_ip=client_ip, user_agent=user_agent)
 
@@ -290,6 +311,7 @@ class RequestService:
         terminated = False
 
         try:
+            self._budget_history(request)
             self._guard_input_size(request)
             async for event in self.scheduler.stream(
                 request, request_id=request_id, attempts_sink=attempts

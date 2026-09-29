@@ -220,6 +220,24 @@ class ModelAliasConfig(BaseModel):
     #: even under `strategy=capability`. Set by the console's model hot-swap so an
     #: explicit operator choice overrides the capability ranking.
     pin_first: bool = False
+    #: The **front-line** ("接口") model: an explicitly named model that always
+    #: leads the attempt order when it is eligible, regardless of capability
+    #: scores. Independent of ``targets`` order on purpose - changing the front
+    #: model must not mean reordering a list and accidentally re-prioritising
+    #: everything else.
+    #:
+    #: Why it exists (2026-09-28): ``zk-long``'s first target kept timing out on
+    #: NVIDIA (60s per attempt, three attempts in a row), so the client waited
+    #: minutes with no bytes at all. The operator's ask was explicit: pick a
+    #: model that actually answers, put it in front, keep content-based routing
+    #: for everything behind it, and make the front model a one-line change they
+    #: can adjust at any time. Set it per alias in ``config/models.yaml`` or
+    #: ``POST /admin/aliases`` - no restart needed for the latter.
+    #:
+    #: Not a latch: if the front model is gated out (e.g. no vision for an image
+    #: request), unavailable, or in cooldown, the routed chain behind it takes
+    #: over exactly as before.
+    front_model: str | None = None
 
     @field_validator("targets")
     @classmethod

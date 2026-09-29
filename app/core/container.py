@@ -204,6 +204,7 @@ async def build_container(
         policy=policy,
         request_timeout=settings.request_timeout,
         max_input_tokens=settings.max_input_tokens,
+        max_request_seconds=settings.max_request_seconds,
     )
 
     config_repository = ConfigRepository(database)
@@ -221,6 +222,7 @@ async def build_container(
         scheduler=scheduler,
         request_repository=request_repository,
         usage_service=usage_service,
+        trim_history_tokens=settings.trim_history_tokens,
     )
     agent_service = AgentService(
         settings=settings,

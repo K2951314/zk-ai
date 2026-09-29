@@ -49,6 +49,11 @@ class Behavior:
     text: str = "fake reply"
     status: int | None = None
     error: BaseException | None = None
+    #: Upstream error body for a scripted ``status``. 429 throttling is
+    #: classified from this text, so a test that wants a *tpm* / *rpm* / *quota*
+    #: 429 has to be able to say which one - the default "fake" matches no
+    #: pattern and lands on ThrottleKind.UNKNOWN.
+    error_message: str = "fake"
     chunks: int = 3
     delay: float = 0.0
     prompt_tokens: int = 10
@@ -99,8 +104,10 @@ class FakeAdapter(ProviderAdapter):
         )
         return behavior
 
-    def _error_for(self, status: int) -> Exception:
-        info = self.classifier.classify_status(status, body={"error": {"message": "fake"}})
+    def _error_for(self, status: int, message: str = "fake") -> Exception:
+        info = self.classifier.classify_status(
+            status, body={"error": {"message": message}}
+        )
         return info.to_error(provider=self.provider_id, model="fake")
 
     # ------------------------------------------------------------------ #
@@ -134,7 +141,7 @@ class FakeAdapter(ProviderAdapter):
         if behavior.error is not None:
             raise behavior.error
         if behavior.status is not None and behavior.status >= 400:
-            raise self._error_for(behavior.status)
+            raise self._error_for(behavior.status, behavior.error_message)
         return ChatCompletionResponse.simple(
             model=ctx.upstream_model,
             content=behavior.text,
@@ -154,7 +161,7 @@ class FakeAdapter(ProviderAdapter):
             raise behavior.error
         if behavior.status is not None and behavior.status >= 400:
             self.streams_closed += 1
-            raise self._error_for(behavior.status)
+            raise self._error_for(behavior.status, behavior.error_message)
         try:
             yield self._chunk(model=ctx.upstream_model, role="assistant")
             for index in range(behavior.chunks):
@@ -273,7 +280,8 @@ def make_model(
 def make_alias(name: str, targets: list[str], *, strategy: AliasStrategy = AliasStrategy.CAPABILITY,
                weights: dict[str, float] | None = None,
                requires: dict[str, float] | None = None,
-               pin_first: bool = False) -> ModelAliasConfig:
+               pin_first: bool = False,
+               front_model: str | None = None) -> ModelAliasConfig:
     return ModelAliasConfig(
         name=name,
         targets=targets,
@@ -281,6 +289,7 @@ def make_alias(name: str, targets: list[str], *, strategy: AliasStrategy = Alias
         weights=weights or {},
         requires=requires or {},
         pin_first=pin_first,
+        front_model=front_model,
     )
 
 

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -503,3 +504,251 @@ def test_tpm_exhaustion_still_cools_down_instead_of_parking() -> None:
     # AIMD 乘性减：撞一次 429 目标减半，而不是钉死或长停靠
     assert acct.target == start_target / 2
     assert acct.target > 1.0
+
+
+# --------------------------------------------------------------------------- #
+# 饥饿救济：别让一个账号独吃 TPM、其余饿死（2026-09-28 实测五个账号 0 成功）
+# --------------------------------------------------------------------------- #
+
+
+def test_starved_account_gets_a_borrowed_slot() -> None:
+    """饿久的账号要能借到并发，否则它永远挤不进来。
+
+    病灶：AIMD 的加性增只看「自己 60s 没撞 429」，完全不看同实例其他账号占了
+    多少。抢占到 TPM 的账号一路涨到 per_account_max，被压住的撞 429 减半后锁在
+    1。商汤的 tpm 是账号间共享的桶，所以独占者不掉，其余永远挤不进来。
+    实测：KEY_05 稳定在并发 16（43 次采样全是 16、从不回落），另外五个账号
+    连续 77 次采样 0 成功——全站在 19,714 次 429 对 80,345 次成功。
+    """
+    burner = _burner(per_account_max=4, starve_after=300)
+    acct = burner.keys[0].account
+    acct.target = 1.0        # 被压到底
+    acct.last_ok = 0.0       # 从未成功过 → 立刻算饿
+    # last_429 设为 now：否则「60s 没撞 429」的 AIMD 加性增会先 +1，
+    # 就把救济的效果混进来了——这里要单独测救济，得把那条支路按下去。
+    acct.last_429 = time.time()
+    # 跳过启动宽限期：刚启动那会儿哪怕真的饿也不救济（2026-09-28 实测
+    # 七账号同时借出后三种 429 齐炸），跑够 120s 才谈救济。
+    burner.started = time.time() - 200
+
+    burner._rebalance_concurrency()
+
+    assert acct.starve_boost == 1, "该借出 1 级"
+    assert acct.target == 2.0, "借出要把并发抬起来，否则还是挤不进去"
+
+
+def test_no_relief_during_the_start_grace_window() -> None:
+    """启动宽限期内不救济：否则重启会让所有账号同时算「从未成功」。
+
+    2026-09-28 实测：旧账本没有 last_ok 字段，重启后一秒内七个账号同时借出，
+    随后 tpm 35 / rpm 20 / rps 19 三种 429 齐炸——救济反而把桶挤爆了。
+    """
+    burner = _burner(per_account_max=4, starve_after=300, starve_grace=120)
+    acct = burner.keys[0].account
+    acct.target = 1.0
+    acct.last_ok = 0.0
+    acct.last_429 = time.time()
+    burner.started = time.time() - 60        # 才跑 60s，没到 120s 宽限期
+
+    burner._rebalance_concurrency()
+
+    assert acct.starve_boost == 0, "宽限期内不许借出"
+
+
+def test_freq_limited_account_is_not_given_more_concurrency() -> None:
+    """频率类限流（rpm/rps）时加并发有害——只会让它撞得更狠。
+
+    2026-09-28 实测：12:21 那一分钟 rpm 20 次 + rps 19 次，借出后依旧全 429。
+    频率卡的是「发得多频」不是「吃得多快」，救济在这里方向相反。
+    """
+    burner = _burner(per_account_max=4, starve_after=300)
+    acct = burner.keys[0].account
+    acct.target = 1.0
+    acct.last_ok = 0.0
+    acct.last_429 = time.time()
+    acct.last_limit_body = '{"error":{"message":"rpm exhausted"}}'
+    burner.started = time.time() - 200
+
+    burner._rebalance_concurrency()
+
+    assert acct.starve_boost == 0, "rpm 限流时不该借出并发"
+    assert acct.target == 1.0, "并发也不该被抬高"
+
+
+def test_throughput_limited_account_still_gets_relief() -> None:
+    """对照：tpm（吞吐）限流才是救济该救的场景。"""
+    burner = _burner(per_account_max=4, starve_after=300)
+    acct = burner.keys[0].account
+    acct.target = 1.0
+    acct.last_ok = 0.0
+    acct.last_429 = time.time()
+    acct.last_limit_body = '{"error":{"message":"tpm exhausted"}}'
+    burner.started = time.time() - 200
+
+    burner._rebalance_concurrency()
+
+    assert acct.starve_boost == 1, "tpm 限流该借出"
+
+
+def test_borrowed_slot_is_not_renewed_after_a_success() -> None:
+    """刚成功过的账号不该再借——救济只给真正饿的。"""
+    burner = _burner(per_account_max=4, starve_after=300)
+    acct = burner.keys[0].account
+    acct.last_ok = time.time()          # 刚刚成功
+    acct.target = 1.0
+
+    burner._rebalance_concurrency()
+
+    assert acct.starve_boost == 0, "不饿就不借"
+    # target 仍可能因原本的 AIMD 加性增而 +1（那条逻辑保留），这里只守住不借出
+
+
+def test_borrow_is_capped_so_it_cannot_run_away() -> None:
+    """借出必须有硬顶，否则饿账号会无限涨并发、把桶再次吃光。"""
+    burner = _burner(per_account_max=4, starve_after=300)
+    acct = burner.keys[0].account
+    acct.target = 3.0
+    acct.last_ok = 0.0                   # 一直饿
+    acct.last_429 = time.time()          # 压掉 AIMD 加性增，只测救济的硬顶
+    burner.started = time.time() - 200   # 跳过启动宽限期
+
+    for _ in range(10):                  # 反复调用
+        burner._rebalance_concurrency()
+
+    assert acct.starve_boost <= 2, "最多借 2 级"
+    assert acct.target <= 4.0, "不许越过 per_account_max"
+
+
+def test_parked_account_is_never_relieved() -> None:
+    """停靠中的账号不参与救济——它的额度没有意义，借了也是白借。"""
+    burner = _burner(per_account_max=4, starve_after=300)
+    acct = burner.keys[0].account
+    acct.target = 1.0
+    acct.last_ok = 0.0
+    acct.parked_until = time.time() + 3600     # 停靠 1 小时
+
+    burner._rebalance_concurrency()
+
+    assert acct.starve_boost == 0, "停靠中不该借出"
+    assert acct.target == 1.0, "并发也不该动"
+
+
+# ---------------------------------------------------------------------------
+# 校准口径（2026-09-28）：单账号读数必须按单账号 token 反推
+# ---------------------------------------------------------------------------
+
+def _burner_with_two_accounts(tmp_path: Path) -> Burner:
+    """两个账号、token 量差 9 倍——正是「拿单账号读数却按全部账号反推」的陷阱。"""
+    args = parse_args(["--once"])
+    a1 = AccountState(name="K1")
+    a2 = AccountState(name="K2")
+    k1 = KeyState(name="K1", key="sk-test", account=a1)
+    k2 = KeyState(name="K2", key="sk-test2", account=a2)
+    burner = Burner(args, [k1, k2])
+    # K1 是唯一在烧的账号，K2 完全没烧（真实场景：Ingulf 在烧，其余躺平）
+    k1.tokens_in = 119_440_582
+    k1.tokens_out = 525_797_796
+    k2.tokens_in = 0
+    k2.tokens_out = 0
+    return burner
+
+
+def test_single_account_calibration_uses_only_that_account(tmp_path: Path) -> None:
+    """单账号读数 + 单账号 token → 费率反映该账号，不被躺平账号稀释 9 倍。"""
+    burner = _burner_with_two_accounts(tmp_path)
+    r_in, r_out = burner.suggest_rates(495_085.0, account="K1")
+    # 与直接用该账号 token 手算一致
+    denom = 525_797_796 + 119_440_582 / 3
+    assert r_out == pytest.approx(495_085.0 * 1e6 / denom, rel=1e-9)
+    assert r_in == pytest.approx(r_out / 3, rel=1e-9)
+
+
+def test_scopeless_calibration_still_uses_every_account(tmp_path: Path) -> None:
+    """不指定账号 = 实扣覆盖全部账号（旧契约，行为不变）。"""
+    burner = _burner_with_two_accounts(tmp_path)
+    _r_in, r_out = burner.suggest_rates(990_170.0)
+    denom = 525_797_796 + 119_440_582 / 3      # K2 为 0，总量等于 K1
+    assert r_out == pytest.approx(990_170.0 * 1e6 / denom, rel=1e-9)
+    # 同样读数在两种口径下差 2 倍：这就是不配 account 时的静默错误来源
+    _alone_in, alone_out = burner.suggest_rates(495_085.0, account="K1")
+    assert r_out == pytest.approx(alone_out * 2, rel=1e-9)
+
+
+def test_unknown_account_is_rejected_not_silently_ignored(tmp_path: Path) -> None:
+    """账号名写错必须报错——静默按全部账号算是 9 倍误差，会烧穿专属池。"""
+    burner = _burner_with_two_accounts(tmp_path)
+    with pytest.raises(ValueError, match="没有账号"):
+        burner.suggest_rates(495_085.0, account="NOPE")
+
+
+# ---------------------------------------------------------------------------
+# 外部校准不得被长命进程抹掉（2026-09-29 事故）
+# ---------------------------------------------------------------------------
+
+def test_external_rate_calibration_survives_a_running_process(tmp_path: Path) -> None:
+    """「手工改 state 文件」必须能被尊重。
+
+    事故还原：加载顺序是 args(burner.yaml) → state 覆盖 args → 进内存，而
+    save_state() 又把内存值写回 state。这个环让手工校准不可能生效——进程活着，
+    下一次保存就抹掉。实测：运营者按控制台读数把费率改成 761/2292，消耗器未重启
+    （改 burner.yaml 需重启才生效），它以旧费率记账并在 14.5 小时后写回旧值，
+    运营者看到「校准生效过又没了」，而账号仍被误判成额度耗尽在停靠。
+    """
+    state = tmp_path / "burn_state.json"
+
+    burner = Burner(
+        parse_args(["--rate-in", "830", "--rate-out", "2500", "--once"]),
+        [KeyState(name="K1", key="sk", account=AccountState(name="K1"))],
+    )
+    burner.state_file = state
+    burner.load_state()      # 文件不存在 → 全新启动
+    burner.save_state()
+    burner.load_state()      # 进程「见过」830/2500
+    assert burner._loaded_rate_in == 830.0
+
+    # 外部手工校准（模拟运营者按控制台读数改文件）
+    blob = json.loads(state.read_text(encoding="utf-8"))
+    blob["rate_in"], blob["rate_out"] = 761.0, 2292.0
+    state.write_text(json.dumps(blob, ensure_ascii=False), encoding="utf-8")
+
+    # 长命进程不重启、直接再保存：必须让位
+    burner.save_state()
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert (after["rate_in"], after["rate_out"]) == (761.0, 2292.0), (
+        "外部校准被进程抹掉了——这正是 09-29 那次『看起来生效又没了』"
+    )
+
+
+def test_rates_are_still_written_when_nobody_touched_them(tmp_path: Path) -> None:
+    """没人外部改过时，行为与之前完全一致（无回归）。"""
+    state = tmp_path / "burn_state.json"
+    burner = Burner(
+        parse_args(["--rate-in", "900", "--rate-out", "2700", "--once"]),
+        [KeyState(name="K1", key="sk", account=AccountState(name="K1"))],
+    )
+    burner.state_file = state
+    burner.load_state()
+    burner.save_state()
+    blob = json.loads(state.read_text(encoding="utf-8"))
+    burner.load_state()          # 刷新 _loaded_*，文件里已是 900/2700
+    burner.save_state()
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert (after["rate_in"], after["rate_out"]) == (900.0, 2700.0)
+    assert (blob["rate_in"], blob["rate_out"]) == (900.0, 2700.0)
+
+
+def test_fresh_start_writes_memory_rates_not_zero(tmp_path: Path) -> None:
+    """_loaded_rate_in == 0（从未加载账本）不得被当成「外部改成了 0」。"""
+    state = tmp_path / "burn_state.json"
+    burner = Burner(
+        parse_args(["--rate-in", "761", "--rate-out", "2292", "--once"]),
+        [KeyState(name="K1", key="sk", account=AccountState(name="K1"))],
+    )
+    burner.state_file = state
+    burner.save_state()      # 未 load_state：_loaded_* 仍是 0
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert (after["rate_in"], after["rate_out"]) == (761.0, 2292.0)
+
+
+# ---------------------------------------------------------------------------
+# 外部校准不得被长命进程抹掉（2026-09-29 事故）

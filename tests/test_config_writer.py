@@ -294,3 +294,132 @@ def test_looks_like_secret_flags_pasted_keys() -> None:
     assert not looks_like_secret("a")
     assert not looks_like_secret(None)
     assert not looks_like_secret("")
+
+
+# ---------------------------------------------------------------------------
+# 陈旧检测：外部改过的配置不许被内存里的旧值覆盖（2026-09-29 实测）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_loaded_mtimes():
+    """``config_writer._loaded_mtimes`` 是模块级全局，必须逐测试隔离。
+
+    不加这个夹具时，别的测试里 `load_app_config()` 记录过的**真实** config/*.yaml
+    会留在注册表里；只要那个文件在此后被动过，`stale_config_files()` 就会带上它，
+    于是断言 `== []` 随机失败。实测踩到：test_stale_config_files_reports_the_name
+    第一次就红。与消耗器测试隔离 DEFAULT_LOG 是同一个道理。
+    """
+    from app.core import config_writer as cw
+
+    saved = dict(cw._loaded_mtimes)
+    cw._loaded_mtimes.clear()
+    try:
+        yield
+    finally:
+        cw._loaded_mtimes.clear()
+        cw._loaded_mtimes.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_loaded_mtimes():
+    """``config_writer._loaded_mtimes`` 是模块级全局，必须逐测试隔离。
+
+    不加这个夹具时，别的测试里 `load_app_config()` 记录过的**真实** config/*.yaml
+    会留在注册表里；只要那个文件在此后被动过，`stale_config_files()` 就会带上它，
+    于是断言 `== []` 随机失败。实测踩到：test_stale_config_files_reports_the_name
+    第一次就红。与消耗器测试隔离 DEFAULT_LOG 是同一个道理。
+    """
+    from app.core import config_writer as cw
+
+    saved = dict(cw._loaded_mtimes)
+    cw._loaded_mtimes.clear()
+    try:
+        yield
+    finally:
+        cw._loaded_mtimes.clear()
+        cw._loaded_mtimes.update(saved)
+
+
+def _providers_yaml(tmp_path):
+    p = tmp_path / "providers.yaml"
+    p.write_text(
+        "providers:\n"
+        "  - id: nvidia\n"
+        "    type: openai_compatible\n"
+        "    base_url: https://example.invalid/v1\n"
+        "    enabled: false\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_write_is_refused_when_the_file_changed_underneath(tmp_path) -> None:
+    """实测事故：文件里禁用了 nvidia，控制台一保存又把它启用回去。
+
+    网关不监听配置文件，所以外部编辑在 reload 之前对内存不可见；此时把控制台
+    表单（基于旧内存值）写回文件，就会静默回滚那次编辑。宁可拒绝，也不要悄悄覆盖。
+    """
+    import time
+
+    from app.core import config_writer as cw
+
+    path = _providers_yaml(tmp_path)
+    cw.note_loaded(path)          # 网关「读到」了 enabled: false
+
+    time.sleep(0.01)
+    # 有人在外部改了文件（比如手工把 timeout 调大）
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("enabled: false", "enabled: false\n    timeout: 30"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(cw.ConfigStaleError) as excinfo:
+        cw.upsert_provider(path, "nvidia", {"enabled": True})
+    # 报错要说清「怎么办」，不能只喊失败
+    assert "reload" in str(excinfo.value)
+    # 关键：文件没被写坏，外部那行还在
+    assert "timeout: 30" in path.read_text(encoding="utf-8")
+
+
+def test_write_goes_through_when_nothing_changed(tmp_path) -> None:
+    """没人外部改过时行为完全不变（无回归）。"""
+    from app.core import config_writer as cw
+
+    path = _providers_yaml(tmp_path)
+    cw.note_loaded(path)
+    cw.upsert_provider(path, "nvidia", {"enabled": True})
+    assert "enabled: true" in path.read_text(encoding="utf-8")
+
+
+def test_our_own_write_does_not_look_stale(tmp_path) -> None:
+    """自己写的文件不能被自己判成陈旧——否则第二次保存就永远失败。"""
+    from app.core import config_writer as cw
+
+    path = _providers_yaml(tmp_path)
+    cw.note_loaded(path)
+    cw.upsert_provider(path, "nvidia", {"timeout": 30})
+    # 紧接着再写一次，必须成功
+    cw.upsert_provider(path, "nvidia", {"timeout": 45})
+    assert "timeout: 45" in path.read_text(encoding="utf-8")
+
+
+def test_unrecorded_file_is_not_guarded(tmp_path) -> None:
+    """没被加载记录过的文件（测试/首次创建）放行，避免误伤。"""
+    from app.core import config_writer as cw
+
+    path = _providers_yaml(tmp_path)
+    cw.upsert_provider(path, "nvidia", {"enabled": True})   # 未 note_loaded
+    assert "enabled: true" in path.read_text(encoding="utf-8")
+
+
+def test_stale_config_files_reports_the_name(tmp_path) -> None:
+    import time
+
+    from app.core import config_writer as cw
+
+    path = _providers_yaml(tmp_path)
+    cw.note_loaded(path)
+    assert cw.stale_config_files() == []
+    time.sleep(0.01)
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert "providers.yaml" in cw.stale_config_files()

@@ -44,6 +44,14 @@ request:
   timeout: 120
   # 客户端没有传 max_tokens 时使用的兜底值
   default_max_tokens: 1024
+  # 历史裁剪预算（估算 tokens）。0 = 关闭。
+  # zk-auto / Codex 客户端每轮重发整段对话，turn 30 要为 turn 1..29 再付一遍，
+  # 而实测 84% 的工具轮是再也不会被引用的 ack/diff/status 机械轮。开启后
+  # app/services/history.py 只删旧轮次：system 前言、最近若干轮、未闭合的
+  # tool_call 配对一律保留，被删部分用一行占位说明，绝不静默。
+  # **默认关闭**：删上下文可能改变答案，要不要这个换血是产品决策。
+  # 想省就先设成一个保守的大数（如 120000），再看日志里的「历史裁剪」WARNING。
+  trim_history_tokens: ${ZKAI_TRIM_HISTORY_TOKENS:-0}
 
 # 同一个 provider 内部优先用哪把 Key：
 #   priority | round_robin | weighted | least_failures | fastest
@@ -113,6 +121,20 @@ cooldown:
   deployment_cooldown: 30
   # ±jitter 抖动，让各把 Key 错开复活，而不是集体同一秒醒来一起撞 429
   jitter: 0.15
+  # 429 的冷却**覆盖范围**，按 app/retry/classifier.py 的 ThrottleKind 分三档：
+  #   credential  只冷却这一把 Key。供应商按 Key 计数时对（NVIDIA 40rpm）。
+  #   account     同 provider 下共享 account-* 标签的 Key 一起冷却。
+  #   provider    整个 provider 的 Key 一起冷却，并直接故障转移到下一个部署。
+  # 默认 quota（套餐额度耗尽）与 throughput（tpm 打满）都是 provider：
+  # 这两类桶是账号间共享的，扫兄弟 Key 只会拿到同一个 429——本机实测
+  # 19.7% 的尝试全耗在这上面。frequency（rpm/rps）与 unknown 保持 credential。
+  throttle_scopes:
+    # 默认 account（不是 provider）：2026-09-28 实测证明商汤的 tpm/rpm 桶
+    # 按账号分，不是全供应商共享。判成 provider 会把健康账号一起停靠。
+    quota: ${ZKAI_THROTTLE_SCOPE_QUOTA:-account}
+    throughput: ${ZKAI_THROTTLE_SCOPE_THROUGHPUT:-account}
+    frequency: ${ZKAI_THROTTLE_SCOPE_FREQUENCY:-credential}
+    unknown: ${ZKAI_THROTTLE_SCOPE_UNKNOWN:-credential}
 
 # ---------------------------------------------------------------------------
 # 健康检查：manual（仅手动）/ startup（启动时）/ scheduled（定时）/ off（关闭）

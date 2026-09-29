@@ -154,6 +154,16 @@ class AccountState:
     target: float = 8.0
     last_429: float = 0.0
     inflight_cost: float = 0.0  # 在飞请求的预估积分（完成时用实扣修正）
+    # 公平项需要的两个记账：上次成功时刻、以及「饿了多久」的累计。
+    # 为什么必须有：只看 last_429 做加性增会形成马太效应——抢占到 TPM 的账号
+    # 不撞 429 于是一路涨到 per_account_max，被压住的账号撞 429 减半后锁在 1，
+    # 永远挤不进来。2026-09-28 实测：一个账号稳定在并发 16，另外五个账号
+    # 连续 77 次采样 0 成功、100% 在空转刷 429。
+    last_ok: float = 0.0        # 上次成功扣分时刻
+    starve_boost: int = 0       # 因长期未成功而被额外给予的并发额度
+    #: 最近一次 429 的响应体片段，用来区分频率（rpm/rps）与吞吐（tpm）两类限流。
+    #: 频率类限流加并发有害——只会让它撞得更狠，该做的是降低发送频率。
+    last_limit_body: str = ""
     # 固定锚点窗口（可选）：anchor_ts 是控制台「重置时间」对应的 epoch，
     # 边界 = anchor_ts + k*5h。=0 表示未配置，走滚动窗口模型（保守、安全）。
     anchor_ts: float = 0.0
@@ -281,6 +291,12 @@ class KeyState:
     ok: int = 0
     fail: int = 0
     rate_limited: int = 0
+    # 其中「权益/额度用尽」的次数。与 rate_limited 分开记，控制台才能把
+    # 「限流中（等 TPM 窗口滑过）」和「额度用尽（停靠到周刷新）」区分开——
+    # 这两件事的成因和预期完全相反，混成一个数字只会让人以为号坏了。
+    # 2026-09-28 实测：五个账号连续 77 次采样 0 成功、全在刷 tpm exhausted，
+    # 而周剩余额度还有 10 万——界面上却只显示一个"429"，看不出是争抢。
+    quota_hits: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     last_err: str = ""
@@ -389,6 +405,10 @@ _CONFIG_KEYS: dict[str, type] = {
     "concurrency": int,
     "per_account_max": int,
     "per_account_start": int,
+    # 饥饿救济（2026-09-28 加）。与 app/services/burner_service.py 的
+    # CONFIG_KEYS 保持一致——两边漏一处，写在 burner.yaml 里就会被忽略。
+    "starve_after": float,
+    "starve_grace": float,
     "max_tokens": int,
     "filler_chars": int,
     "window_credits": float,
@@ -563,6 +583,10 @@ class Burner:
         # 本段运行的基线（恢复账本后「速率」只算本次运行新增的量）
         self.base_in = 0
         self.base_out = 0
+        #: 加载时账本文件里的费率。save_state 用它判断「有没有人从外部改过」，
+        #: 避免长命进程把运营者的手工校准抹掉（09-29 事故，见 _rate_fields）。
+        self._loaded_rate_in = 0.0
+        self._loaded_rate_out = 0.0
 
     def week_start(self, now: float) -> float:
         """当前 7 天固定窗口的起点（周锚点 + k×7d）。"""
@@ -614,23 +638,69 @@ class Burner:
             "accounts": {a.name: {"events": [[ts, c] for ts, c in a.events],
                                   "credits_total": a.credits_total,
                                   "target": a.target,
+                                  "last_ok": a.last_ok,
+                                  "starve_boost": a.starve_boost,
+                                  "last_limit_body": a.last_limit_body,
                                   "anchor_ts": a.anchor_ts,
                                   "week_anchor_ts": a.week_anchor_ts}
                          for a in self.accounts},
             "keys": {k.name: {"ok": k.ok, "fail": k.fail, "rate_limited": k.rate_limited,
+                              "quota_hits": k.quota_hits,
                               "tokens_in": k.tokens_in, "tokens_out": k.tokens_out}
                      for k in self.keys},
-            # 费率与安全系数必须一起落盘：_save_rates_to_state 先写、本函数后写，
-            # 早先的整体覆盖把这两个键冲掉 → 重启后校准丢失、退回默认费率
-            # （2026-09-24 实测踩到：真实费率比旧默认高近 7 倍都没能记住）。
-            "rate_in": self.args.rate_in,
-            "rate_out": self.args.rate_out,
+            # 费率与安全系数必须一起落盘，且**不能覆盖外部校准**。
+            # 09-24 的修复只保证「键还在」，09-29 才发现真问题：加载顺序是
+            # args(burner.yaml) → state 覆盖 args → 进内存，而本函数又把内存值
+            # 写回 state。这个环让「手工改 state」不可能生效——进程活着，下一次
+            # 保存就抹掉。实测：运营者按控制台读数把费率改成 761/2292，消耗器未
+            # 重启（改 burner.yaml 必须重启），它以 830/2500 记账并在 14.5 小时后
+            # 写回 830/2500，看起来「校准生效过又没了」。详见 _rate_fields。
+            **self._rate_fields(),
             "safety_margin": self.args.safety_margin,
         }
         with contextlib.suppress(OSError):
             tmp = self.state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             tmp.replace(self.state_file)
+
+    def _rate_fields(self) -> dict:
+        """费率落盘值：外部改过就保留文件里的，否则写自己内存的。
+
+        为什么需要：加载顺序是 ``args``(burner.yaml) → ``_load_rates_from_state``
+        用 state 覆盖 args → 进内存；而 :meth:`save_state` 又把内存值写回 state。
+        这个环让「手工改 state」成为不可能——进程活着，下一次保存就抹掉。
+        2026-09-29 实测踩到：运营者按控制台读数把费率改成 761/2292，消耗器没重启
+        （改 burner.yaml 必须重启才生效），它继续按 830/2500 记账，14.5 小时后
+        把文件写回 830/2500。运营者看到的是「校准生效过又没了」。
+
+        判定只看**自己加载时**见过的两个值，所以正常路径下（没人外部改）
+        两者恒等，行为与之前完全一致；只有文件确实被改过时才让位。
+
+        注意 ``self._loaded_rate_in == 0`` 表示「本进程从未加载账本」（全新启动），
+        此时无从判断外部有没有改过，按内存值写——绝不把 0 当成「外部改成了 0」。
+        """
+        import json
+
+        try:
+            current = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"rate_in": self.args.rate_in, "rate_out": self.args.rate_out}
+
+        file_in = current.get("rate_in")
+        file_out = current.get("rate_out")
+        if self._loaded_rate_in and file_in is not None:
+            external = float(file_in) != self._loaded_rate_in or (
+                file_out is not None and float(file_out) != self._loaded_rate_out
+            )
+            if external:
+                self.log(
+                    f"账本的费率被外部改成 入{float(file_in):.0f}/出{float(file_out or 0):.0f}"
+                    f"（本次加载时是 入{self._loaded_rate_in:.0f}/出{self._loaded_rate_out:.0f}），"
+                    "按外部值保留、不覆盖。要让它生效需重启消耗器。",
+                    "WARN",
+                )
+                return {"rate_in": float(file_in), "rate_out": float(file_out)}
+        return {"rate_in": self.args.rate_in, "rate_out": self.args.rate_out}
 
     def load_state(self) -> bool:
         """恢复上次（或上几次）的账本。返回是否加载到了历史数据。"""
@@ -640,6 +710,10 @@ class Burner:
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
+        # 记住文件里原有的费率：save_state 靠它判断「有没有人从外部改过」。
+        # 见 _rate_fields 的长注释——这是 09-29 那次「校准看起来生效又没了」的根因。
+        self._loaded_rate_in = float(data.get("rate_in") or 0.0)
+        self._loaded_rate_out = float(data.get("rate_out") or 0.0)
         loaded = False
         by_name = {a.name: a for a in self.accounts}
         cutoff = time.time() - (WIN_WEEK + 86400)
@@ -649,6 +723,11 @@ class Burner:
                 continue
             acct.events = deque((ts, c) for ts, c in blob.get("events", []) if ts > cutoff)
             acct.credits_total = float(blob.get("credits_total") or 0.0)
+            # 饥饿救济的记账也要恢复：不恢复的话每次重启都当成"从未成功"，
+            # 把刚跑起来的账号全救济一遍。
+            acct.last_ok = float(blob.get("last_ok") or 0.0)
+            acct.starve_boost = int(blob.get("starve_boost") or 0)
+            acct.last_limit_body = str(blob.get("last_limit_body") or "")[:200]
             # 恢复学到的并发目标（夹在 [起点, 本次数值上限] 内，避免跨配置残留）
             acct.target = min(max(float(blob.get("target") or self.args.per_account_start), 1.0),
                               float(self.args.per_account_max))
@@ -666,6 +745,7 @@ class Burner:
             ks.ok = int(blob.get("ok") or 0)
             ks.fail = int(blob.get("fail") or 0)
             ks.rate_limited = int(blob.get("rate_limited") or 0)
+            ks.quota_hits = int(blob.get("quota_hits") or 0)
             ks.tokens_in = int(blob.get("tokens_in") or 0)
             ks.tokens_out = int(blob.get("tokens_out") or 0)
         # 全局总量 = 各 Key 之和（credits 从账号账本取）
@@ -678,14 +758,46 @@ class Burner:
         return loaded
 
     # ---- 校准：把控制台实扣数换算成精确费率 --------------------------------
-    def suggest_rates(self, actual_credits: float) -> tuple[float, float]:
-        """按持久化账本里的全部 token 量反推费率（假设 r_in = r_out/3，
-        该比例来自商汤参考价，即使偏差一倍对输出主导的烧法影响也很小）。"""
-        tin = sum(k.tokens_in for k in self.keys)
-        tout = sum(k.tokens_out for k in self.keys)
+    def suggest_rates(
+        self, actual_credits: float, *, account: str | None = None
+    ) -> tuple[float, float]:
+        """按账本 token 量反推费率（假设 r_in = r_out/3，
+        该比例来自商汤参考价，即使偏差一倍对输出主导的烧法影响也很小）。
+
+        ``account`` 限定只用该账号名下 Key 的 token 量。**必须与
+        ``actual_credits`` 的口径一致**：给单账号的实扣却配全部账号的 token
+        （或不指定 account），算出的费率会差「账号数」倍——9 个账号就是 9 倍，
+        而费率偏低会让消耗器放心多烧，正好把专属池烧穿、静默吃掉通用池
+        （AGENTS.md 记着的那次事故）。所以这里不再提供「猜」的余地：
+        ``account=None`` 只在实扣数确实覆盖全部账号时才成立。
+        """
+        if account is None:
+            keys = list(self.keys)
+        else:
+            wanted = {a.name for a in self.accounts if a.name == account}
+            if not wanted:
+                raise ValueError(
+                    f"账本里没有账号 '{account}'；可用："
+                    + "、".join(a.name for a in self.accounts)
+                )
+            member_keys: set[str] = set()
+            for acct_name in wanted:
+                member_keys.update(ks.name for ks in self.acct_keys_map().get(acct_name, []))
+            keys = [ks for ks in self.keys if ks.name in member_keys]
+            if not keys:
+                raise ValueError(f"账号 '{account}' 名下没有 Key，无法校准")
+        tin = sum(k.tokens_in for k in keys)
+        tout = sum(k.tokens_out for k in keys)
         denom = tout + tin / 3
         r_out = actual_credits * 1e6 / denom if denom else 0.0
         return r_out / 3, r_out
+
+    def acct_keys_map(self) -> dict[str, list]:
+        """账号名 -> 该账号名下的 Key 列表（按 Key 名归属）。"""
+        out: dict[str, list] = {}
+        for acct, ks_list in self.acct_keys:
+            out.setdefault(acct.name, []).extend(ks_list)
+        return out
 
     # ---- 日志：控制台 + 文件双写 -----------------------------------------
     def log(self, msg: str, level: str = "INFO") -> None:
@@ -787,6 +899,11 @@ class Burner:
         # 记账：成功扣减的积分进账号窗口（只有成功响应才真的扣了积分）
         now = time.time()
         acct.events.append((now, credits))
+        acct.last_ok = now
+        # 收回饥饿救济的借出：只清"已借"标记，不降 target。
+        # 不降是因为 target 归 AIMD 管，降了会和 429 减半叠乘把账号压到 1 以下；
+        # 不清则借出有 2 级硬顶，饿极了再借也只会借到 per_account_max。
+        acct.starve_boost = 0
         while acct.events and acct.events[0][0] <= now - (WIN_WEEK + 86400):
             acct.events.popleft()  # 裁剪：8 天外的记账点对任何窗口都无影响
         acct.credits_total += credits
@@ -814,6 +931,7 @@ class Burner:
             acct.parked_until = time.time() + self.args.quota_park_hours * 3600
             acct.park_reason = "疑似额度/积分耗尽"
             ks.rate_limited += 1
+            ks.quota_hits += 1
             self.total.rate_limited += 1
             self.log(
                 f"[{ks.name}] 疑似积分耗尽（专属池+通用池都已扣完），账号停靠 "
@@ -831,6 +949,17 @@ class Burner:
         if status == 429 or is_freq:
             ks.rate_limited += 1
             self.total.rate_limited += 1
+            # 记下卡的是频率还是吞吐：饥饿救济要靠它判断该不该加并发
+            # （rpm/rps 限流时加并发只会撞得更狠，见 _rebalance_concurrency）
+            acct.last_limit_body = str(body or "")[:200]
+            # 借出无效就收回：救济是「借一次试试」，不是「长期抬高」。
+            # 借了仍然 429，说明桶真的满了，继续借只会让这台机器更挤。
+            if acct.starve_boost:
+                acct.starve_boost = 0
+                self.log(
+                    f"[{acct.name}] 借出后仍被限流，收回救济额度（并发目标 "
+                    f"{acct.target:g}，交由 AIMD 自己收敛）"
+                )
             # AIMD 乘性减：撞 429 说明该账号并发顶到供应商上限，目标减半
             old_target = acct.target
             acct.target = max(1.0, acct.target * 0.5)
@@ -957,6 +1086,81 @@ class Burner:
                      f" 积分/百万token，安全系数 {self.args.safety_margin}")
 
     # ---- 周期汇总 ----------------------------------------------------------
+    def _rebalance_concurrency(self) -> None:
+        """并发再平衡：别让一个账号吃光 TPM，饿死的账号要能挤进来。
+
+        2026-09-28 实测的病灶：原来的加性增只看「自己 60s 没撞 429」就 +1，
+        完全不看同实例其他账号占了多少。结果是抢占到 TPM 的账号一路涨到
+        per_account_max（16），被压住的账号撞 429 减半后锁在 1。商汤的 tpm 是
+        账号间共享的桶（AGENTS.md「已知坑」：疑似账号级 TPM 跨模型共享），
+        所以独占者不掉，其他账号永远挤不进来——实测五个账号连续 77 次采样
+        0 成功，19,714 次 429 对 80,345 次成功（19.7% 的请求是纯空转）。
+
+        做法是**只做饥饿救济，不做强制高位削藩**：
+        给「超过 --starve-after 秒没成功」的账号每期 +1 临时额度，让它至少
+        能挤进去一次，成功一次立刻收回（见 success 处的 starve_boost=0）。
+
+        为什么不顺手削高并发的账号：①TPM 桶的总吞吐是固定的，把 16 切成
+        8+8 未必提高总产出，却会让当前能跑的账号变慢（运营者会觉得"改坏了"）；
+        ②救济已经足够打破死锁——饿账号拿到额度→挤进去成功→收回额度，
+        而高并发账号在 TPM 挤占下会自然撞 429、被 AIMD 减半。
+        真出现"救济也挤不进去"，那说明桶真的满了，该调的是 --per-account-max
+        这个全局上限，而不是劫富济贫。
+        """
+        now = time.time()
+        starve_after = float(getattr(self.args, "starve_after", 300))
+        cap = float(self.args.per_account_max)
+        # 启动宽限期：重启后账本若无 last_ok（旧格式），所有账号都会算「从未成功」，
+        # 于是一秒内七个账号同时借出、把桶挤得更满。
+        # 2026-09-28 实测踩到：12:21:46 那一秒 7 个账号同时借出，随后 tpm/rpm/rps
+        # 三种 429 一起炸（35/20/19）。跑过宽限期仍未成功的才配救济。
+        grace = float(getattr(self.args, "starve_grace", 120))
+
+        for acct in self.accounts:
+            if acct.parked_until > now:
+                continue  # 停靠中的账号不参与（它的额度没有意义）
+            # 原本的 AIMD 加性增保留：60s 没撞 429 就 +1，自动贴住供应商上限。
+            # 它本身没错，错在「只看自己不看别人」——所以下面补饥饿救济。
+            if acct.target < cap and time.time() - acct.last_429 > 60:
+                acct.target = min(acct.target + 1, cap)
+            # 救济判据：跑过宽限期，且（从未成功 或 成功以后饿了太久）
+            uptime = now - self.started
+            if uptime < grace:
+                continue
+            starving = acct.last_ok == 0.0 or (now - acct.last_ok) > starve_after
+            if not starving or acct.starve_boost >= 2:
+                continue
+            # rpm/rps 限流时加并发有害：那类限流卡的是「请求发得多频」而不是
+            # 「token 吃得多快」，加并发只会让它撞得更狠。实测 12:21 那一分钟
+            # rpm 20 次 + rps 19 次，借出后依旧全 429。所以只在最近一次 429
+            # 不是频率类时才借。
+            if self._last_limit_kind(acct) == "freq":
+                continue
+            if acct.target < cap:
+                acct.starve_boost += 1
+                acct.target = min(acct.target + 1, cap)
+                waited = int(now - acct.last_ok) if acct.last_ok else None
+                self.log(
+                    f"[{acct.name}] {'从未成功' if waited is None else f'{waited} 秒未成功'}，"
+                    f"临时借出并发到 {acct.target:g}（已借 {acct.starve_boost}/2，"
+                    "成功一次即收回）"
+                )
+
+    @staticmethod
+    def _last_limit_kind(acct: object) -> str:
+        """最近一次 429 卡的是频率（rpm/rps）还是吞吐（tpm）。
+
+        返回 ``"freq"`` 表示频率类——这种情况加大并发只会撞得更狠，
+        该做的是把请求发慢一点。返回 ``""`` 表示未知/没撞过。
+        """
+        body = str(getattr(acct, "last_limit_body", "") or "").lower()
+        if not body:
+            return ""
+        if "rpm" in body or "rps" in body or "qps" in body or "tps" in body:
+            return "freq"
+        return "throughput"
+
+    # ---- 周期汇总 ----------------------------------------------------------
     async def periodic_summary(self) -> None:
         while not self.stop.is_set():
             with contextlib.suppress(TimeoutError):
@@ -973,10 +1177,7 @@ class Burner:
                 self.stop.set()
                 break
             # AIMD 加性增：账号静默（60s 无 429）就 +1 并发，自动贴回供应商上限
-            for acct in self.accounts:
-                if acct.target < self.args.per_account_max \
-                        and time.time() - acct.last_429 > 60:
-                    acct.target += 1
+            self._rebalance_concurrency()
             self.save_state()
             self._maybe_auto_calibrate()
             elapsed = time.time() - self.started
@@ -1157,6 +1358,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="单账号最大并发（AIMD 的天花板；429 频繁就调小，从不 429 可调大）")
     opt("--per-account-start", type=int, default=8,
                    help="单账号自适应并发起点（起步高、靠 429 减半回落，收敛快）")
+    opt("--starve-after", type=float, default=300,
+                   help="饥饿救济阈值（秒）：账号超过这么久没成功就临时 +1 并发，"
+                        "让它能挤进去一次；成功一次即收回。商汤 tpm 是账号间共享桶，"
+                        "不加这条会一个账号独吃到顶、其余饿死刷 429")
+    opt("--starve-grace", type=float, default=120,
+                   help="启动宽限期（秒）：重启后多久内不救济。账本旧格式没有 last_ok，"
+                        "不宽限会让所有账号同时算「从未成功」、一秒内一起借出，"
+                        "反而把桶挤爆（2026-09-28 实测 7 个账号同时借出后三种 429 齐炸）")
     opt("--max-tokens", type=int, default=16384,
                    help="单次请求输出上限（越大烧得越狠）")
     opt("--filler-chars", type=int, default=6000,
@@ -1223,6 +1432,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--calibrate-actual", type=float, default=0,
                    help="校准模式：传入控制台「积分消耗明细」里与账本同时段的实扣积分"
                         "（如 --calibrate-actual 7000），算出精确费率后退出，不烧积分")
+    opt("--calibrate-account", default="",
+                   help="与 --calibrate-actual 配套：实扣积分属于哪个账号（如 "
+                        "SENSENOVA_API_KEY_02）。单账号读数必须配这个，否则会按"
+                        "全部账号的 token 反推、费率差一个账号数的倍数（9 个账号"
+                        "就是 9 倍，费率偏低会烧穿专属池）。留空 = 实扣数覆盖全部账号")
     opt("--auto-calibrate", type=float, default=0, metavar="TOKENS",
                    help="自动校准：每烧够 N 百万 token 暂停一次，提示输入控制台实扣积分，"
                         "自动算出精确费率并继续烧。0 = 关闭。推荐 5（约 1~2 小时烧到）")
@@ -1283,12 +1497,29 @@ def main(argv: list[str] | None = None) -> int:
     burner._calibrate_start_in = burner.total.tokens_in
     burner._calibrate_start_out = burner.total.tokens_out
     if args.calibrate_actual > 0:
-        r_in, r_out = burner.suggest_rates(args.calibrate_actual)
-        tin = sum(k.tokens_in for k in burner.keys)
-        tout = sum(k.tokens_out for k in burner.keys)
+        acct_name = (args.calibrate_account or "").strip() or None
+        try:
+            r_in, r_out = burner.suggest_rates(args.calibrate_actual, account=acct_name)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        if acct_name is None:
+            scope_keys = list(burner.keys)
+        else:
+            members = {ks.name for ks in burner.acct_keys_map().get(acct_name, [])}
+            scope_keys = [ks for ks in burner.keys if ks.name in members]
+        tin = sum(k.tokens_in for k in scope_keys)
+        tout = sum(k.tokens_out for k in scope_keys)
+        scope = f"全部 {len(burner.accounts)} 个账号" if acct_name is None else acct_name
+        print(f"校准口径：{scope}（{len(scope_keys)} 把 Key）")
         print(f"账本累计：入 {tin:,} + 出 {tout:,} token")
         print(f"你给的实扣：{args.calibrate_actual:,.0f} 积分")
         print(f"精确费率：入 {r_in:.0f} / 出 {r_out:.0f} 积分/百万token")
+        if not (0 < r_out < 100_000):
+            print("ERROR: 算出的费率超出合理范围，几乎可以肯定是实扣数与 token 口径不一致"
+                  "（比如拿了单账号的读数却没配 --calibrate-account）。已拒绝写入。",
+                  file=sys.stderr)
+            return 2
         if args.auto_calibrate:
             # 自动校准模式：写入账本并继续烧
             burner.apply_calibrated_rates(r_in, r_out)
@@ -1300,6 +1531,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"建议启动参数：--rate-in {r_in:.0f} --rate-out {r_out:.0f}")
             print("注意：实扣数必须与账本覆盖同一时段（控制台明细的时间范围要包住日志"
                   "第一次启动的时间），且期间网关没烧过 flash-lite（那也计同一池）。")
+            if acct_name:
+                print(f"本次按单账号 {acct_name} 反推；若控制台读的是「本周剩余」，"
+                      "请改用「消耗明细」的区间实扣值，口径才对得上。")
             return 0
     if burner.cap5h <= 0 or burner.capweek <= 0:
         burner.log("危险：积分预算已关闭（--window-credits/--weekly-credits ≤ 0），"

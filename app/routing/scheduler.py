@@ -33,6 +33,7 @@ from typing import Any
 from app.core.errors import (
     AllAttemptsFailedError,
     ClientDisconnected,
+    GatewayTimeoutError,
     NoAvailableCredentialError,
     NoAvailableDeploymentError,
     ZKAIError,
@@ -92,6 +93,61 @@ class ExecutionResult:
         return True
 
 
+#: 连续失败到第几次开始隔离。3 是刻意的：一次网络抖动不该屏蔽一个渠道，
+#: 但「连续三次都挂」已经不是偶发了——尤其对 60s 超时这种，每次都要白等。
+QUARANTINE_THRESHOLD = 3
+#: 隔离时长阶梯（秒），按超出阈值的次数逐级取，取到最后一个就不再涨。
+#: 60s 起步是为了不惩罚「刚恢复、偶尔抖一下」的部署；6h 封顶是因为再长就该
+#: 由运营者去修配置了，无限隔离会让恢复也进不来。
+QUARANTINE_LADDER = (60.0, 300.0, 1800.0, 7200.0, 21600.0)
+#: 距上次失败超过这么久，连续计数衰减归零（避免陈旧计数让一次抖动重罚）。
+QUARANTINE_DECAY_SECONDS = 3600.0
+
+
+@dataclass
+class DeploymentHealth:
+    """一个部署的连续失败记账与隔离窗口。
+
+    与 :attr:`Scheduler._deployment_cooldowns` 的分工：那个是**单次错误的短冷却**
+    （30s，让同一次请求换个渠道就好）；这个是**跨请求的持久判断**——同一个部署
+    反复失败，说明它现在根本不可用，应该从路由计划里消失一段时间。
+    实测动机：NVIDIA 的 glm-5.3 每次挂死 60s，旧逻辑只给 30s 冷却，
+    于是「撞 60s → 冷 30s → 再撞 60s」无限循环，累计烧掉 60.9 小时。
+    """
+
+    consecutive_failures: int = 0
+    quarantined_until: float = 0.0
+    last_error_type: str = ""
+    last_failure_at: float = 0.0
+
+    def as_dict(self, now: float) -> dict[str, Any]:
+        return {
+            "consecutive_failures": self.consecutive_failures,
+            "quarantined": self.quarantined_until > now,
+            "quarantine_seconds_left": max(0.0, round(self.quarantined_until - now, 1)),
+            "last_error_type": self.last_error_type,
+        }
+
+
+def is_quarantine_worthy(info: ErrorInfo) -> bool:
+    """这次失败算不算「这个部署坏了」的证据。
+
+    只认两类：
+    * 反复的传输/上游故障（``transient`` / ``availability``）——单次是抖动，
+      连续多次就是真坏了；
+    * 「模型/端点在上游不存在」（404 / ``model_not_found``）——这是持久的，
+      再怎么重试也不会好。
+
+    明确**不认**：
+    * 429 限流（``throttle``）：偶发，且那是凭据层的处置范围；
+    * 401/403（``credential``）：换把 Key 可能就好了，隔离整个部署是误伤；
+    * 400/413/422（``client``）：调用方自己的错，不该赖部署。
+    """
+    if info.http_status == 404 or info.error_type == "model_not_found":
+        return True
+    return info.error_class in {ErrorClass.TRANSIENT, ErrorClass.AVAILABILITY}
+
+
 class Scheduler:
     """Executes routing plans against providers with retry and failover."""
 
@@ -105,6 +161,7 @@ class Scheduler:
         sleeper: Sleeper | None = None,
         request_timeout: float = 120.0,
         max_input_tokens: int = 0,
+        max_request_seconds: float = 300.0,
     ) -> None:
         self.router = router
         self.pool = pool
@@ -115,16 +172,96 @@ class Scheduler:
         #: 估算 input token 的硬上限，0 = 不限制。语义见
         #: ``RequestService._guard_input_size``（按 token 而非字节判定的那道闸）。
         self.max_input_tokens = max(0, max_input_tokens)
+        #: 单次客户端请求的**墙钟**预算（秒），0 = 不限制。
+        #:
+        #: 为什么必须有：``max_total_attempts`` 是**次数**上限，不是时间上限。
+        #: 20 次尝试 × 60 秒（nvidia 的 read timeout）= 最坏 20 分钟。2026-09-28
+        #: 实测一次 zk-auto 首条消息：商汤 429（与消耗器共抢同一把 Key）→
+        #: 逐个部署故障转移到 nvidia → glm-5.3 连续 3 次 60 秒超时，客户端
+        #: **十几分钟收不到任何字节**，连一个错误都没有——因为每次尝试都「还没超」
+        #: 所以调度器认为还有预算。次数闸看不见这种「每次都刚好不超、合计一小时」。
+        #:
+        #: 默认 300s = 现役最大上游超时（商汤 300s）再留一点余量：一次**成功**的
+        #: 慢生成不会被误杀，只有「反复失败累计」会被截断。截断时抛
+        #: ``GatewayTimeoutError``，客户端终于能看到一个可操作的错误。
+        self.max_request_seconds = max(0.0, max_request_seconds)
         #: Deployment-level cooldowns applied by 529/503 style errors.
         self._deployment_cooldowns: dict[str, float] = {}
+        #: 跨请求的连续失败记账与自动隔离，见 :class:`DeploymentHealth`。
+        self._deployment_health: dict[str, DeploymentHealth] = {}
 
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
     def deployment_cooling_down(self, deployment_id: str, *, now: float | None = None) -> bool:
+        """短冷却或**自动隔离**中 → True（该部署暂时不进路由计划）。"""
         moment = now if now is not None else time.time()
         until = self._deployment_cooldowns.get(deployment_id)
-        return bool(until and until > moment)
+        if until and until > moment:
+            return True
+        health = self._deployment_health.get(deployment_id)
+        return bool(health and health.quarantined_until > moment)
+
+    # ------------------------------------------------------------------ #
+    # 部署健康：连续失败 → 自动隔离（跨请求）
+    # ------------------------------------------------------------------ #
+    def _note_deployment_failure(self, deployment_id: str, info: ErrorInfo) -> None:
+        """记一次失败；连续到阈值就把该部署隔离一段时间。
+
+        只有 :func:`is_quarantine_worthy` 认可的失败才计数——网络抖动、限流、
+        调用方的错都不会让一个健康渠道被屏蔽。
+        """
+        if not is_quarantine_worthy(info):
+            return
+        now = time.time()
+        health = self._deployment_health.setdefault(deployment_id, DeploymentHealth())
+        # 陈旧计数衰减：距上次失败很久了，说明中间是好的，不该累计。
+        if health.last_failure_at and now - health.last_failure_at > QUARANTINE_DECAY_SECONDS:
+            health.consecutive_failures = 0
+        health.consecutive_failures += 1
+        health.last_error_type = info.error_type
+        health.last_failure_at = now
+        if health.consecutive_failures < QUARANTINE_THRESHOLD:
+            return
+        step = min(
+            health.consecutive_failures - QUARANTINE_THRESHOLD,
+            len(QUARANTINE_LADDER) - 1,
+        )
+        seconds = QUARANTINE_LADDER[step]
+        health.quarantined_until = now + seconds
+        logger.warning(
+            "deployment %s 连续 %d 次失败（%s），自动隔离 %.0fs——"
+            "修好后任意一次成功即解除",
+            deployment_id,
+            health.consecutive_failures,
+            info.error_type,
+            seconds,
+        )
+
+    def _note_deployment_success(self, deployment_id: str) -> None:
+        """任意一次成功 → 清零计数并解除隔离（半开恢复的收口）。"""
+        health = self._deployment_health.get(deployment_id)
+        if health is None:
+            return
+        if health.consecutive_failures or health.quarantined_until:
+            logger.info(
+                "deployment %s 恢复（此前连续失败 %d 次%s）",
+                deployment_id,
+                health.consecutive_failures,
+                "，已解除隔离" if health.quarantined_until else "",
+            )
+        health.consecutive_failures = 0
+        health.quarantined_until = 0.0
+        health.last_error_type = ""
+
+    def quarantined_deployments(self, *, now: float | None = None) -> dict[str, dict[str, Any]]:
+        """当前被隔离/有失败记录的部署，供 /health 与控制台展示。"""
+        moment = now if now is not None else time.time()
+        return {
+            deployment_id: health.as_dict(moment)
+            for deployment_id, health in self._deployment_health.items()
+            if health.consecutive_failures or health.quarantined_until
+        }
 
     def _apply_deployment_cooldown(self, deployment_id: str, info: ErrorInfo) -> float:
         if info.cooldown_scope != "deployment" or info.cooldown_seconds <= 0:
@@ -203,6 +340,46 @@ class Scheduler:
             and not info.switch_credential
             and not info.switch_provider
         )
+
+    def _normalize_throttle(
+        self, info: ErrorInfo, credential: CredentialRuntime | None
+    ) -> ErrorInfo:
+        """Rewrite a shared-bucket 429 into "fail over", not "sweep sibling keys".
+
+        The classifier always reports a 429 as ``switch_credential`` because that
+        is right for a limit the provider counts per key. But when the cooldown
+        policy says the bucket is shared across the provider's accounts, rotating
+        keys is exactly the failure mode this gateway was fixed for: seven
+        SenseNova accounts hit the same tpm bucket, six of the seven attempts are
+        guaranteed 429s, and each one escalates the ladder for nothing.
+
+        So for anything wider than one key the decision becomes DEPLOYMENT: the
+        pool has already parked the sibling keys (see
+        ``CredentialPool._park_throttled_siblings``), and the next candidate in
+        the plan is a genuinely different bucket.
+
+        The scope comes from ``CredentialPool.effective_throttle_scope`` - the
+        same call the pool uses to decide what to park. Sharing it is the whole
+        point: if the two ever disagreed, a request could fail over while the
+        pool decided the bucket was per-key (or the reverse), and neither log
+        line would explain the behaviour.
+
+        The object is mutated in place on purpose - it is the same instance the
+        pool just used for reporting.
+        """
+        if info.error_class is not ErrorClass.THROTTLE or credential is None:
+            return info
+        scope = self.pool.effective_throttle_scope(credential.id, info.throttle_kind.value)
+        if scope == "credential":
+            return info
+        info.switch_credential = False
+        info.switch_provider = True
+        logger.info(
+            "429 (%s) has %s-wide cooldown -> failing over instead of rotating keys",
+            info.throttle_kind.value,
+            scope,
+        )
+        return info
 
     def _decide(self, info: ErrorInfo, *, retries_done: int) -> _Next:
         """Translate a classified error into the next scheduling action."""
@@ -308,6 +485,10 @@ class Scheduler:
         errors: list[ErrorInfo] = []
         attempt_number = 0
         deployments_tried = 0
+        # Wall-clock origin for the whole request. The loop below rebinds
+        # ``started`` to a perf_counter for per-attempt latency, so the budget
+        # check needs its own epoch-based value.
+        wall_start = time.time()
 
         for candidate in decision.candidates:
             if not candidate.eligible:
@@ -359,6 +540,7 @@ class Scheduler:
                 while True:
                     if attempt_number >= self.policy.max_total_attempts:
                         raise self._exhausted(decision, attempts, errors)
+                    self._check_wall_clock(wall_start)
                     attempt_number += 1
                     provider_var.set(candidate.deployment.provider_id)
                     model_var.set(candidate.deployment.model)
@@ -388,6 +570,7 @@ class Scheduler:
                     except Exception as exc:
                         finished_wall = time.time()
                         info = self.classifier.classify(exc)
+                        info = self._normalize_throttle(info, credential)
                         errors.append(info)
                         self.pool.report_failure(credential.id, info)
                         attempts.append(
@@ -410,6 +593,7 @@ class Scheduler:
                             candidate.deployment.model,
                         )
                         self._apply_deployment_cooldown(candidate.deployment.id, info)
+                        self._note_deployment_failure(candidate.deployment.id, info)
 
                         next_step = self._decide(info, retries_done=retries_done)
                         if next_step is _Next.ABORT:
@@ -436,6 +620,7 @@ class Scheduler:
                     self.pool.report_success(credential.id, latency_ms=latency_ms)
                     self.pool.note_affinity(session_key, credential.id)
                     usage = response.usage or Usage()
+                    self._note_deployment_success(candidate.deployment.id)
                     self._note_tokens(candidate.provider, credential, usage)
                     attempts.append(
                         self._attempt_outcome(
@@ -505,6 +690,10 @@ class Scheduler:
         attempt_number = 0
         deployments_tried = 0
         stream_open_retries = 0
+        # Wall-clock origin for the whole stream, shared by every attempt. The
+        # non-streaming path gets this from its caller; here it has to be taken
+        # explicitly or the budget check has nothing to measure against.
+        wall_start = time.time()
 
         def _record(outcome: AttemptOutcome) -> None:
             attempts.append(outcome)
@@ -553,6 +742,7 @@ class Scheduler:
                 while True:
                     if attempt_number >= self.policy.max_total_attempts:
                         raise self._exhausted(decision, attempts, errors)
+                    self._check_wall_clock(wall_start)
                     attempt_number += 1
                     provider_var.set(candidate.deployment.provider_id)
                     model_var.set(candidate.deployment.model)
@@ -584,6 +774,7 @@ class Scheduler:
                         raise
                     except Exception as exc:
                         info = self.classifier.classify(exc)
+                        info = self._normalize_throttle(info, credential)
                         errors.append(info)
                         self.pool.report_failure(credential.id, info)
                         _record(
@@ -598,6 +789,7 @@ class Scheduler:
                             )
                         )
                         self._apply_deployment_cooldown(candidate.deployment.id, info)
+                        self._note_deployment_failure(candidate.deployment.id, info)
                         await self._close(generator)
                         logger.warning(
                             "stream open attempt %d failed: %s", attempt_number, info.error_type
@@ -620,6 +812,7 @@ class Scheduler:
 
                     # Stream is open: emit chunks. Failures from here on cannot be
                     # retried (data already sent), so they are surfaced as events.
+                    self._note_deployment_success(candidate.deployment.id)
                     usage = Usage()
                     finish_reason: str | None = None
                     cancelled = False
@@ -767,6 +960,35 @@ class Scheduler:
             f", recovers in ~{wait:.0f}s" if wait else "",
         )
         return self.classifier.classify(error)
+
+    def _check_wall_clock(self, started: float) -> None:
+        """Abort a request that has spent its whole wall-clock budget failing.
+
+        Guarded on ``max_request_seconds`` (0 = disabled). Raising *before* the
+        next attempt is dispatched is what makes it a budget rather than a
+        timeout: the client gets an actionable 504 listing how long each failing
+        attempt took, instead of silence for however long the attempt ceiling
+        happens to allow.
+
+        It deliberately does **not** interrupt an attempt already in flight -
+        aborting mid-stream would truncate a response the client can still read
+        (and would leave the upstream connection to be reaped). The check only
+        runs between attempts.
+        """
+        if self.max_request_seconds <= 0:
+            return
+        elapsed = time.time() - started
+        if elapsed < self.max_request_seconds:
+            return
+        logger.warning(
+            "请求已达墙钟预算 %.0fs（已尝试若干次，最后一次失败后不再重试）",
+            elapsed,
+        )
+        raise GatewayTimeoutError(
+            f"网关在 {elapsed:.0f} 秒内未能从任何渠道拿到响应"
+            f"（上限 {self.max_request_seconds:.0f} 秒，由 ZKAI_MAX_REQUEST_SECONDS 控制）。"
+            "通常是所有渠道同时不可用：可稍后重试、换个别名，或把上限调大。"
+        )
 
     def _exhausted(
         self,

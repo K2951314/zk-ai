@@ -125,6 +125,8 @@
     transition: background .14s, color .14s;
   }
   .nav-item:hover { background: var(--panel-2); color: var(--text); }
+  /* 体检页是跳转（<a>）而非切视图（<button>）：去掉下划线，外观与其它项一致 */
+  a.nav-item { text-decoration: none; cursor: pointer; }
   .nav-item.active {
     background: var(--accent-soft); color: var(--accent); font-weight: 600;
   }
@@ -412,6 +414,25 @@
   .formgrid label.wide { grid-column: 1 / -1; }
   .formgrid input, .formgrid select, .formgrid textarea { width: 100%; }
   .formgrid .hint { font-size: 11px; color: var(--muted); line-height: 1.6; }
+  /* 接口模型开关：一个真正的 switch，不是 checkbox——「越过首位」是个状态，
+     不是一次勾选，视觉上要能一眼看出当前是开还是关。 */
+  .fmrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .fmswitch { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .fmswitch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .fmtrack {
+    width: 38px; height: 21px; border-radius: 11px; background: var(--border);
+    transition: background .16s ease; flex: none; position: relative;
+  }
+  .fmtrack::after {
+    content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: transform .16s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,.28);
+  }
+  .fmswitch input:checked + .fmtrack { background: var(--accent, #4b8bff); }
+  .fmswitch input:checked + .fmtrack::after { transform: translateX(17px); }
+  .fmswitch input:focus-visible + .fmtrack { outline: 2px solid var(--accent, #4b8bff); outline-offset: 2px; }
+  .fmlabel { font-size: 12px; color: var(--muted); }
+  .fmlabel b { color: var(--fg); font-weight: 600; }
   .modal-actions {
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
@@ -499,6 +520,7 @@
       <button class="nav-item" data-view="pool"><span class="ico">🔑</span>凭据池</button>
       <button class="nav-item" data-view="requests"><span class="ico">📨</span>请求记录</button>
       <button class="nav-item" data-view="usage"><span class="ico">📈</span>用量统计</button>
+      <a class="nav-item" href="/ui/report"><span class="ico">🩺</span>体检</a>
       <div class="nav-label">配置</div>
       <button class="nav-item" data-view="models"><span class="ico">🧩</span>模型与别名</button>
       <button class="nav-item" data-view="burner"><span class="ico">🔥</span>积分消耗器</button>
@@ -515,6 +537,8 @@
         <span class="dot off" id="server-dot"></span>
         <span class="txt" id="server-line">未连接</span>
       </span>
+      <span class="grow"></span>
+      <div id="quarantine-banner" class="row-flex small" style="display:none;gap:6px;align-items:center;flex-wrap:wrap"></div>
       <span class="grow"></span>
       <label class="field-label">自动刷新
         <select id="auto-interval">
@@ -760,6 +784,27 @@ async function loadOverview() {
   const sideUp = $("#side-uptime");
   if (sideVer) sideVer.textContent = `v${health.version}`;
   if (sideUp) sideUp.textContent = `已运行 ${dur(health.uptime_seconds)}`;
+
+  // 被自动隔离的部署：必须显式告知，否则一个渠道悄悄从路由里消失，
+  // 会被当成路由 bug 去查（2026-09-29 加，与「健康检查只查目录」同批修的）。
+  const quarantined = health.quarantined_deployments || {};
+  const qNames = Object.keys(quarantined);
+  const qBanner = $("#quarantine-banner");
+  if (qBanner) {
+    if (qNames.length) {
+      qBanner.style.display = "";
+      qBanner.innerHTML = `<span class="pill amber">⚠ 已自动隔离 ${qNames.length} 个部署</span>
+        <span class="small muted">连续失败达阈值后自动屏蔽，修好后任意一次成功即自动恢复：</span>
+        ${qNames.map(n => {
+          const q = quarantined[n];
+          const left = q.quarantined ? `还剩 ${dur(q.quarantine_seconds_left)}` : "观察中";
+          return `<span class="chip" title="连续失败 ${q.consecutive_failures} 次，最后错误 ${esc(q.last_error_type)}">${esc(n)} · ${esc(left)}</span>`;
+        }).join(" ")}`;
+    } else {
+      qBanner.style.display = "none";
+      qBanner.innerHTML = "";
+    }
+  }
 
   const pool = stats.pool || {};
   const total60 = Object.values(stats.error_rates || {}).reduce((a, r) => a + r.attempts, 0);
@@ -1555,6 +1600,9 @@ async function loadModels() {
     <td class="name"><b>${esc(name)}</b>${a.description ? `<span class="sub">${esc(a.description)}</span>` : ""}</td>
     <td>${esc(a.strategy)}</td>
     <td>${(a.targets || []).map(esc).join(" → ")}</td>
+    <td class="small">${a.front_model
+        ? `<span class="chip" title="接口模型：永远排第一；关闭后越过首位按正常权重排序">📌 ${esc(a.front_model)}</span>`
+        : `<span class="chip muted" title="未设接口模型：完全按能力权重排序">权重排序</span>`}</td>
     <td class="small muted">${esc(((al.resolved || {})[name] || []).join(", "))}</td>
     <td>${a.enabled ? pill("healthy") : pill("disabled")}</td>
     </tr>`).join("");
@@ -1574,7 +1622,7 @@ async function loadModels() {
       <tbody>${modelRows}</tbody></table></div>
     <div class="toolbar" style="margin-top:22px"><h4 class="sec grow" style="margin:0">别名（对外稳定入口）</h4>
       <button class="primary" id="al-new">➕ 新建别名</button></div>
-    <div class="tablewrap"><table><thead><tr><th class="acts">操作</th><th>别名</th><th>策略</th><th>目标链</th><th>解析结果</th><th>状态</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th class="acts">操作</th><th>别名</th><th>策略</th><th>目标链</th><th>接口模型</th><th>解析结果</th><th>状态</th></tr></thead>
       <tbody>${aliasRows}</tbody></table></div>
     <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
     <div class="card"><div class="row-flex">
@@ -1773,12 +1821,14 @@ async function openMarketModal(presetPid) {
   const first = presetPid && providers.some(p => p.id === presetPid) ? presetPid : providers[0].id;
   modal.innerHTML = `<div class="card wide">
     <h3>🧺 模型市场</h3>
-    <div class="modal-sub">选一个供应商，点「探测」把它真实支持的模型列出来；已收录的会预填上下文 / 能力 / 牌价。</div>
+    <div class="modal-sub">选一个供应商，点「探测」列出它的模型目录（目录不大时会**自动验证**一遍）——
+      <b>目录里有 ≠ 你账号能调</b>（实测：商汤列了 deepseek-v4.1-flash 但套餐没有；NVIDIA 列的 glm-5.3 直接挂死）。</div>
     <div class="row-flex" style="margin-bottom:10px">
       <label class="small muted">供应商
         <select id="mk-provider">${providers.map(p => `<option value="${esc(p.id)}" ${p.id === first ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select>
       </label>
       <button class="primary" id="mk-load">🔍 探测可用模型</button>
+      <button id="mk-verify" disabled title="对列出的模型各发一次最小真实请求，看哪些你账号真能调">🔬 验证可调用</button>
       <span class="grow"></span>
       <button id="mk-close">关闭</button>
     </div>
@@ -1786,6 +1836,37 @@ async function openMarketModal(presetPid) {
   </div>`;
   modal.classList.add("show");
   $("#mk-close").onclick = () => modal.classList.remove("show");
+  // upstream_model -> 验证结论。点「验证可调用」后填充，用来在表里标注。
+  let verifyMap = {};
+  let lastItems = [];
+  // 目录不大就替运营者跑一遍验证。
+  // 2026-09-29 的教训：探针能判「这个 ID 能不能调」，但运营者**不会主动点**，
+  // 于是死 ID（deepseek-v4.1-flash 403）和能用的（deepseek-flash 200）在列表里
+  // 长得一模一样，只能去翻官方公告才分得清。默认替他跑，而不是等他点。
+  const AUTO_VERIFY_MAX = 20;
+  const VERIFY_CAP = 40;
+  async function runVerify(models) {
+    const pid = $("#mk-provider").value;
+    const btn = $("#mk-verify");
+    btn.disabled = true; btn.textContent = `🔬 验证中（${models.length} 个，每个最多 20 秒）…`;
+    try {
+      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models/verify`,
+                          { method: "POST", json: { models, timeout_seconds: 20 } });
+      if (r.error) { toast(r.error.message || "验证失败", "err"); return; }
+      verifyMap = {};
+      (r.results || []).forEach(x => { verifyMap[x.upstream_model] = x; });
+      const dead = (r.checked || 0) - (r.usable || 0);
+      toast(`验证完成：${r.usable}/${r.checked} 可调用` + (dead ? `，${dead} 个不可用` : ""),
+            dead ? "err" : "ok");
+      if (typeof window.__mkRerender === "function") window.__mkRerender();
+    } catch (err) { toast(err.message, "err"); }
+    finally { btn.disabled = false; btn.textContent = "🔬 验证可调用"; }
+  }
+  $("#mk-verify").onclick = () => {
+    const models = lastItems.map(x => x.upstream_model).slice(0, VERIFY_CAP);
+    if (!models.length) { toast("先点「探测可用模型」", "err"); return; }
+    runVerify(models);
+  };
   $("#mk-load").onclick = async () => {
     const pid = $("#mk-provider").value;
     $("#mk-list").innerHTML = '<span class="muted">探测中…</span>';
@@ -1796,17 +1877,36 @@ async function openMarketModal(presetPid) {
         $("#mk-list").innerHTML = `<span class="pill amber">${esc(r.note || "这个供应商没有可列的模型")}</span>`;
         return;
       }
-      const render = (arr) => arr.map((x, idx) => `
+      const VERDICT = {
+        ok: ["healthy", "可调用"],
+        hang: ["danger", "挂死"],
+        not_found: ["danger", "上游没有"],
+        no_entitlement: ["danger", "套餐无权限"],
+        rate_limited: ["amber", "限流中"],
+        error: ["amber", "报错"],
+      };
+      const render = (arr) => arr.map((x, idx) => {
+        const v = verifyMap[x.upstream_model];
+        const [tone, label] = v ? (VERDICT[v.verdict] || ["amber", v.verdict]) : ["gray", "未验证"];
+        const cell = v
+          ? `<span class="pill ${tone}" title="${esc(v.message || "")}">${v.ok ? "✅" : "⛔"} ${esc(label)}</span>`
+          : `<span class="pill gray" title="点上方「验证可调用」">未验证</span>`;
+        return `
         <tr class="${x.already_added ? "muted" : ""}">
           <td class="acts">${x.already_added
             ? '<span class="pill gray">已收录</span>'
-            : `<button class="mini primary" data-add-model="${idx}">＋ 添加</button>`}</td>
+            : `<button class="mini primary" data-add-model="${idx}" ${v && !v.ok ? 'disabled title="实测不可调用，别加"' : ""}>＋ 添加</button>`}</td>
           <td class="name"><b>${esc(x.suggested_model_id)}</b><span class="sub">${esc(x.upstream_model)}</span></td>
+          <td class="small">${cell}</td>
           <td class="small">${fmtK(x.discovered?.context_window ?? x.preset.context_window)}
             ${x.discovered_known ? '<span class="chip" title="来自供应商 API 实测">实测</span>' : '<span class="chip muted" title="没有实测数据，按经验值预估">预估</span>'}</td>
           <td class="small muted">${esc(x.preset.description)}</td>
           <td class="small">${x.preset.input_price ? "$" + x.preset.input_price + "/" + x.preset.output_price : "-"}</td>
-        </tr>`).join("");
+        </tr>`;
+      }).join("");
+      lastItems = items;
+      $("#mk-verify").disabled = false;
+      window.__mkRerender = () => renderList($("#mk-q") ? $("#mk-q").value : "");
       const renderList = (q) => {
         const filtered = q
           ? items.filter(x =>
@@ -1814,7 +1914,7 @@ async function openMarketModal(presetPid) {
                 .toLowerCase().includes(q.toLowerCase()))
           : items;
         $("#mk-rows").innerHTML = render(filtered) ||
-          `<tr><td colspan="5" class="muted">没有匹配「${esc(q)}」的模型</td></tr>`;
+          `<tr><td colspan="6" class="muted">没有匹配「${esc(q)}」的模型</td></tr>`;
         document.querySelectorAll("[data-add-model]").forEach(b => b.onclick = () => {
           const x = filtered[Number(b.dataset.addModel)];
           const p = x.preset;
@@ -1850,7 +1950,7 @@ async function openMarketModal(presetPid) {
           <span class="small muted" id="mk-count"></span>
         </div>
         <div class="tablewrap" style="max-height:55vh"><table>
-          <thead><tr><th class="acts">操作</th><th>模型</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th></tr></thead>
+          <thead><tr><th class="acts">操作</th><th>模型</th><th>可调用</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th></tr></thead>
           <tbody id="mk-rows"></tbody>
         </table></div>`;
       const updateCount = () => {
@@ -1865,6 +1965,14 @@ async function openMarketModal(presetPid) {
       };
       $("#mk-q").oninput = updateCount;
       updateCount();
+      // 目录不大就自动验证一遍（理由见 AUTO_VERIFY_MAX 的注释）
+      if (items.length <= AUTO_VERIFY_MAX) {
+        runVerify(items.map(x => x.upstream_model).slice(0, VERIFY_CAP));
+      } else {
+        $("#mk-verify").title =
+          `目录有 ${items.length} 个模型，超过自动验证上限 ${AUTO_VERIFY_MAX} 个`
+          + `——用搜索框缩小范围后点「验证可调用」`;
+      }
     } catch (err) { $("#mk-list").innerHTML = `<span class="pill red">${esc(err.message)}</span>`; }
   };
   // Handlers are wired before this trigger - clicking first would be a no-op.
@@ -1891,6 +1999,22 @@ function openAliasModal(name) {
       <label style="grid-column:1/-1">目标链（每行一个模型/别名，顺序即优先级）
         <textarea id="am-targets" rows="5" style="width:100%">${esc((a.targets || []).join("\n"))}</textarea></label>
       <label style="grid-column:1/-1">描述<input type="text" id="am-desc" value="${esc(a.description || "")}" placeholder="可空"></label>
+      <div style="grid-column:1/-1;border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 13px">
+        <div class="fmrow">
+          <label class="fmswitch" title="开启后所选模型永远排第一；关闭后越过首位，按正常权重排序">
+            <input type="checkbox" id="am-fm-on" ${a.front_model ? "checked" : ""}>
+            <span class="fmtrack"></span>
+            <span class="fmlabel">接口模型（首位）</span>
+          </label>
+          <select id="am-fm-model" style="flex:1;min-width:220px" ${a.front_model ? "" : "disabled"}>
+            ${(a.targets || []).map(t => `<option ${t === a.front_model ? "selected" : ""}>${esc(t)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="hint" style="margin-top:8px" id="am-fm-hint">
+          开启：所选模型<b>永远排第一</b>先回应，其余仍按能力权重排序——接口模型挂掉/超时才往下走。<br>
+          关闭：<b>越过首位</b>，完全按正常权重挑选，等价于不配这一项。
+        </div>
+      </div>
       <label>打分权重（可选，k=v 每行一个）<textarea id="am-weights" rows="3" style="width:100%"
         placeholder="coding=6&#10;tool_use=2">${esc(Object.entries(a.weights || {}).map(([k,v]) => `${k}=${v}`).join("\n"))}</textarea></label>
       <label>硬门槛 requires（可选，同上）<textarea id="am-requires" rows="3" style="width:100%"
@@ -1903,6 +2027,14 @@ function openAliasModal(name) {
   </div>`;
   modal.classList.add("show");
   $("#am-cancel").onclick = () => modal.classList.remove("show");
+  // 接口模型：关闭时下拉框禁用（保留上次选择，免得再开时重新挑），
+  // 保存时 off = 不送 front_model，服务端就回到纯权重排序。
+  const fmOn = $("#am-fm-on"), fmModel = $("#am-fm-model");
+  fmOn.onchange = () => {
+    fmModel.disabled = !fmOn.checked;
+    // 开着但没得选（目标是别名而非模型）时给个可见提示，别让人以为存上了
+    $("#am-fm-hint").style.color = fmOn.checked && !fmModel.value ? "var(--err, #e5534b)" : "";
+  };
   const parseKV = id => {
     const out = {};
     $(id).value.split("\n").forEach(line => {
@@ -1922,7 +2054,13 @@ function openAliasModal(name) {
       weights: parseKV("#am-weights"),
       requires: parseKV("#am-requires"),
     };
+    // 接口模型：只在开关打开时送。关闭 = 不送 = 越过首位用正常权重模型。
+    if (fmOn.checked && fmModel.value) payload.front_model = fmModel.value;
     if (!payload.name) { toast("别名不能为空", "err"); return; }
+    if (payload.front_model && !payload.targets.includes(payload.front_model)) {
+      toast("接口模型必须是目标链里的一员，否则它没有可用部署", "err");
+      return;
+    }
     try {
       const r = await api("/admin/aliases", { method: "POST", json: payload });
       if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
@@ -2318,7 +2456,10 @@ async function loadBurner() {
         <span class="small">${num(Math.round(a.burned_week))}/${num(Math.round(a.cap_week))}</span></div>
         <div class="muted small">余 ${num(Math.round(a.left_week))}</div></td>
       <td class="small">${b5}<div class="muted">周 ${bW}</div></td>
-      <td class="small">目标 ${num(a.target)}<div class="muted">成功 ${num(a.ok)} · 429 ${num(a.rate_limited)}</div></td>
+      <td class="small">目标 ${num(a.target)}<div class="muted">成功 ${num(a.ok)}
+        · <span title="与同实例其他账号抢每分钟配额，窗口滑过就恢复">限流 ${num(a.freq_hits ?? 0)}</span>
+        · <span title="专属池+通用池都扣完了，停靠到周刷新">额度用尽 ${num(a.quota_hits ?? 0)}</span>
+        ${a.starved ? '<span class="tag is-warn">已救济</span>' : ''}</div></td>
       <td class="small">${fmtK(a.tokens_in)} / ${fmtK(a.tokens_out)}</td></tr>`;
   }).join("");
   const fields = (d.form_fields || []).map(k => burnerField(k, (d.config || {})[k])).join("");
@@ -2339,6 +2480,11 @@ async function loadBurner() {
             d.flash_lite_ok ? "ok" : "err")}
     </div>
     <h4 class="sec">每账号窗口账</h4>
+    <div class="note">商汤把两种完全不同的情况都返回 <code>429</code>，下表已拆开：
+      <b>限流</b>＝<code>tpm exhausted</code>，跟同实例其他账号抢每分钟配额，窗口滑过去就自己恢复，
+      <b>不是号坏了</b>；<b>额度用尽</b>＝<code>entitlement exhausted</code>，专属池+通用池都扣完了，
+      会停靠到周刷新。看到某个号「一直限流」，是它在饿——网关会给饿超过 5 分钟的号临时借一点并发
+      （下表显示「已救济」），成功一次就收回。</div>
     <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 窗口</th><th>本周</th>
       <th>下一边界</th><th>并发 / 结果</th><th>Tokens 入/出</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="6" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>

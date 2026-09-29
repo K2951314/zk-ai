@@ -34,7 +34,7 @@ from app.credentials.health import CredentialHealthTracker, Transition
 from app.credentials.rotation import get_rotation
 from app.models.credential import CredentialRuntime, CredentialStatus
 from app.models.provider import CredentialConfig, ProviderConfig
-from app.retry.classifier import ErrorInfo
+from app.retry.classifier import ErrorClass, ErrorInfo
 from app.routing.limits import RateLimiter
 
 logger = get_logger("credentials.pool")
@@ -317,6 +317,29 @@ class CredentialPool:
                 credential.in_flight -= 1
             return self.tracker.on_success(credential, latency_ms=latency_ms)
 
+    def effective_throttle_scope(self, credential_id: str, kind: str) -> str:
+        """The throttle scope that *actually* applies to one credential.
+
+        The policy table is an operator intent; this is what that intent means
+        for a specific key. Today the only reality check is that ``account``
+        scope needs an ``account-*`` tag to identify siblings - a key with no
+        tag cannot prove it shares a bucket with anyone, so the scope degrades
+        to ``credential``.
+
+        Both the cooldown parking and the scheduler's failover decision go
+        through this one method, so they cannot drift apart: a request must not
+        fail over because the scheduler thinks a bucket is shared while the pool
+        decides it is not (or the reverse).
+        """
+        with self._lock:
+            credential = self._credentials.get(credential_id)
+        if credential is None:
+            return self.policy.throttle_scope(kind)
+        scope = self.policy.throttle_scope(kind)
+        if scope == "account" and self._account_tag_of(credential) is None:
+            return "credential"
+        return scope
+
     def report_failure(self, credential_id: str, info: ErrorInfo) -> Transition | None:
         with self._lock:
             credential = self._credentials.get(credential_id)
@@ -324,7 +347,79 @@ class CredentialPool:
                 return None
             if credential.in_flight > 0:
                 credential.in_flight -= 1
-            return self.tracker.on_failure(credential, info)
+            transition = self.tracker.on_failure(credential, info)
+            self._park_throttled_siblings(credential, info, transition)
+            return transition
+
+    def _park_throttled_siblings(
+        self,
+        credential: CredentialRuntime,
+        info: ErrorInfo,
+        transition: Transition | None,
+    ) -> None:
+        """Spread a 429's cooldown to the credentials that share its bucket.
+
+        Why this exists: a per-minute limiter that is counted per *account* (or
+        across a whole provider) makes sibling keys useless for as long as the
+        window lasts. Trying them anyway is pure waste - the request would come
+        back with the same 429 - and on SenseNova it measured 19.7% of all
+        attempts spinning against one shared bucket. Parking them here (rather
+        than in the scheduler) also fixes *subsequent* requests: the pool is the
+        only component every path asks for keys.
+
+        Scope comes from ``CooldownPolicy.throttle_scopes``:
+
+        ``credential``  do nothing - only the reported key parks (the default for
+                        frequency limits, which providers usually count per key).
+        ``account``     park keys of the same provider sharing an ``account-*`` tag.
+        ``provider``    park the whole provider.
+
+        Callers hold the pool lock. Only *healthy* siblings are parked: a key that
+        is DISABLED or UNHEALTHY is already out, and overwriting its reason would
+        destroy the operator's audit trail.
+        """
+        if transition is None or transition.cooldown_seconds <= 0:
+            return
+        if info.error_class is not ErrorClass.THROTTLE:
+            return
+        scope = self.effective_throttle_scope(credential.id, info.throttle_kind.value)
+        if scope == "credential":
+            return
+
+        until = transition.cooldown_until
+        if until is None:
+            return
+        account = self._account_tag_of(credential)
+        parked = 0
+        for sibling in self.for_provider(credential.provider_id):
+            if sibling.id == credential.id:
+                continue
+            if scope == "account" and self._account_tag_of(sibling) != account:
+                continue
+            if sibling.status is not CredentialStatus.HEALTHY:
+                continue
+            sibling.status = CredentialStatus.COOLDOWN
+            sibling.cooldown_until = until
+            sibling.disabled_reason = (
+                "同供应商限流冷却中" if scope == "provider" else "同账号限流冷却中"
+            )
+            parked += 1
+        if parked:
+            logger.info(
+                "429 (%s, scope=%s) parked %d sibling credential(s) of %s for %.1fs",
+                info.throttle_kind.value,
+                scope,
+                parked,
+                credential.provider_id,
+                transition.cooldown_seconds,
+            )
+
+    @staticmethod
+    def _account_tag_of(credential: CredentialRuntime) -> str | None:
+        for tag in credential.tags or ():
+            if isinstance(tag, str) and tag.startswith("account-"):
+                return tag
+        return None
 
     # ------------------------------------------------------------------ #
     # Administration
