@@ -172,6 +172,57 @@ def test_absolute_total_cap_parks_account_forever() -> None:
     assert "绝对上限" in acct.park_reason
 
 
+# ---------------------------------------------------------------------------
+# 安全系数提示不得在默认值上自相矛盾（2026-09-30 修）
+# ---------------------------------------------------------------------------
+
+
+def test_default_margin_does_not_trip_its_own_warning() -> None:
+    """默认 0.9 不许触发「已高于默认」提示——否则每次启动都刷一句废话。
+
+    旧版判据写 ``> 0.6``，而默认值就是 0.9，于是自相矛盾：日志说
+    「安全系数 0.9 已高于默认 0.9」。更早一版建议「保持默认 0.45 或更低」，
+    而默认值早就改成 0.9 了。**自相矛盾的提示等于没有提示**——运营者学会
+    忽略它，真正该警醒的那次就被淹了。
+    """
+    assert burn_sensenova.DEFAULT_SAFETY_MARGIN == 0.9
+    assert burn_sensenova.is_above_default_margin(
+        burn_sensenova.DEFAULT_SAFETY_MARGIN) is False
+
+
+def test_over_default_margin_is_flagged() -> None:
+    """真调到默认值以上要报警：缓冲带更薄，烧穿风险实打实升高。"""
+    for margin in (0.91, 0.95, 1.0):
+        assert burn_sensenova.is_above_default_margin(margin) is True
+
+
+def test_under_default_margin_stays_quiet() -> None:
+    """比默认更保守不该被唠叨（0.45 只是少烧，不是风险）。"""
+    for margin in (0.45, 0.6, 0.89):
+        assert burn_sensenova.is_above_default_margin(margin) is False
+
+
+def test_the_note_names_the_numbers_the_operator_needs() -> None:
+    """提示必须显示实际值和默认值，不能只说「太高了」。"""
+    note = burn_sensenova.above_default_margin_note(0.95)
+    assert "0.95" in note
+    assert "0.9" in note
+    assert "缓冲带" in note
+
+
+def test_console_fallback_margin_matches_the_burner() -> None:
+    """控制台的兜底系数必须和消耗器默认同一个数。
+
+    否则「YAML 与账本都没提系数」时，控制台按自己的数画熔断线、消耗器按自己
+    的数跑——同一块屏幕上两个数，运营者无从判断该信哪个。
+    """
+    from app.services import burner_service
+
+    burner_default = burn_sensenova.DEFAULT_SAFETY_MARGIN
+    console_default = burner_service.BurnerStatus().safety_margin
+    assert console_default == burner_default, (
+        f"控制台兜底 {console_default} != 消耗器默认 {burner_default}"
+    )
 def test_default_margin_is_conservative() -> None:
     args = parse_args([])
     # 2026-09-24 从 0.45 提到 0.9。0.45 是费率不准时代的折扣（估算可能低估 2 倍），

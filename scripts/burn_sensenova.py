@@ -18,8 +18,9 @@
     默认费率取实测区间下沿，按烧速推算熔断线物理上永远触不到 → 专属池
     被烧穿后无感溢出扣通用池（2026-09 实测事故：26h 烧 ≈13 万积分/账号，
     真实费率在区间上沿时周实扣正好贴近官方 60 万上限）
-  - 安全系数默认 0.45：内建 2 倍费率不确定性（实测区间 出333~720，估算
-    取 360），估算口径熔断时实扣也不超过官方上限的一半
+  - 安全系数默认 0.9（2026-09-30 从 0.45 提上来）：0.45 是费率不准时代的折扣，
+    而费率已按控制台真值校准（09-28 按 Ingulf/K02 实读数重校，偏差 8.3% 已修进
+    费率本身），继续用 0.45 等于每个账号每周白丢约 33 万回赠积分。仍留 10% 缓冲带
   - 绝对上限 --pool-total-credits：账号累计（持久化账本口径）烧到即永久
     停靠，防赠送池过期后空转。0 = 关闭
   宁可少烧（少转换），绝不溢出（烧 K3 口粮）。
@@ -133,6 +134,28 @@ def is_quota_exhausted(body: str) -> bool:
 
 WIN_5H = 5 * 3600
 WIN_WEEK = 7 * 86400
+#: 安全系数默认值。熔断线 = 官方上限 × 该系数，0.9 = 5h 5.4 万 / 周 54 万，留 10% 缓冲。
+#: 单独抽成常量是因为它有三个消费者（argparse 默认值、启动提示的判据、控制台的
+#: 兜底默认值）——写死三份就必然漂移，2026-09-30 已经漂了一次：控制台还按 0.45 画
+#: 熔断线，消耗器按 0.9 跑，同一块屏幕上两个数。
+DEFAULT_SAFETY_MARGIN = 0.9
+
+
+def is_above_default_margin(margin: float) -> bool:
+    """安全系数是否被调到了默认值以上（缓冲带因此比设计更薄）。
+
+    判据必须是「严格大于默认」而不是某个历史魔法数（旧版写 > 0.6，而默认值
+    0.9 早就超过它，于是每次启动都刷一句自相矛盾的提示）。**凡是拿默认值当
+    阈值的比较，阈值只能引用同一个常量。"""
+    return float(margin) > DEFAULT_SAFETY_MARGIN
+
+
+def above_default_margin_note(margin: float) -> str:
+    """高于默认安全系数时的提示文案。"""
+    return (f"提示：安全系数 {margin:g} 已高于默认 {DEFAULT_SAFETY_MARGIN:g}，"
+            f"缓冲带只剩 {(1 - margin) * 100:.0f}%。万一实际费率比估算再偏一截，"
+            "专属池可能被烧穿、静默溢出扣通用池（kimi-k3 的口粮）。确认过控制台"
+            "实扣与估算的偏差再往上提；不确定就退回默认值")
 
 
 # ---------------------------------------------------------------------------
@@ -1452,7 +1475,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--weekly-credits", type=float, default=600000,
                    help="每账号 Flash-lite 专属池每周积分上限（官方 60 万；"
                         "若控制台显示的实际规模更小，请按控制台填）")
-    opt("--safety-margin", type=float, default=0.9,
+    opt("--safety-margin", type=float, default=DEFAULT_SAFETY_MARGIN,
                    help="预算安全系数（熔断线 = 上限 × 该系数）。2026-09-24 从 0.45 "
                         "提到 0.9：0.45 是费率不准时代的保守折扣（估算费率可能低估 2 "
                         "倍），而费率已按控制台真值校准到偏差约 3%%，继续用 0.45 只会让每个"
@@ -1632,9 +1655,8 @@ def main(argv: list[str] | None = None) -> int:
         f"周固定窗口 {burner.capweek:.0f} 积分（官方 60 万 × {args.safety_margin}，"
         f"锚点 {args.week_anchor}，本窗口 {anchor_str} 起，下边界 {next_str}）"
     )
-    if args.safety_margin > 0.6:
-        burner.log("提示：安全系数 > 0.6 时，若实际费率处在实测区间上沿（≈估算 2 倍），"
-                   "专属池仍可能被烧穿溢出——2026-09 事故的根因。保持默认 0.45 或更低", "WARN")
+    if is_above_default_margin(args.safety_margin):
+        burner.log(above_default_margin_note(args.safety_margin), "WARN")
     if burner.cap_total > 0:
         burner.log(f"绝对上限：每账号累计 ≈{burner.cap_total:.0f} 积分，到线永久停靠")
     burner.log(
