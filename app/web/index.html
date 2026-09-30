@@ -1924,12 +1924,12 @@ function openModelModal(modelId, prefill) {
                      (k === "reasoning" && facts.reasoning !== undefined);
       if (locked) {
         const known = k === "vision" ? facts.vision_input : facts.reasoning;
-        return `<label>${CAP_ZH[k]} ${k}
+        return `<label>${CAP_ZH[k]}
           <input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}" disabled
             title="供应商已${known ? "支持" : "不支持"}，此项由实测决定">
           <span class="chip muted">实测${known ? "支持" : "不支持"}</span></label>`;
       }
-      return `<label>${CAP_ZH[k]} ${k}<input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}"></label>`;
+      return `<label>${CAP_ZH[k]}<input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}"></label>`;
     }).join("")}
     </div>
     ${facts.reasoning_effort?.length ? `
