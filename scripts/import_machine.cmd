@@ -27,12 +27,15 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 set "ARCHIVE=%~1"
+REM The Python helper prints the Chinese prompt and reads stdin; for /f takes
+REM the value back into the batch variable. No English prompt string here
+REM (AGENTS.md: .cmd must stay pure ASCII).
 if "%ARCHIVE%"=="" (
   echo.
 .venv\Scripts\python.exe scripts\start_msg.py drag-zip
   echo.
-.venv\Scripts\python.exe scripts\start_msg.py prompt-zip
-  set /p "ARCHIVE=archive path: "
+set "ARCHIVE="
+for /f "usebackq delims=" %%a in (`.venv\Scripts\python.exe scripts\start_msg.py ask-zip`) do set "ARCHIVE=%%a"
 )
 REM Drag-and-drop wraps paths in quotes; strip them.
 set "ARCHIVE=%ARCHIVE:"=%"
@@ -57,8 +60,7 @@ goto :importfailed
 echo.
 .venv\Scripts\python.exe scripts\start_msg.py overwrite-guard
 set "ANSWER="
-.venv\Scripts\python.exe scripts\start_msg.py prompt-overwrite
-set /p "ANSWER=   Retry with --overwrite? current files are backed up first [y/N]: "
+for /f "usebackq delims=" %%a in (`.venv\Scripts\python.exe scripts\start_msg.py ask-overwrite`) do set "ANSWER=%%a"
 if /i not "%ANSWER%"=="y" goto :importfailed
 echo.
 ".venv\Scripts\python.exe" scripts\migrate.py import "%ARCHIVE%" --overwrite

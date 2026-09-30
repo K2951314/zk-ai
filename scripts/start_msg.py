@@ -115,7 +115,11 @@ BANNER = {
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print('用法: start_msg.py <提示键|banner> [--mode ...] [--port P] [--host H]',
+        print('用法: start_msg.py <提示键|banner|ask>',
+              file=sys.stderr)
+        print('      ask-zip → 打印中文提示并读取路径',
+              file=sys.stderr)
+        print('      ask-overwrite → 打印中文提示并读取 y/N',
               file=sys.stderr)
         return 2
     key = argv[0]
@@ -128,19 +132,69 @@ def main(argv: list[str]) -> int:
             print("  " + line.format(port=opts["--port"], host=opts["--host"]))
         print()
         return 0
+    if key.startswith("ask-"):
+        return _ask(key[len("ask-"):], argv)
     entry = MESSAGES.get(key)
     if entry is None:
         print("未知的提示键: " + key, file=sys.stderr)
         return 2
+    _show(entry)
+    return 0
+
+
+def _show(entry: tuple) -> None:
+    """渲染一条提示：标题 + 正文 + 下一步。 main() 与 _ask() 共用。"""
     title, body, hint = entry
     print()
     print("  " + title)
     for line in body:
         print("          " + line)
     if hint:
-        print("          下一步：" + hint)
+        print("          " + '下一步：' + hint)
     print()
+
+
+def _prompt_to_stderr(entry: tuple) -> None:
+    """Like _show() but writes to stderr: stdout is reserved for the
+    single line `for /f` reads back, so nothing else may land there."""
+    _title, body, hint = entry
+    print(file=sys.stderr)
+    print('  ' + _title, file=sys.stderr)
+    for _line in body:
+        print('          ' + _line, file=sys.stderr)
+    if hint:
+        print('          ' + hint, file=sys.stderr)
+
+
+def _ask(what: str, argv: list[str]) -> int:
+    """打印中文提示并读一行键盘输入，把结果写到 stdout。
+
+    为什么不让 .cmd 用 set /p：AGENTS.md 要求 .cmd 纯 ASCII，而 set /p 的
+    提示串是给人看的（archive path / Retry with --overwrite）。改成这里收
+    键盘，.cmd 里就一个英文字母都不剩了。.cmd 用 for /f 拿回去。
+    """
+    if what == "zip":
+        _prompt_to_stderr(MESSAGES["prompt-zip"])
+        prompt = '路径 > '
+    elif what == "overwrite":
+        _prompt_to_stderr(MESSAGES["prompt-overwrite"])
+        prompt = ' [y/N] > '
+    else:
+        print('未知的读取项: ' + what, file=sys.stderr)
+        return 2
+    try:
+        # The prompt MUST go to stderr: `for /f` captures stdout, and a prompt
+        # mixed into stdout would make the batch variable hold
+        # 'path > D:\temp\x.zip' instead of just the path.
+        print(prompt, end="", file=sys.stderr)
+        sys.stderr.flush()
+        answer = input("").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 1
+    print(answer)   # .cmd 用 for /f 读回这一行
     return 0
+
 
 
 if __name__ == "__main__":
