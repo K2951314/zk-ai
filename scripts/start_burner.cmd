@@ -13,7 +13,7 @@ REM
 REM  This file is intentionally pure ASCII + CRLF. Batch files containing
 REM  non-ASCII text can be misparsed by cmd.exe (byte-offset desync), which
 REM  once created junk files and skipped lines. See start_gateway.cmd.
-REM  Chinese user-facing messages live in scripts/burn_sensenova.py.
+REM  Chinese user-facing messages live in scripts/start_msg.py.
 REM
 REM  Usage:
 REM     scripts\start_burner.cmd                       (default settings)
@@ -36,8 +36,8 @@ if exist ".venv\Scripts\python.exe" (
 if defined VENV_OK goto :envready
 
 echo.
-echo   [INFO ] Python environment .venv is missing or broken.
-echo           Rebuilding with "uv sync" - downloads Python and packages...
+.venv\Scripts\python.exe scripts\start_msg.py venv-broken-burner
+.venv\Scripts\python.exe scripts\start_msg.py rebuilding-burner
 echo.
 %WHERE% uv >nul 2>&1
 if errorlevel 1 goto :nouv
@@ -45,38 +45,31 @@ if errorlevel 1 goto :nouv
 call uv sync
 if errorlevel 1 (
   echo.
-  echo   [ERROR] uv sync failed - see the messages above.
+.venv\Scripts\python.exe scripts\start_msg.py sync-failed
   echo.
   pause
   goto :end
 )
 echo.
-echo   .venv rebuilt.
+.venv\Scripts\python.exe scripts\start_msg.py venv-rebuilt
 goto :envready
 
 :nouv
-echo   [ERROR] uv is not installed. Install it once, in PowerShell:
-echo.
+.venv\Scripts\python.exe scripts\start_msg.py uv-missing
 echo       irm https://astral.sh/uv/install.ps1 ^| iex
 echo.
-echo   Then close this window, reopen it (so PATH refreshes) and start again.
+.venv\Scripts\python.exe scripts\start_msg.py uv-reopen
 echo.
 pause
 goto :end
 
 :envready
 echo.
-echo   Starting burner in the system tray (no window).
-echo   - Tray : bottom-right corner, green=running / blue=stopped
-echo   - Log  : data\burn_sensenova.log
-echo   - Stop : right-click tray icon - Quit
-echo.
+.venv\Scripts\python.exe scripts\start_msg.py banner --mode burner
 .venv\Scripts\python.exe scripts\launch_hidden.py burner %*
 if errorlevel 1 (
   echo.
-  echo   [ERROR] The tray process could not start, so no icon and no burner.
-  echo           Logs: data\tray_burner.log  and  data\burn_sensenova.log
-  echo           If it says ModuleNotFoundError, run:  uv sync
+  .venv\Scripts\python.exe scripts\start_msg.py tray-failed-burner
   echo.
   pause
 )

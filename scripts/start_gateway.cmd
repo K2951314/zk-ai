@@ -49,7 +49,7 @@ REM ---- First run: materialise .env / config templates, then tell what to fill 
 .venv\Scripts\python.exe scripts\first_run.py
 if errorlevel 1 (
   echo.
-  echo   Fill in .env as printed above, then run this script again.
+.venv\Scripts\python.exe scripts\start_msg.py env-fill
   pause
   goto :end
 )
@@ -63,34 +63,30 @@ if exist ".venv\Scripts\python.exe" (
 if defined VENV_OK goto :envready
 
 echo.
-echo   [INFO ] Python environment .venv is missing or broken.
-echo           A .venv copied from another machine never works; it will be
-echo           rebuilt here. Python 3.12+ is downloaded automatically.
+.venv\Scripts\python.exe scripts\start_msg.py venv-broken
 echo.
 %WHERE% uv >nul 2>&1
 if errorlevel 1 goto :nouv
 
-echo   Rebuilding with "uv sync" - downloads Python and packages, please wait...
+.venv\Scripts\python.exe scripts\start_msg.py rebuilding
 echo.
 call uv sync
 if errorlevel 1 (
   echo.
-  echo   [ERROR] uv sync failed - see the messages above.
+.venv\Scripts\python.exe scripts\start_msg.py sync-failed
   echo.
   pause
   goto :end
 )
 echo.
-echo   .venv rebuilt.
+.venv\Scripts\python.exe scripts\start_msg.py venv-rebuilt
 goto :envready
 
 :nouv
-echo   [ERROR] uv is not installed. Install it once, in PowerShell:
-echo.
+.venv\Scripts\python.exe scripts\start_msg.py uv-missing
 echo       irm https://astral.sh/uv/install.ps1 ^| iex
 echo.
-echo   Then close this window, reopen it (so PATH refreshes) and start again.
-echo   No separate Python installation is needed.
+.venv\Scripts\python.exe scripts\start_msg.py uv-reopen
 echo.
 pause
 goto :end
@@ -105,13 +101,7 @@ goto :failed
 
 :start
 echo.
-echo   ZK-AI gateway starting in the system tray (no window).
-echo   - Port : %ZKAI_PORT%   (CLI arg wins over .env ZKAI_PORT, then default 8317)
-echo   - Host : %ZKAI_HOST%   (0.0.0.0 = reachable from other machines on the LAN)
-echo   - Tray : bottom-right corner, green=running / blue=stopped
-echo   - Stop : right-click tray icon - Quit
-echo   - UI   : your browser opens automatically, already signed in with the
-echo           admin token from .env (no paste needed).
+.venv\Scripts\python.exe scripts\start_msg.py banner --mode gateway --port %ZKAI_PORT% --host %ZKAI_HOST%
 echo.
 REM launch_hidden.py spawns pythonw with NO console window; a bare
 REM `start ... pythonw.exe` inherits the batch console and leaves a minimized
@@ -130,29 +120,25 @@ goto :end
 
 :trayfailed
 echo.
-echo   [ERROR] The tray process could not start, so no icon and no gateway.
-echo           Logs: data\tray_gateway.log  and  data\gateway.log
-echo           If it says ModuleNotFoundError, run:  uv sync
+.venv\Scripts\python.exe scripts\start_msg.py tray-failed
 echo.
 pause
 goto :end
 
 :nolisten
 echo.
-echo   [ERROR] The tray is running but nothing answered on port %ZKAI_PORT%.
-echo           Server log: data\gateway.log
-echo           Right-click the tray icon - View log, or re-run this script.
+.venv\Scripts\python.exe scripts\start_msg.py no-listen
 echo.
 pause
 goto :end
 
 :busy
-echo   Startup cancelled.
+.venv\Scripts\python.exe scripts\start_msg.py cancelled
 pause
 goto :end
 
 :failed
-echo   Startup cancelled.
+.venv\Scripts\python.exe scripts\start_msg.py cancelled
 pause
 goto :end
 
