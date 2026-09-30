@@ -20,6 +20,7 @@ import pytest
 from app.core.config import PROJECT_ROOT
 
 _WEB = PROJECT_ROOT / "app" / "web"
+_APP = PROJECT_ROOT / "app"   # 后端用户可见英文的扫描范围
 
 # 允许出现的英文片段（技术名词 / 机器契约 / 代码示例）
 ALLOWED_SNIPPETS = (
@@ -530,3 +531,150 @@ def test_every_modal_close_button_is_actually_bound() -> None:
 
     for btn in ("pf-save", "ak-save", "mm-save", "am-save"):
         assert f'$("#{btn}").onclick' in js, f"{btn} 保存按钮没有绑定"
+
+
+# ---------------------------------------------------------------------------
+# 用户可见英文的常驻守卫（2026-09-30 补；两次漏网换来的）
+# ---------------------------------------------------------------------------
+
+#: 后端会把这些字符串交给前端显示：经 snapshot() 进控制台凭据池页面，或经 API
+#: 响应进 toast / 详情行。``reason`` 是这次漏网的直接原因——disabled_reason 与
+#: Transition.reason 一路显示英文（auto-recovered / cooldown expired），而当时的
+#: 扫描只覆盖 app/web，前端当然查不出后端的问题。
+_USER_VALUE_KEYS = (
+    "message",
+    "detail",
+    "reason",
+    "hint",
+    "label",
+    "prompt",
+)
+
+# 两种写法都认：赋值 ``reason = "..."``（允许一个下划线前缀，故
+# disabled_reason 也命中）与字典 ``{"message": "..."}``。
+_PREFIXED = r"(?:[A-Za-z0-9]+_)?"
+_NEG = r"(?<![A-Za-z0-9_])"
+_Q = chr(34) + chr(39)          # both quote characters, immune to shell mangling
+_VAL = r"([^" + _Q + "]{10,})"
+_DQUOTE = chr(34)
+_ASSIGN_RX = re.compile(
+    _NEG + _PREFIXED + r"(?:message|detail|reason|hint|label|prompt)"
+    + r"\s*[:=]\s*[f]?[" + _Q + "]"
+    + _VAL + "[" + _Q + "]"
+)
+
+_DICT_RX = re.compile(
+    r"(?:\"message\"|\"detail\"|\"reason\"|\"hint\"|\"label\"|\"prompt\")"
+    + r"\s*:\s*[f]?[" + _Q + "]"
+    + _VAL + "[" + _Q + "]"
+)
+
+# 技术契约白名单：错误类型枚举、模型 id、协议串、牌价单位——机器契约，不是给人的。
+_EN_ALLOWED_SUBSTR = (
+    "timeout",
+    "rate_limit_error",
+    "quota_exceeded_error",
+    "authentication_error",
+    "permission_denied",
+    "connection_error",
+    "model_not_found",
+    "invalid_model",
+    "context_length_exceeded",
+    "no_available_credential",
+    "upstream_error",
+    "flash-lite",
+    "kimi-k3",
+    "glm-",
+    "deepseek-",
+    "sensenova-",
+    "qwen",
+    "Mtok",
+    "/v1/",
+    "Bearer",
+    "Authorization",
+    "JSON",
+    "YAML",
+    "HTTP",
+    "ZKAI_",
+    "SENSENOVA_",
+    "NVIDIA_",
+    "MODELSCOPE_",
+    "zk-",
+)
+
+# 两个以上空格分隔的英文词 = 读起来像句子（允许小写开头：health check passed）
+_CJK_RX = re.compile(r"[" + chr(0x4E00) + "-" + chr(0x9FFF) + "]")
+_EN_SENTENCE_RX = re.compile(r"[A-Za-z]{2,}(?: [A-Za-z0-9'(),.%/:;_-]+){1,7}")
+
+
+def _english_user_values(source: str) -> list[tuple[int, str]]:
+    """(行号, 文案)：赋给用户可见键、且读起来是英文句子的字符串。"""
+    hits: list[tuple[int, str]] = []
+    for lineno, line in enumerate(source.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for match in list(_ASSIGN_RX.finditer(line)) + list(_DICT_RX.finditer(line)):
+            value = match.group(1)
+            if _CJK_RX.search(value):
+                continue  # 中文为主体，夹带的英文是技术名词，不是给人读的句子
+            if not _EN_SENTENCE_RX.search(value):
+                continue
+            if any(allowed in value for allowed in _EN_ALLOWED_SUBSTR):
+                continue
+            hits.append((lineno, value))
+    return hits
+
+
+def test_backend_never_hands_the_console_an_english_sentence() -> None:
+    """后端不许把英文句子交给前端显示。
+
+    守的是**路径**而不是某一处文案：值从 app/**/*.py 赋给 message/detail/reason
+    等键，经 snapshot() 或 API 响应直达控制台页面。2026-09-30 的漏网正是这样：
+    disabled_reason 显示 auto-recovered、cooldown expired，运营者天天看，而当时的
+    扫描只覆盖 app/web——前端永远查不出后端的问题。
+
+    两类合法英文被排除：① 中文句子夹带的技术名词（API Key、POST /admin/...）；
+    ② 错误类型枚举、模型 id、协议串等机器契约。
+    """
+    offenders: list[str] = []
+    for path in sorted(_APP.rglob("*.py")):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):  # pragma: no cover - 非源码文件
+            continue
+        for lineno, value in _english_user_values(source):
+            loc = path.relative_to(PROJECT_ROOT).as_posix()
+            offenders.append(f"{loc}:{lineno} {value!r}")
+    assert not offenders, (
+        "这些地方会把英文句子显示给运营者：" + chr(10) + chr(10).join(offenders)
+    )
+
+
+def test_the_guard_actually_scans_rather_than_always_passing() -> None:
+    """守卫必须真的在扫，不能恒真。
+
+    植一句英文进去，扫描器要报出来。否则以后有人把正则改坏了，测试仍然全绿——
+    这条守卫就成了摆设。本项目已经为「规则写进文档不等于会执行」付过代价
+    （AGENTS.md 有对应条目）。
+    """
+    planted = chr(10).join([
+        "def f():",
+        "    return {" + chr(34) + "message" + chr(34)
+                + ": " + chr(34) + "Connection refused by upstream" + chr(34) + "},"
+    ])
+    hits = _english_user_values(planted)
+    assert hits, "扫描器抓不到明显该抓的英文句子，它已经坏了"
+    assert "Connection refused by upstream" in hits[0][1]
+
+
+def test_the_guard_ignores_chinese_prose_and_machine_contracts() -> None:
+    """中文句子夹带技术名词、以及纯错误类型枚举，都不算英文文案。
+
+    否则测试会被 API Key / POST /admin 刷红，运营者学会忽略它，真正该抓的那次
+    就被淹了——和自相矛盾的提示是同一类失败。
+    """
+    planted = chr(10).join([
+        'def f():',
+        '    return {\"message\": \"API Key 缿失或无效\", \"reason\": \"rate_limit_error\"}',
+    ])
+    assert _english_user_values(planted) == []
