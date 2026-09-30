@@ -2079,6 +2079,7 @@ async function openMarketModal(presetPid) {
       const VERDICT = {
         ok: ["healthy", "可调用"],
         hang: ["danger", "挂死"],
+        timeout: ["danger", "响应超时"],
         not_found: ["danger", "上游没有"],
         no_entitlement: ["danger", "套餐无权限"],
         rate_limited: ["amber", "限流中"],

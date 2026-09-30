@@ -534,6 +534,39 @@ def test_market_add_model_saves_back_into_the_market() -> None:
     assert 'closeModal("#model-modal")' in body
 
 
+def test_marketplace_verdict_labels_cover_the_backend_vocabulary() -> None:
+    """后端可能返回的每种 verdict，前端都得有中文标签。
+
+    2026-09-30 实测漏网：``_probe_verdict`` 会返回 ``timeout``（挂死），而
+    VERDICT 映射表里没有这个键——「验证可调用」就把 ``timeout`` 这个英文原词
+    直接渲染给运营者。挂死恰恰是这页最重要的一条结论（NVIDIA 的 glm-5.3
+    就是这样每次白等 121 秒），结论越重越不能裸奔英文。
+
+    词表从后端源码推导，不手抄一份清单：以后谁在 _probe_verdict 里新增一种
+    结论，这个测试立刻撞上。和 BURNER_LABELS 加参数自动撞上是同一个套路。
+    """
+    backend = (PROJECT_ROOT / "app" / "api" / "admin.py").read_text(encoding="utf-8")
+    produced = set(re.findall(r'return "([a-z_]+)"', backend))
+    produced |= set(re.findall(r'verdict": "([a-z_]+)"', backend))
+
+    js = _script(_html("index.html"))
+    block = re.search(r"const VERDICT = \{(.*?)\n      \};", js, re.DOTALL)
+    assert block, "模型市场的 VERDICT 映射表没找到"
+    labelled = set(re.findall(r"^\s*([a-z_]+):\s*\[", block.group(1), re.MULTILINE))
+
+    missing = sorted(produced - labelled)
+    assert not missing, f"这些 verdict 在前端还是裸英文：{missing}"
+    # 每行都必须是 [颜色, 中文标签] 的形状。逐个拼正则引号太多，会被
+    # shell/编辑器各种吃掉，所以按行拆开比。
+    for line in block.group(1).splitlines():
+        verdict = re.match(r"\s*([a-z_]+):", line)
+        if verdict is None or verdict.group(1) not in produced:
+            continue
+        assert re.search(r'"([^"]+)"', line), (
+            f"{verdict.group(1)} 这一行不是 [颜色, 中文标签] 的形状"
+        )
+
+
 def test_every_modal_close_button_is_actually_bound() -> None:
     """每个弹窗的关闭/取消按钮都要真的绑上 onclick。
 
