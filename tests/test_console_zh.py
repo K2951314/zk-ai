@@ -566,22 +566,26 @@ _USER_VALUE_KEYS = (
     "prompt",
 )
 
-# 两种写法都认：赋值 ``reason = "..."``（允许一个下划线前缀，故
-# disabled_reason 也命中）与字典 ``{"message": "..."}``。
+# 两种写法都认: 赋值 reason = "..."（允许一个下划线前缀，故
+# disabled_reason 也命中）与字典 {"message": "..."}。
+#
+# ⚡正则由上面元组推导而来，不要在正则里再手写一遍。
+# 2026-09-30 之前写死两份，新加键时漏改一处就静默忽略。
 _PREFIXED = r"(?:[A-Za-z0-9]+_)?"
 _NEG = r"(?<![A-Za-z0-9_])"
 _Q = chr(34) + chr(39)          # both quote characters, immune to shell mangling
 _VAL = r"([^" + _Q + "]{10,})"
 _DQUOTE = chr(34)
+_KEYS_ALT = "|".join(_USER_VALUE_KEYS)
+_KEYS_QUOTED = "|".join(chr(34) + k + chr(92) + chr(34) for k in _USER_VALUE_KEYS)
 _ASSIGN_RX = re.compile(
-    _NEG + _PREFIXED + r"(?:message|detail|reason|hint|label|prompt)"
-    + r"\s*[:=]\s*[f]?[" + _Q + "]"
+    _NEG + _PREFIXED + "(?:" + _KEYS_ALT + ")"
+    + chr(92) + "s*[:=]" + chr(92) + "s*[f]?[" + _Q + "]"
     + _VAL + "[" + _Q + "]"
 )
-
 _DICT_RX = re.compile(
-    r"(?:\"message\"|\"detail\"|\"reason\"|\"hint\"|\"label\"|\"prompt\")"
-    + r"\s*:\s*[f]?[" + _Q + "]"
+    "(?:" + _KEYS_QUOTED + ")"
+    + chr(92) + "s*:" + chr(92) + "s*[f]?[" + _Q + "]"
     + _VAL + "[" + _Q + "]"
 )
 
@@ -694,3 +698,33 @@ def test_the_guard_ignores_chinese_prose_and_machine_contracts() -> None:
         '    return {\"message\": \"API Key 缿失或无效\", \"reason\": \"rate_limit_error\"}',
     ])
     assert _english_user_values(planted) == []
+
+
+def test_the_guard_regexes_are_derived_from_the_key_tuple() -> None:
+    """正则必须由键名元组推导，不允许再把键名写死一遍。
+
+    2026-09-30 之前：键名清单在元组里一份、每个正则里又各写一遍。
+    结果新加一个键时漏改元组那处，正则还是旧的，新键静默忽略。
+
+    本测试保证这两个正则的口径覆盖到元组里的每个键。"""
+    for rx in (_ASSIGN_RX, _DICT_RX):
+        for key in _USER_VALUE_KEYS:
+            assert key in rx.pattern, (
+                f"{rx.pattern!r} 里没有 {key!r}，正则是不是又手写了一遍键名？ 键名只能出现在一处",
+            )
+
+
+def test_adding_a_key_to_the_tuple_flows_into_the_regexes() -> None:
+    """真正的的防漏方式是：把一个新键加进元组之后，
+    重建出来的正则能否拢住它。只检查今天的键可以看到这一点。
+
+    所以这里按模块里的方式重建一遍正则再断言。
+    """
+    alt = "|".join((*_USER_VALUE_KEYS, "tooltip"))
+    rebuilt = re.compile(
+        _NEG + _PREFIXED + "(?:" + alt + ")"
+        + chr(92) + "s*[:=]" + chr(92) + "s*[f]?[" + _Q + "]"
+        + _VAL + "[" + _Q + "]"
+    )
+    assert "tooltip" in rebuilt.pattern
+
