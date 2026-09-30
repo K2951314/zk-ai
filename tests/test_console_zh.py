@@ -376,6 +376,32 @@ def test_attention_panel_receives_the_config_block() -> None:
     assert 'block.classList.contains("att-fix")' in html
 
 
+def test_every_burner_config_key_has_a_chinese_label() -> None:
+    """控制台表单里每个参数都要有中文名，不许裸奔英文键名。
+
+    2026-09-30 真实发生过：饥饿救济、限流停靠、超时这三批参数是后来加的，
+    BURNER_LABELS 是手写的映射表，加参数的人没同步它——于是运营者在表单里
+    看到的是 ``rate_park_after`` 而不是「限流停靠：连续 429 次数」。
+    修完那次靠的是人工反查；这个测试把反查固化，下次加参数会自动撞上。
+    """
+    from app.services import burner_service
+    from scripts import burn_sensenova
+
+    script = _script(_html("index.html"))
+    labels = re.search(r"BURNER_LABELS = \{(.*?)\n\};", script, re.DOTALL)
+    assert labels, "BURNER_LABELS 没找到"
+    covered = set(re.findall(r'^\s*(\w+):\s*["\x27]', labels.group(1), re.MULTILINE))
+
+    # 会出现在表单里的键 = 表单字段全集（FORM_FIELDS 是后端列出来渲染的顺序）
+    missing = sorted(k for k in burner_service.FORM_FIELDS if k not in covered)
+    assert not missing, f"这些参数在表单里还是英文键名：{missing}"
+
+    # 可热改的键同样该有标签：它们随时可能被加进表单，先备好名字
+    live = set(burner_service.FORM_FIELDS) | set(burn_sensenova._HOT_KEYS)
+    unlabelled = sorted(k for k in live if k not in covered)
+    assert not unlabelled, f"这些可配键没有中文标签：{unlabelled}"
+
+
 def test_the_console_says_whether_config_edits_apply_by_themselves() -> None:
     """「改完 YAML 会不会自己生效」必须写在状态行上。
 
