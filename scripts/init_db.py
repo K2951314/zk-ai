@@ -34,27 +34,27 @@ async def main() -> int:
     if args.reset:
         async with database.engine.begin() as connection:
             await connection.run_sync(Base.metadata.drop_all)
-        print(f"dropped all tables in {database.url}")
+        print(f"已清空所有表： {database.url}")
 
     await database.init()
 
     repository = ConfigRepository(database)
     counts = await repository.sync_config(config)
-    print("configuration mirrored:")
+    print("配置已落库：")
     for key, value in counts.items():
         print(f"  {key:<12} {value}")
 
     warnings = config.warnings
     if warnings:
-        print("\nconfig warnings:")
+        print("\n配置告警：")
         for warning in warnings:
             print(f"  - {warning}")
 
     if args.show:
-        print("\nproviders:", [row["id"] for row in await repository.list_providers()])
-        print("models:", [row["id"] for row in await repository.list_models()])
-        print("aliases:", [row["name"] for row in await repository.list_aliases()])
-        print("\ncredentials:")
+        print("\n供应商：", [row["id"] for row in await repository.list_providers()])
+        print("模型：", [row["id"] for row in await repository.list_models()])
+        print("别名：", [row["name"] for row in await repository.list_aliases()])
+        print("\n凭证：")
         for row in await repository.list_credentials():
             print(
                 f"  {row['id']:<20} status={row['status']:<10} "
@@ -62,7 +62,7 @@ async def main() -> int:
             )
 
     await database.dispose()
-    print(f"\ndatabase ready: {database.url}")
+    print(f"\n数据库就绪： {database.url}")
     return 0
 
 

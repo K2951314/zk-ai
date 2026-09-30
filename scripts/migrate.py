@@ -800,7 +800,7 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print("下一步：")
         print("  1. 把这个 .zip 拷到新电脑（U盘/网盘/局域网都行）")
-        print("  2. 新电脑：git pull（或拷源码）→ 双击 scripts\\import_machine.cmd")
+        print("  2. 新电脑：拉取代码（或拷源码）→ 双击 scripts\\import_machine.cmd")
         print("  3. 把这个 .zip 拖进黑窗口，输入刚才的密码")
         return _EXIT_OK
 

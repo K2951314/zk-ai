@@ -217,9 +217,9 @@ def main() -> int:
     # ------------------------------------------------------------------
     print()
     failed = [name for name, ok, _ in results if not ok]
-    print(f"{len(results) - len(failed)}/{len(results)} checks passed")
+    print(f"{len(results) - len(failed)}/{len(results)} 项检查通过")
     if failed:
-        print("failed: " + ", ".join(failed))
+        print("未通过： " + ", ".join(failed))
         return 1
     return 0
 

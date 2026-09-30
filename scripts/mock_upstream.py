@@ -190,12 +190,12 @@ def main() -> int:
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), MockHandler)
-    print(f"mock upstream listening on http://{args.host}:{args.port}/v1", flush=True)
-    print("fault injection: model names containing fail-400/401/429/500/503/529, slow, broken")
+    print(f"模拟上游已监听 http://{args.host}:{args.port}/v1", flush=True)
+    print("故障注入：model 名含 fail-400/401/429/500/503/529 / slow / broken 会触发对应错误")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nshutting down")
+        print("\n正在关闭")
     finally:
         server.server_close()
     return 0
