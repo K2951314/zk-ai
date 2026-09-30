@@ -25,7 +25,11 @@ _UI_PAGES = tuple(sorted(p.name for p in _WEB.glob("*.html") if p.is_file()))
 #: 2026-09-30 之前就是因为手写清单漏掉了报告页（那时只列了
 #: index/agent两个）。现在新加页面自动进入扫截。
 assert _UI_PAGES, "app/web 下没有任何 html？路径不对"
-_APP = PROJECT_ROOT / "app"   # 后端用户可见英文的扫描范围
+#: 扫描范围：同时覆盖应用代码和运行脚两个目录。
+_SCAN_ROOTS = (
+    PROJECT_ROOT / "app",
+    PROJECT_ROOT / "scripts",
+)
 
 # 允许出现的英文片段（技术名词 / 机器契约 / 代码示例）
 ALLOWED_SNIPPETS = (
@@ -566,8 +570,8 @@ _USER_VALUE_KEYS = (
     "prompt",
 )
 
-# 两种写法都认: 赋值 reason = "..."（允许一个下划线前缀，故
-# disabled_reason 也命中）与字典 {"message": "..."}。
+# 两种写法都认：赋值 `reason = "..."`（允许一个下划线前缀，故
+# disabled_reason 也命中）与字典 `{"message": "..."}`。
 #
 # ⚡正则由上面元组推导而来，不要在正则里再手写一遍。
 # 2026-09-30 之前写死两份，新加键时漏改一处就静默忽略。
@@ -620,6 +624,18 @@ _EN_ALLOWED_SUBSTR = (
     "NVIDIA_",
     "MODELSCOPE_",
     "zk-",
+# mock_upstream.py 的上游错误体：
+# 它们存在的意义就是模拟真实上游的响应形状，
+# 改成中文就测不到真实的错误分类逻辑了。
+    "mock: invalid request",
+    "mock: invalid api key",
+    "mock: permission denied",
+    "mock: model not found",
+    "mock: rate limit exceeded",
+    "mock: internal error",
+    "mock: service unavailable",
+    "mock: overloaded",
+    "unknown path",
 )
 
 # 两个以上空格分隔的英文词 = 读起来像句子（允许小写开头：health check passed）
@@ -657,7 +673,7 @@ def test_backend_never_hands_the_console_an_english_sentence() -> None:
     ② 错误类型枚举、模型 id、协议串等机器契约。
     """
     offenders: list[str] = []
-    for path in sorted(_APP.rglob("*.py")):
+    for path in sorted(p for root in _SCAN_ROOTS for p in root.rglob("*.py")):
         try:
             source = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):  # pragma: no cover - 非源码文件
