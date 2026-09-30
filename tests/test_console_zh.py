@@ -20,6 +20,10 @@ import pytest
 from app.core.config import PROJECT_ROOT
 
 _WEB = PROJECT_ROOT / "app" / "web"
+#: 所有面向用户的页面。
+#: 新增页面必须加进来，
+#: report.html （体检页）就这样漏了很久。
+_UI_PAGES = ("index.html", "agent.html", "report.html")
 _APP = PROJECT_ROOT / "app"   # 后端用户可见英文的扫描范围
 
 # 允许出现的英文片段（技术名词 / 机器契约 / 代码示例）
@@ -48,6 +52,11 @@ ALLOWED_SNIPPETS = (
     # 补 Key 进 .env 的 PowerShell 命令（代码示例，不是英文文案）
     "Add-Content -Path .env -Value",
     "GetEnvironmentVariable",
+    # 模型家族显示名：体检页把 kimi-k3 显示成 Kimi K3、 step-5 显示成 Step 5，
+    # 是产品名不是英文句子（与上面 sensenova- / glm- 同类）。
+    "Kimi K3", "Step 5", "DeepSeek V4",
+    "Step / DeepSeek", "Step 5 / DeepSeek",
+    "GLM-5.3 / Step 5 / DeepSeek",
 )
 
 _STYLE_RE = re.compile(r"<style>.*?</style>", re.DOTALL)
@@ -103,7 +112,13 @@ def _scannable_js(html: str) -> str:
 
 
 def _is_code_like(candidate: str) -> bool:
+    """形似代码而不是 UI 文案的匹配。"""
     stripped = candidate.strip()
+    # 跨行的匹配一律算代码：UI 标签不会断成两行，
+    # 而 <pre> 里的示例代码会。 2026-09-30 实测：体检页那段可复制的
+    # Python 片段跨行匹出 "Router\nq"，靠白名单逐字替换拦不住。
+    if chr(10) in candidate or chr(13) in candidate:
+        return True
     if any(marker in stripped for marker in _CODE_MARKERS):
         return True
     if "." in stripped and " " not in stripped:
@@ -111,13 +126,13 @@ def _is_code_like(candidate: str) -> bool:
     return " " not in stripped and stripped.islower()
 
 
-@pytest.mark.parametrize("page", ["index.html", "agent.html"])
+@pytest.mark.parametrize("page", _UI_PAGES)
 def test_page_declares_chinese_lang(page: str) -> None:
     """``lang="zh-CN"`` 让浏览器选对中文字体与断行。"""
     assert 'lang="zh-CN"' in _html(page)
 
 
-@pytest.mark.parametrize("page", ["index.html", "agent.html"])
+@pytest.mark.parametrize("page", _UI_PAGES)
 def test_no_leftover_english_ui_sentences(page: str) -> None:
     """没有成句的英文 UI 文案（标题 / 提示 / 按钮标签级别）。"""
     text = _scannable_text(_html(page)) + "\n" + _scannable_js(_html(page))
@@ -301,7 +316,7 @@ def test_console_supports_view_deep_links() -> None:
     assert "LOADERS[urlView]" in text, "必须校验视图名是否存在"
 
 
-@pytest.mark.parametrize("page", ["index.html", "agent.html"])
+@pytest.mark.parametrize("page", _UI_PAGES)
 def test_page_has_no_external_assets(page: str) -> None:
     """单文件零依赖是硬约束：不许引外部 CSS/JS/字体。"""
     text = _html(page)
