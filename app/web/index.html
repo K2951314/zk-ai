@@ -979,7 +979,7 @@ async function loadOverview() {
         ${qNames.map(n => {
           const q = quarantined[n];
           const left = q.quarantined ? `还剩 ${dur(q.quarantine_seconds_left)}` : "观察中";
-          return `<span class="chip" title="连续失败 ${q.consecutive_failures} 次，最后错误 ${esc(q.last_error_type)}">${esc(n)} · ${esc(left)}</span>`;
+          return `<span class="chip" title="连续失败 ${q.consecutive_failures} 次，最后错误 ${esc(zhType(q.last_error_type))}">${esc(n)} · ${esc(left)}</span>`;
         }).join(" ")}`;
     } else {
       qBanner.style.display = "none";
