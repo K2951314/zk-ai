@@ -65,3 +65,52 @@ def test_the_helper_prints_chinese_for_every_key() -> None:
                 continue
             assert any("\u4e00" <= c <= "\u9fff" for c in piece), (
                 f"{key} 的提示不是中文：{piece!r}")
+
+
+def test_the_helpers_own_messages_are_chinese() -> None:
+    """helper 自己的提示（用法 / 未知键）也必须是中文。
+
+    这两条只在用错时出现，最容易漏：写脚本的人只测正常路径。
+    """
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        start_msg.main([])
+    assert '用法' in buf.getvalue(), buf.getvalue()
+    assert 'MSG usage' not in buf.getvalue()
+
+    buf2 = io.StringIO()
+    with contextlib.redirect_stderr(buf2):
+        start_msg.main(["no-such-key"])
+    assert '未知的提示键' in buf2.getvalue(), buf2.getvalue()
+    assert 'MSG unknown key' not in buf2.getvalue()
+
+
+def test_burner_argparse_errors_are_chinese() -> None:
+    """argparse 自己的报错也已中文化——传错参数是运营者最常撞上的。
+
+    2026-09-30 修：之前只中文化了 --help，error() 分支仍吐英文
+    （invalid float value），调参时看到的还是一半英文一半中文。
+    """
+    import contextlib
+    import io
+
+    from scripts import burn_sensenova
+
+    cases = (
+        (["--safety-margin", "abc"], '值不对'),
+        (["--no-such-flag"], '无效的参数'),
+        (["--model"], '缺少参数值'),
+    )
+    for argv, expect in cases:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                burn_sensenova.parse_args(argv)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(str(argv) + '本该被拒绝')
+        text = err.getvalue()
+        assert expect in text, (argv, text[-200:])

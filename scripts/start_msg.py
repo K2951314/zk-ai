@@ -70,7 +70,7 @@ BANNER = {
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print('MSG usage: start_msg.py <key|banner> [--mode ...] [--port P] [--host H]',
+        print('用法: start_msg.py <提示键|banner> [--mode ...] [--port P] [--host H]',
               file=sys.stderr)
         return 2
     key = argv[0]
@@ -85,7 +85,7 @@ def main(argv: list[str]) -> int:
         return 0
     entry = MESSAGES.get(key)
     if entry is None:
-        print("MSG unknown key: " + key, file=sys.stderr)
+        print("未知的提示键: " + key, file=sys.stderr)
         return 2
     title, body, hint = entry
     print()

@@ -1558,6 +1558,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     p.format_help = _zh_format_help  # type: ignore[method-assign]
 
+    # argparse 自己的 error() 也吐英文（"invalid float value" 之类），而传错参数
+    # 恰恰是运营者调参时最常撞上的。这里换成中文，用法行沿用已中文化的 help。
+    _orig_error = p.error
+
+    def _zh_error(message: str) -> None:
+        hint = '参数有误：'
+        if 'invalid' in message and 'value' in message:
+            hint += '值不对，看一下各参数的类型'
+        elif 'unrecognized arguments' in message:
+            hint += '有无效的参数'
+        elif 'expected one argument' in message:
+            hint += '缺少参数值'
+        else:
+            hint += message
+        _orig_error(hint)
+
+    p.error = _zh_error  # type: ignore[method-assign, assignment]
+
     def opt(flag: str, **kw):
         """add_argument 的薄包装：配置文件里有同名键就顶掉 default。"""
         dest = flag.lstrip("-").replace("-", "_")
