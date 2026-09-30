@@ -37,10 +37,18 @@ logger = get_logger("credentials.health")
 
 #: Errors that prove the credential itself is unusable.
 CREDENTIAL_FATAL = frozenset({"authentication_error", "permission_denied"})
+
 #: Errors that park the *credential* for a while. Note that 529 (overloaded) is
 #: deliberately absent: it is a provider/model level problem handled by the
 #: scheduler's deployment cooldown, so the key stays usable for other models.
 THROTTLE_ERRORS = frozenset({"rate_limit_error"})
+
+#: 「冷却结束自动恢复」写进 disabled_reason 的标记值。
+#: 抽成常量是因为它同时被**写入**（冷却到期恢复）和**比较**（下一次成功后清掉）
+#: 两处用到——各写一遍字符串，改一处漏一处，凭据会永远挂着这条原因。
+#: 2026-09-30 顺手把值换成中文：这个字段经 snapshot() 直达控制台凭据池页面，
+#: 运营者看得见（此前显示的是 "auto-recovered"）。
+REASON_AUTO_RECOVERED = "自动恢复（冷却结束）"
 
 
 @dataclass(slots=True)
@@ -85,7 +93,7 @@ class CredentialHealthTracker:
         credential.cooldown_until = None
         credential.last_error_type = None
         credential.last_error_detail = None
-        if credential.disabled_reason == "auto-recovered":
+        if credential.disabled_reason == REASON_AUTO_RECOVERED:
             credential.disabled_reason = None
         if latency_ms > 0:
             alpha = 0.3
@@ -306,14 +314,14 @@ class CredentialHealthTracker:
         if healthy:
             if credential.status in {CredentialStatus.UNHEALTHY, CredentialStatus.COOLDOWN}:
                 transition = self.mark_enabled(credential, now=now)
-                transition.reason = "health check passed"
+                transition.reason = "健康检查通过"
                 return transition
             return Transition(
                 credential_id=credential.id,
                 provider_id=credential.provider_id,
                 previous=credential.status,
                 current=credential.status,
-                reason="health check passed",
+                reason="健康检查通过",
             )
         moment = now if now is not None else time.time()
         if error_type and error_type not in CREDENTIAL_FATAL:
@@ -325,7 +333,7 @@ class CredentialHealthTracker:
                 provider_id=credential.provider_id,
                 previous=credential.status,
                 current=credential.status,
-                reason=f"probe failed (transient): {error_type}",
+                reason=f"探测失败（临时性）：{error_type}",
             )
         return self.on_failure(
             credential,
@@ -359,14 +367,14 @@ class CredentialHealthTracker:
             ):
                 credential.status = CredentialStatus.HEALTHY
                 credential.consecutive_failures = 0
-                credential.disabled_reason = "auto-recovered"
+                credential.disabled_reason = REASON_AUTO_RECOVERED
                 logger.info("credential %s auto-recovered after UNHEALTHY rest", credential.id)
                 return Transition(
                     credential_id=credential.id,
                     provider_id=credential.provider_id,
                     previous=previous,
                     current=credential.status,
-                    reason="auto-recovered after rest",
+                    reason="冷却结束，自动恢复",
                 )
             return None
         if credential.status is not CredentialStatus.COOLDOWN:
@@ -377,7 +385,7 @@ class CredentialHealthTracker:
         credential.status = CredentialStatus.HEALTHY
         credential.cooldown_until = None
         credential.consecutive_failures = 0
-        credential.disabled_reason = "auto-recovered"
+        credential.disabled_reason = REASON_AUTO_RECOVERED
         # 刑满释放即无罪: the cooldown was the punishment, and once served the
         # key re-enters at the *base* of the ladder. Carrying the ladder across
         # a served cooldown pinned every key at the 900s ceiling after one busy
@@ -393,5 +401,5 @@ class CredentialHealthTracker:
             provider_id=credential.provider_id,
             previous=previous,
             current=credential.status,
-            reason="cooldown expired",
+            reason="冷却结束，已恢复可用",
         )

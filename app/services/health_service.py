@@ -85,7 +85,7 @@ class HealthService:
                     credential_id=credential.id if credential else None,
                     ok=False,
                     error_type="timeout",
-                    detail=f"probe exceeded {self.config.settings.health_check_timeout}s",
+                    detail=f"探测超过 {self.config.settings.health_check_timeout}s 无响应（超时）",
                 )
             results.append(result)
 

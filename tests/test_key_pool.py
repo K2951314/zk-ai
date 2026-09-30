@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from app.credentials import health as credential_health
 from app.credentials.cooldown import CooldownPolicy
 from app.credentials.health import CredentialHealthTracker
 from app.credentials.pool import CredentialPool
@@ -631,7 +632,15 @@ def test_unhealthy_key_auto_recovers_after_a_rest() -> None:
     credential.last_error_at = time.time() - (pool.policy.auto_recover_after + 1)
     assert next(c.id for c in pool.candidates("p1")) == "k1"
     assert credential.status is CredentialStatus.HEALTHY
-    assert credential.disabled_reason == "auto-recovered"
+    # 与 app/credentials/health.py 的 REASON_AUTO_RECOVERED 同一个值：这里写死
+    # 字符串会让「改成中文」这类改动立刻把测试打红，而它 pin 的其实是逻辑不是文案。
+    assert credential.disabled_reason == credential_health.REASON_AUTO_RECOVERED
+
+    # 一次性原因：下一次成功必须把它清掉。这条是 2026-09-30 补的——
+    # 恢复原因会经 snapshot() 直达控制台凭据池页面，不清理的话运营者会
+    # 一直看到「自动恢复（冷却结束）」挂在一把其实很健康的 Key 上。
+    pool.report_success("k1", latency_ms=120)
+    assert credential.disabled_reason is None, "恢复原因没被清除，会一直挂在页面上"
 
 
 def test_reconcile_drops_credentials_removed_from_config() -> None:
