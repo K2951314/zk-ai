@@ -48,6 +48,51 @@ MESSAGES = {
     "uv-reopen": (
         '然后关掉这个窗口、重新打开（让 PATH 生效）再启动',
         [], ''),
+    "venv-missing-cmd": (
+        '【错误】没找到 .venv。',
+        ['先双击 scripts\\start_gateway.cmd 跑一遍，', '它会自动把环境重建好。'],
+        '',
+    ),
+    "export-banner": (
+        '正在导出本机的 ZK-AI 身份（Key + 配置 + 数据库）。',
+        ['稍后会要求输入迁移密码，记住它，新电脑要用同一个。', '输入时不回显（安全起见）。'],
+        '',
+    ),
+    "failed-see-above": (
+        '失败了，原因看上面几行。',
+        [],
+        '',
+    ),
+    "drag-zip": (
+        '把迁移包的 .zip 拖进这个窗口，然后回车。',
+        [],
+        '',
+    ),
+    "no-archive": (
+        '【错误】没给迁移包。',
+        [],
+        '',
+    ),
+    "overwrite-guard": (
+        '这些文件已经存在，这是覆盖保护在工作，不算失败。',
+        [],
+        '',
+    ),
+    "ask-overwrite": (
+        '要用 --overwrite 重试吗？',
+        [],
+        '覆盖前会先把当前文件备份到 imports_backup\\',
+    ),
+    "prompt-zip": (
+        '请输入迁移包的 .zip 路径',
+        [],
+        '',
+    ),
+    "prompt-overwrite": (
+        '要用 --overwrite 重试吗？ y/N',
+        [],
+        '覆盖前会先把当前文件备份到 imports_backup',
+    ),
 }
 
 BANNER = {

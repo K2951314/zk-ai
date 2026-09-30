@@ -8,7 +8,7 @@ REM  One-click export for moving to a new machine (Windows)
 REM
 REM  Pure ASCII + CRLF on purpose: batch files with non-ASCII bytes can be
 REM  misparsed by cmd.exe (byte-offset desync). All Chinese text lives in
-REM  scripts/migrate.py.
+REM  scripts/start_msg.py.
 REM
 REM  What it does: packs .env (every API key), config/*.yaml, and the local
 REM  database into a single encrypted zip in .\exports\.
@@ -20,22 +20,19 @@ set "PYTHONUTF8=1"
 
 if not exist ".venv\Scripts\python.exe" (
   echo.
-  echo   [ERROR] .venv not found. Run scripts\start_gateway.cmd once first,
-  echo           it rebuilds the environment automatically.
+.venv\Scripts\python.exe scripts\start_msg.py venv-missing-cmd
   echo.
   pause
   goto :end
 )
 
 echo.
-echo   Exporting this machine's ZK-AI identity (keys + config + database).
-echo   You will be asked for a transfer password - remember it, the new
-echo   machine needs the same one. Input is hidden.
+.venv\Scripts\python.exe scripts\start_msg.py export-banner
 echo.
 ".venv\Scripts\python.exe" scripts\migrate.py export
 if errorlevel 1 (
   echo.
-  echo   Export failed - see the message above.
+.venv\Scripts\python.exe scripts\start_msg.py failed-see-above
   echo.
   pause
   goto :end
