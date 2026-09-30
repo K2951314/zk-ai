@@ -15,7 +15,11 @@ from unittest import mock
 from scripts import start_msg
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-_CMD_FILES = ("start_gateway.cmd", "start_burner.cmd")
+_CMD_FILES = tuple(sorted(p.name for p in _SCRIPTS.glob("*.cmd") if p.is_file()))
+#: 按目录自动发现。2026-09-30 之前写死两个启动器，
+#: 结果导出包和导入包这两个（那就是上一轮才手动汉化的两个）
+#: 完全没被守卫覆盖。现在新加启动器自动进入。
+assert _CMD_FILES, "scripts/ 下没有任何 .cmd？路径不对"
 
 
 def test_cmd_launchers_stay_pure_ascii() -> None:
@@ -54,7 +58,10 @@ def test_every_key_the_cmds_ask_for_actually_exists() -> None:
         text = (_SCRIPTS / name).read_text(encoding="ascii")
         asked |= set(re.findall(r"start_msg\.py\s+([a-z-]+)", text))
     assert asked, "两个 .cmd 都没有调用 start_msg.py，说明又回到英文 echo 了"
-    missing = sorted(k for k in asked if k not in start_msg.MESSAGES and k != "banner")
+    # ask-zip 这类前动模式读键盘，它用的提示键是 prompt-zip。
+    # 所以提取到的键要先去掉前缀再拼上，否则会误报缺键。
+    resolved = {("prompt-" + k[4:]) if k.startswith("ask-") else k for k in asked}
+    missing = sorted(k for k in resolved if k not in start_msg.MESSAGES and k != "banner")
     assert not missing, f"helper 缺这些键，启动失败时会静默无提示：{missing}"
 
 

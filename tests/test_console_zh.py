@@ -339,7 +339,7 @@ def test_all_page_js_lives_inside_the_script_tag() -> None:
     这里用「</html> 之后只剩空白」和「script 块里能匹配到顶层定义」两道断言
     把这类拼接错误钉死。
     """
-    for page in ("index.html", "agent.html"):
+    for page in _UI_PAGES:
         raw = _html(page)
         closed = raw.rindex("</html>")
         tail = raw[closed + len("</html>"):]
