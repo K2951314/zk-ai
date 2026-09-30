@@ -20,10 +20,11 @@ import pytest
 from app.core.config import PROJECT_ROOT
 
 _WEB = PROJECT_ROOT / "app" / "web"
-#: 所有面向用户的页面。
-#: 新增页面必须加进来，
-#: report.html （体检页）就这样漏了很久。
-_UI_PAGES = ("index.html", "agent.html", "report.html")
+_UI_PAGES = tuple(sorted(p.name for p in _WEB.glob("*.html") if p.is_file()))
+#: 按目录自动发现，不手写清单。
+#: 2026-09-30 之前就是因为手写清单漏掉了报告页（那时只列了
+#: index/agent两个）。现在新加页面自动进入扫截。
+assert _UI_PAGES, "app/web 下没有任何 html？路径不对"
 _APP = PROJECT_ROOT / "app"   # 后端用户可见英文的扫描范围
 
 # 允许出现的英文片段（技术名词 / 机器契约 / 代码示例）
