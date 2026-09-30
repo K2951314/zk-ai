@@ -107,6 +107,36 @@ async def test_health_endpoint(api) -> None:
     assert "zk-test" in body["aliases"]
 
 
+async def test_health_exposes_the_config_problems_block(api) -> None:
+    """/health 必须带 config 段——控制台「需要处理」面板读的就是它。
+
+    2026-09-29 抓到的事实：面板读 ``health.config?.warnings`` 而端点从不返回
+    ``config``，那一行面板**永远是空的**。没有这条测试，它随时可能又空回去。
+    """
+    client, _ = api
+    body = (await client.get("/health")).json()
+
+    config = body["config"]
+    assert set(config) >= {"warnings", "stale_files", "credential_env_gaps"}
+    assert config["credential_env_gaps"] == {}, "夹具的凭据都带 inline value，不该有缺口"
+
+
+async def test_health_reports_a_credential_whose_key_is_only_in_the_environment(
+    api, monkeypatch
+) -> None:
+    """本机能用、换机会丢的 Key 要在这里就露面，而不是等换机那天。"""
+    client, harness = api
+    provider = harness.container.config.providers["fake"]
+    provider.credentials[0].value = None  # 只剩 env 引用，没有 inline 值
+    provider.credentials[0].env = "${ONLY_IN_OS_ENV_KEY}"
+
+    body = (await client.get("/health")).json()
+
+    assert body["config"]["credential_env_gaps"] == {
+        "ONLY_IN_OS_ENV_KEY": [provider.credentials[0].id]
+    }
+
+
 async def test_models_endpoint_lists_models_and_aliases(api) -> None:
     client, _ = api
     response = await client.get("/v1/models")

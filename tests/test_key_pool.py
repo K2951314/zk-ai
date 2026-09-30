@@ -359,6 +359,26 @@ def test_missing_environment_variable_disables_the_credential() -> None:
     assert pool.candidates("p1") == []
 
 
+def test_an_empty_env_value_never_becomes_a_usable_key() -> None:
+    """空值是「空着」而不是「一把空 Key」。
+
+    `resolve_env_reference` 会把空串判成 `missing`（和变量不存在同路），所以
+    `.env` 里 `SENSENOVA_API_KEY=` 不会把请求打到一把空密钥上——这条钉住
+    「留空」这个产品语义的底线。
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setenv("ZKAI_EMPTY_POOL_K1", "")
+        pool, _ = build_pool(keys=(("k1", 100),), env_prefix="ZKAI_EMPTY_POOL")
+        credential = pool.get("k1")
+        assert credential.secret_source == "missing"
+        assert credential.status is CredentialStatus.DISABLED
+        assert credential.is_configured() is False
+        assert pool.candidates("p1") == []
+    finally:
+        monkeypatch.undo()
+
+
 def test_environment_variable_is_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZKAI_POOL_K1", "sk-from-env")
     pool, _ = build_pool(keys=(("k1", 100),), env_prefix="ZKAI_POOL")

@@ -92,7 +92,22 @@ def test_wait_for_port_fails_fast_when_nothing_listens() -> None:
 
 
 def test_open_console_reads_port_and_token_from_env(tmp_path: Path, monkeypatch) -> None:
-    (tmp_path / ".env").write_text("ZKAI_PORT=8399\nZKAI_ADMIN_TOKEN=tok-8399\n", encoding="utf-8")
+    """端口与令牌都从 `.env` 读——而且**端口必须真的没人听**。
+
+    这个端口不能写死：2026-09-30 就踩了——原来写 8399，运营者当天在 8399 上
+    起了第二个网关实例试新代码，于是"nothing is listening"这个前提不成立，
+    测试开始报 `assert True is False`，看起来像 open_console 坏了，其实是端口被占。
+    所以这里向内核要一个当前空闲的端口，堵死这类偶发。
+    """
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+
+    (tmp_path / ".env").write_text(
+        f"ZKAI_PORT={free_port}\nZKAI_ADMIN_TOKEN=tok-{free_port}\n", encoding="utf-8"
+    )
     monkeypatch.setattr(open_console, "_ROOT", tmp_path)
     opened: list[str] = []
     monkeypatch.setattr(open_console.webbrowser, "open", opened.append)

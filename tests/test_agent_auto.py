@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import pytest
 
+from app.models.provider import ModelAliasConfig
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.routing.agent_auto import AGENT_AUTO_ALIAS, ALIAS_LONG, ALIAS_VISION, rewrite_model
+from app.routing.aliases import AliasStrategy
 from tests.conftest import (
     FakeAdapter,
     build_harness,
@@ -319,3 +321,105 @@ async def test_router_respects_explicit_kimi_k3() -> None:
         assert decision.candidates[0].model.id == "fake-k3"
     finally:
         await harness.container.shutdown()
+
+
+def test_a_disabled_rewrite_target_degrades_instead_of_404ing() -> None:
+    """别名存在但停用 = 不能当"可用"——否则整个 agent 工作负载静默 404。
+
+    2026-09-29 第三轮审查抓到：判据是别名**名字**在不在 registry 里，而
+    ``AliasRegistry.names()`` 包含 ``enabled: false`` 的条目。运营者在控制台把
+    zk-long 一停，所有带图 / 工具轮 / ≥100k tokens 的请求全部 404，且没有一句
+    WARNING。这不是假想——那三类请求正好是 agent_auto 的全部改写目标。
+    """
+    from app.routing.router import Router
+
+    config = make_config(
+        providers=[make_provider("p1")],
+        models=[
+            make_model("m1", provider_id="p1", capabilities={"vision": 9.0}),
+        ],
+        aliases=[
+            make_alias("zk-auto", ["m1"]),
+            # 名字在、enabled=False：旧判据认为它可用
+            ModelAliasConfig(
+                name="zk-long", targets=["m1"], strategy=AliasStrategy.CAPABILITY, enabled=False
+            ),
+        ],
+    )
+    router = Router(config)
+
+    servable = router._servable_aliases()
+    assert "zk-auto" in servable
+    assert "zk-long" not in servable, "停用的别名不算可服务"
+
+    # 带图请求本会被改写到 zk-vision（没定义）→ 必须回落到 zk-auto 并真的能规划
+    decision = router.plan(
+        ChatCompletionRequest(
+            model="zk-auto",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+                ],
+            }],
+        )
+    )
+    assert decision.alias == "zk-auto", f"应回落到 zk-auto，实际 {decision.alias}"
+    assert decision.eligible_candidates(), "回落之后必须还有能跑的候选"
+
+
+def test_a_disabled_rewrite_target_says_so_in_the_log(caplog) -> None:
+    """降级不许静默——旧实现连一句 WARNING 都没有，运维完全看不出发生了什么。"""
+    import logging
+
+    from app.routing.router import Router
+
+    config = make_config(
+        providers=[make_provider("p1")],
+        models=[make_model("m1", provider_id="p1", capabilities={"vision": 9.0})],
+        aliases=[
+            make_alias("zk-auto", ["m1"]),
+            ModelAliasConfig(
+                name="zk-vision",
+                targets=["m1"],
+                strategy=AliasStrategy.CAPABILITY,
+                enabled=False,
+            ),
+        ],
+    )
+    router = Router(config)
+
+    with caplog.at_level(logging.WARNING, logger="zkai.routing.agent_auto"):
+        router.plan(
+            ChatCompletionRequest(
+                model="zk-auto",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+                    ],
+                }],
+            )
+        )
+
+    assert any("cannot serve traffic" in record.message for record in caplog.records), (
+        f"没有 WARNING。日志：{[r.message for r in caplog.records]}"
+    )
+
+
+def test_a_target_whose_models_are_all_gone_also_degrades() -> None:
+    """别名 enabled、但它的 target 模型不存在 → expand 为空 → 同样要降级。"""
+    from app.routing.router import Router
+
+    config = make_config(
+        providers=[make_provider("p1")],
+        models=[make_model("m1", provider_id="p1", capabilities={"vision": 9.0})],
+        aliases=[
+            make_alias("zk-auto", ["m1"]),
+            # targets 指向一个没有定义的模型
+            make_alias("zk-vision", ["does-not-exist"]),
+        ],
+    )
+    router = Router(config)
+
+    assert "zk-vision" not in router._servable_aliases()

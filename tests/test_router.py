@@ -887,3 +887,52 @@ def test_quarantined_deployments_are_reportable() -> None:
     assert entry["quarantined"] is True
     assert entry["quarantine_seconds_left"] > 0
     assert entry["last_error_type"] == "timeout"
+
+
+def test_a_parked_front_model_is_not_promoted() -> None:
+    """接口模型被隔离/冷却时不许提到第一位——调度器反正会跳过它。
+
+    2026-09-29 第二轮审查留下的缺口：``_promote_front_model`` 只看 eligible，
+    于是运营者选的那个 0% 成功率模型照样排第一，日志还声称它第一。
+    现在调度器把「现在不会调用的部署」当纯数据传进来（``plan(unavailable=...)``）。
+    """
+    config = make_config(
+        providers=[make_provider("p1"), make_provider("p2")],
+        models=[
+            make_model("front", provider_id="p1", priority=50),
+            make_model("healthy", provider_id="p2", priority=100),
+        ],
+        aliases=[make_alias("zk-test", ["front", "healthy"], front_model="front")],
+    )
+    router = Router(config)
+
+    baseline = _ids(router.plan(_req("zk-test")))
+    assert baseline[0] == "front", "正常情况下接口模型就是排第一"
+
+    parked = _ids(router.plan(_req("zk-test"), unavailable={"front-dep"}))
+    assert parked[0] == "healthy", "被隔离的接口模型必须让位"
+    assert "front" in parked, "让位不是过滤——它仍在链里，修好就回来"
+
+
+def test_the_routing_reason_says_when_the_front_model_was_parked() -> None:
+    """日志不许撒谎：不能声称一个马上会被跳过的模型排在第一位。"""
+    config = make_config(
+        providers=[make_provider("p1"), make_provider("p2")],
+        models=[
+            make_model("front", provider_id="p1", priority=50),
+            make_model("healthy", provider_id="p2", priority=100),
+        ],
+        aliases=[make_alias("zk-test", ["front", "healthy"], front_model="front")],
+    )
+    router = Router(config)
+
+    healthy = router.plan(_req("zk-test")).reason
+    assert "front_model=front" in healthy
+
+    parked = router.plan(_req("zk-test"), unavailable={"front-dep"}).reason
+    assert "隔离/冷却中，未提升" in parked
+    assert "front_model=front(" in parked, "要说出是哪个模型、为什么没提升"
+
+
+def _ids(decision) -> list[str]:
+    return [c.model.id for c in decision.candidates if c.eligible]

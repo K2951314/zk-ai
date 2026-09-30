@@ -189,6 +189,19 @@ class Settings(BaseSettings):
     #: 「留一行占位文本」，省流量但模型看不到图。
     forward_images: bool = True
 
+    #: 监听 config/*.yaml，改动后自动 reload（不用再手动 reload、也不用重启）。
+    #: 为什么值得默认打开：网关只在启动时读一次配置，内存与磁盘会长期背离；
+    #: 更糟的是控制台表单用**内存值**渲染，一保存就把运营者刚才的文件编辑
+    #: 覆盖回去（2026-09-28/29 一天内吃掉两次改动，细节见 AGENTS.md）。
+    #: 自动 reload 去掉的是根因——内存和磁盘不再有可能不一致；配上
+    #: `config_writer` 的陈旧写闸，控制台会拒绝覆盖、而编辑自己就能生效。
+    #: 代价：多几个 stat 调用；改坏了 YAML 不会让网关倒下（保留上一份配置并报错，
+    #: 改好后下一次改动自动接上）。设 false 回到「必须手动 reload」。
+    watch_config: bool = True
+    #: 轮询间隔（秒）。纯标准库 stat 轮询，不引 watchdog/inotify：
+    #: 为一个 2 秒的 stat 加依赖不划算，而且轮询在网络盘/容器里更可靠。
+    watch_config_interval: float = 2.0
+
     default_max_tokens: int = 1024
 
     health_check_mode: str = "startup"  # manual | startup | scheduled | off
@@ -664,6 +677,62 @@ def load_dotenv_file(path: Path | str | None = None) -> bool:
     if loaded:
         logger.info("loaded environment variables from %s", target)
     return bool(loaded)
+
+
+def env_file_names(path: Path | str = ".env") -> frozenset[str]:
+    """Names declared in ``.env`` — values are deliberately not returned.
+
+    The transfer package (``scripts/migrate.py``) carries ``.env`` and nothing
+    else, so "is this name in ``.env``" is the same question as "does this key
+    survive a machine move". Reporting names only keeps callers from having to
+    handle secrets.
+    """
+    target = Path(path)
+    if not target.is_file():
+        return frozenset()
+    try:
+        return frozenset(dotenv_values(target))
+    except Exception:  # pragma: no cover - malformed .env
+        return frozenset()
+
+
+def credential_env_gaps(
+    config: AppConfig, path: Path | str = ".env"
+) -> dict[str, list[str]]:
+    """{环境变量名: 读它的凭据 id} 名单里**不在** ``.env`` 中的那些。
+
+    Third check on the same file, after :func:`shadowed_env_names` and
+    :func:`malformed_env_names`. Those two ask "is the file's value being
+    honoured"; this one asks the question that only matters at the worst
+    possible moment — **would this key survive a machine move?** A credential
+    resolves its name from the *process* environment, so a variable that only
+    exists at the user/machine level works fine today and is invisible to the
+    package that carries ``.env``. Found for real on 2026-09-29:
+    ``SENSENOVA_API_KEY`` (``sensenova-01``, priority 100) lives only in HKCU.
+
+    Not an error by itself: a variable may legitimately come from somewhere
+    else (a secret manager, a container). It is a **warning** because the
+    operator has to be the one who decides that, and right now nobody could
+    even see it.
+    """
+    declared = env_file_names(path)
+    gaps: dict[str, list[str]] = {}
+    for provider in config.providers.values():
+        for credential in provider.credentials:
+            reference = credential.env_reference()
+            if not reference:
+                continue  # inline value or keyless - no env name to lose
+            if credential.value:
+                # Inline secret: it lives in providers.yaml, which *does* travel
+                # with the package. Flagging it would be a false alarm that
+                # trains the operator to ignore the real ones.
+                continue
+            name = reference.removeprefix("${").removesuffix("}")
+            if name and name not in declared:
+                gaps.setdefault(name, [])
+                if credential.id not in gaps[name]:
+                    gaps[name].append(credential.id)
+    return gaps
 
 
 def shadowed_env_names(path: Path | str = ".env") -> list[str]:

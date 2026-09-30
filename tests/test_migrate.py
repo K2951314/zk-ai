@@ -669,3 +669,213 @@ def test_healthy_env_produces_no_warning(tmp_path: Path, capsys) -> None:
 
     out = capsys.readouterr().out
     assert "\\r\\r\\n" not in out
+
+
+# --------------------------------------------------------------------------- #
+# credential keys that exist only in the OS environment (2026-09-29)
+# --------------------------------------------------------------------------- #
+def _providers_with(env_name: str, credential_id: str = "sensenova-01") -> str:
+    return (
+        "providers:\n"
+        "  - id: sensenova\n"
+        "    type: openai\n"
+        "    base_url: https://example.invalid/v1\n"
+        "    credentials:\n"
+        f"      - id: {credential_id}\n"
+        f"        env: {env_name}\n"
+    )
+
+
+def test_export_warns_about_a_key_that_only_lives_in_the_os_environment(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """The real case: SENSENOVA_API_KEY is set at the user level, not in .env.
+
+    The source machine works perfectly, which is why this never shows up until
+    the move — and then the new machine has a DISABLED credential and no clue.
+    """
+    from scripts.migrate import export_package
+
+    root = tmp_path / "src"
+    _populate(root)
+    (root / "config" / "providers.yaml").write_text(
+        _providers_with("SENSENOVA_API_KEY"), encoding="utf-8"
+    )
+    (root / ".env").write_text("ZKAI_API_TOKEN=t\n", encoding="utf-8")
+    monkeypatch.setenv("SENSENOVA_API_KEY", "os-level-secret-value")
+
+    export_package(tmp_path / "pkg.zip", "pw", root=root)
+
+    out = capsys.readouterr().out
+    assert "SENSENOVA_API_KEY" in out
+    assert "sensenova-01" in out          # 说的是哪把凭据，不只是变量名
+    assert "OS 环境变量" in out
+    assert "os-level-secret-value" not in out, "密钥永不回显"
+
+
+def test_import_warns_on_the_receiving_machine_too(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """导入端再说一次：重跑导入救不回来，必须回源机器补 .env。"""
+    from scripts.migrate import export_package, import_package
+
+    src = tmp_path / "src"
+    _populate(src)
+    (src / "config" / "providers.yaml").write_text(
+        _providers_with("SENSENOVA_API_KEY"), encoding="utf-8"
+    )
+    (src / ".env").write_text("ZKAI_API_TOKEN=t\n", encoding="utf-8")
+    monkeypatch.setenv("SENSENOVA_API_KEY", "os-level-secret-value")
+    archive = tmp_path / "pkg.zip"
+    export_package(archive, "pw", root=src)
+
+    monkeypatch.delenv("SENSENOVA_API_KEY", raising=False)
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    import_package(archive, "pw", root=dst, overwrite=True)
+
+    out = capsys.readouterr().out
+    assert out.count("SENSENOVA_API_KEY") >= 2, "导出与导入两侧各说一次"
+    assert "重跑导入也拿不回来" in out
+
+
+def test_a_key_declared_in_env_file_is_not_a_problem(tmp_path, capsys, monkeypatch) -> None:
+    """正常机器不许有噪音，否则这道警告会被训练成「直接忽略」。"""
+    from scripts.migrate import export_package
+
+    root = tmp_path / "src"
+    _populate(root)  # _populate 的 .env 里就有 SENSENOVA_API_KEY
+    (root / "config" / "providers.yaml").write_text(
+        _providers_with("SENSENOVA_API_KEY"), encoding="utf-8"
+    )
+    monkeypatch.delenv("SENSENOVA_API_KEY", raising=False)
+
+    export_package(tmp_path / "pkg.zip", "pw", root=root)
+
+    assert "不在 .env 里" not in capsys.readouterr().out
+
+
+def test_a_key_missing_everywhere_is_reported_as_already_disabled(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """两边都没有 = 这台机器上它已经是 DISABLED，导出帮不了它（信息不同）。"""
+    from scripts.migrate import export_package
+
+    root = tmp_path / "src"
+    _populate(root)
+    (root / "config" / "providers.yaml").write_text(
+        _providers_with("NOWHERE_KEY"), encoding="utf-8"
+    )
+    root.joinpath(".env").write_text("ZKAI_API_TOKEN=t\n", encoding="utf-8")
+    monkeypatch.delenv("NOWHERE_KEY", raising=False)
+
+    export_package(tmp_path / "pkg.zip", "pw", root=root)
+
+    out = capsys.readouterr().out
+    assert "里都没有" in out
+    assert "已经是 DISABLED" in out
+
+
+def test_burner_only_names_are_scanned_too(tmp_path, capsys, monkeypatch) -> None:
+    """消耗器烧的 Key 同样要跟着换机，只查 providers 会漏掉它。"""
+    from scripts.migrate import export_package
+
+    root = tmp_path / "src"
+    _populate(root)
+    (root / "config" / "burner.yaml").write_text(
+        "model: sensenova-6.8-flash-lite\nonly:\n  - BURN_KEY_A\n  - BURN_KEY_B\n",
+        encoding="utf-8",
+    )
+    root.joinpath(".env").write_text("ZKAI_API_TOKEN=t\nBURN_KEY_A=x\n", encoding="utf-8")
+    monkeypatch.delenv("BURN_KEY_A", raising=False)
+    monkeypatch.delenv("BURN_KEY_B", raising=False)
+
+    export_package(tmp_path / "pkg.zip", "pw", root=root)
+
+    out = capsys.readouterr().out
+    assert "BURN_KEY_B" in out
+    assert "burner.yaml:only" in out
+    assert "BURN_KEY_A" not in out, "在 .env 里的不该被点名"
+
+
+def test_commented_and_indirection_lines_do_not_invent_names(tmp_path) -> None:
+    """注释里的 env: 和 ``env: ${...}`` 都不能变成假名字——假警告比没有更糟。"""
+    from scripts.migrate import _credential_env_refs
+
+    root = tmp_path / "src"
+    root.mkdir(parents=True)
+    (root / "config").mkdir()
+    (root / "config" / "providers.yaml").write_text(
+        "providers:\n"
+        "  - id: p\n"
+        "    type: openai\n"
+        "    base_url: https://example.invalid/v1\n"
+        "    credentials:\n"
+        "      # - id: ghost\n"
+        "      #   env: GHOST_KEY\n"
+        "      - id: real\n"
+        "        env: ${REAL_KEY}\n",
+        encoding="utf-8",
+    )
+
+    assert _credential_env_refs(root) == {"REAL_KEY": ["providers.yaml:real"]}
+
+
+def test_the_scan_agrees_with_the_config_layer_on_the_real_repo() -> None:
+    """两个实现给出同一组名字，否则其中一个在说谎而没人知道。
+
+    migrate 用的是文本扫描（配置坏了也要能导出），app 层用的是
+    ``CredentialConfig.env_reference()``（真解析）。约束在这儿钉住。
+    """
+    from app.core.config import PROJECT_ROOT, credential_env_gaps, load_app_config
+    from scripts.migrate import _credential_env_refs
+
+    root = Path(PROJECT_ROOT)
+    if not (root / "config" / "providers.yaml").is_file():
+        pytest.skip("no local config/providers.yaml")
+
+    scanned = set(_credential_env_refs(root))
+    parsed = set(credential_env_gaps(load_app_config(), root / ".env"))
+    parsed |= {
+        c.env_reference().removeprefix("${").removesuffix("}")
+        for p in load_app_config().providers.values()
+        for c in p.credentials
+        if c.env_reference()
+    }
+
+    assert scanned == parsed, "文本扫描与真解析不一致——有一侧已经看不懂现在的配置了"
+
+
+def test_two_exports_at_once_do_not_corrupt_each_other(tmp_path) -> None:
+    """固定路径的 .migrate_tmp 会让并发导出互删中间文件（2026-09-29 实测）。
+
+    症状不是报错，而是导入端 ``BadZipFile: File is not a zip file``——
+    看起来像密码错了。用两个真线程并发导出，两次的包都必须能重新解开。
+    """
+    import threading
+    import zipfile
+
+    src = tmp_path / "src"
+    _populate(src)
+    archives = [tmp_path / "a.zip", tmp_path / "b.zip"]
+    failures: list[BaseException] = []
+
+    def run(target: Path) -> None:
+        try:
+            migrate.export_package(target, "pw", root=src)
+        except BaseException as exc:  # 收集给主线程断言
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run, args=(a,)) for a in archives]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not failures, f"并发导出失败：{failures}"
+    for archive in archives:
+        assert archive.stat().st_size > 0
+        with zipfile.ZipFile(io.BytesIO(migrate.decrypt_blob(archive.read_bytes(), "pw"))) as zf:
+            assert zf.testzip() is None
+            assert migrate._MANIFEST in zf.namelist()
+    assert not list(src.parent.glob(".migrate_tmp*")), "临时目录必须清干净"

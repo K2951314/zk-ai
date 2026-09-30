@@ -47,6 +47,30 @@ from app.retry.classifier import ErrorClassifier, ErrorInfo
 logger = get_logger("provider")
 
 
+def _wire_message(message: ChatMessage) -> dict[str, Any]:
+    """Render one message for the OpenAI-compatible wire format.
+
+    The invariant this exists to protect: **an assistant message that carries
+    ``tool_calls`` must still carry ``content``.** ``exclude_none=True`` used to
+    drop the key entirely (the canonical model stores ``content=None`` for that
+    shape), and OpenAI's own API tolerates that - but strict deserialisers do
+    not. NVIDIA NIM rejected it with
+    ``missing field `content` at line 1 column 3210887`` and, because a 400 is
+    classified as "the caller's fault" (no retry, no credential switch, no
+    failover), the whole request died at the *last* deployment in the chain.
+    Three real requests hit this on 2026-09-27 (``claude-cli`` user agent).
+
+    Fixed at the wire boundary rather than in the canonical request: ``content
+    is None`` carries meaning internally (history trimming and the token
+    estimator both branch on it), and an empty string is what the field is
+    supposed to mean anyway - the assistant said nothing, it only called tools.
+    """
+    rendered = message.model_dump(exclude_none=True)
+    if "content" not in rendered and rendered.get("role") in {"assistant", "tool"}:
+        rendered["content"] = ""
+    return rendered
+
+
 def _sse_buffer_complete(lines: list[str]) -> bool:
     """True when the buffered ``data:`` lines already form a complete SSE payload.
 
@@ -738,7 +762,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     ) -> tuple[dict[str, Any], list[str]]:
         payload: dict[str, Any] = {
             "model": deployment.model,
-            "messages": [message.model_dump(exclude_none=True) for message in request.messages],
+            "messages": [
+                _wire_message(message) for message in request.messages
+            ],
         }
         unsupported: list[str] = []
 

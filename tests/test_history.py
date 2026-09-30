@@ -227,11 +227,23 @@ def test_message_tokens_counts_images_and_tool_arguments() -> None:
     assert with_image > 0
 
 
-@pytest.mark.parametrize("budget", [1, 100, 1_000, 50_000])
+@pytest.mark.parametrize(
+    "budget",
+    # 三档真的会裁（裁完必须装进预算）+ 一档太小裁不动（必须原样不动）。
+    # 早先的参数 [1, 100, 1000, 50000] 里前三个全部 changed=False，而断言写在
+    # `if result.changed:` 里面——四条绿杠有三条什么都没验（2026-09-29 抓到）。
+    [10_000, 40_000, 60_000, 1],
+)
 def test_trimming_never_exceeds_its_budget(budget: int) -> None:
     """Whatever the budget, the result either fits or the request is untouched."""
     request = ChatCompletionRequest(model="zk-auto", messages=_conversation(turns=30, tools=True))
     result = trim_history(request, budget=budget)
+    # 无条件：`not changed` 与「装进预算」是两种都要守的结局，写成条件断言等于
+    # 把「原样不动」也当成通过——而那恰恰是最需要区分的分支之一。
+    assert not result.changed or request.estimated_input_tokens() <= budget, (
+        f"budget={budget} 裁完之后仍然超预算：{request.estimated_input_tokens()}"
+    )
     if result.changed:
-        assert request.estimated_input_tokens() <= budget
         _assert_valid_shape(request.messages)
+    # 至少有一档必须真的裁起来，否则这条用例整个是空转
+    assert (result.changed and budget >= 10_000) or (not result.changed and budget < 10_000)

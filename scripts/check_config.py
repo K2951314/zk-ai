@@ -107,6 +107,55 @@ def _check_stale_files(warnings: list[str]) -> None:
         )
 
 
+def _check_credential_envs(config: AppConfig, warnings: list[str]) -> None:
+    """凭据要读的 Key 是否在 .env 里——不在的话换机必丢。
+
+    为什么值得单列一道：凭据的名字是从**进程环境**解析的（app/credentials/pool.py），
+    所以「只在 OS 环境变量里有」的 Key 在这台机器上好好的，而迁移包只带 .env。
+    2026-09-29 就在这台机器上抓到一把：SENSENOVA_API_KEY（sensenova-01，
+    priority 100）只存在于用户级环境变量，.env 里只有 _02~_10。
+    这不是错误——Key 可以来自别处——但必须让运营者看见，由他决定。
+    """
+    from app.core.config import credential_env_gaps
+
+    gaps = credential_env_gaps(config)
+    for name, ids in sorted(gaps.items()):
+        where = "、".join(ids)
+        from_os = (
+            "（只存在于 OS 环境变量，本机可用，换机即丢）"
+            if _os_has(name)
+            else "（两边都没有，本机就是 DISABLED）"
+        )
+        warnings.append(
+            f"{where} 读的 {name} 不在 .env 里{from_os}——"
+            "迁移包只带 .env，补进去才能跟着换机"
+        )
+
+
+def _os_has(name: str) -> bool:
+    import os
+
+    return bool(os.environ.get(name))
+
+
+def _check_shadowed_envs(warnings: list[str]) -> None:
+    """OS 环境变量顶掉了 .env 的值——只打 stderr 的警告不算警告。
+
+    ``load_dotenv(override=False)`` 意味着进程环境赢，而 loader 只用 logging
+    报一声：肉眼能看见，``--strict`` 数不到，CI 也就拦不住。同族的
+    :func:`_check_credential_envs` 走的是 warnings 列表，这里对齐过来。
+    """
+    from app.core.config import shadowed_env_names
+
+    shadowed = shadowed_env_names()
+    if shadowed:
+        warnings.append(
+            f".env 的值被 OS 环境变量顶掉（进程环境赢）：{'、'.join(shadowed)}"
+            "——如果是陈旧的，在系统环境变量里清掉；判定见 AGENTS.md 的"
+            "「shadowed by pre-existing process environment」条"
+        )
+
+
 def _report(config: AppConfig) -> None:
     print("\n可用模型（模型 -> 真正可达的部署）")
     for model in sorted(config.models.values(), key=lambda m: m.id):
@@ -143,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     _check_aliases(config, errors)
     _check_unreachable_models(config, warnings)
     _check_alias_provider_breadth(config, warnings)
+    _check_credential_envs(config, warnings)
+    _check_shadowed_envs(warnings)
     for item in getattr(config, "warnings", None) or []:
         warnings.append(f"[loader] {item}")
     try:

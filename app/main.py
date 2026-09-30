@@ -80,6 +80,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "admin API is enabled without ZKAI_ADMIN_TOKEN - set it before exposing "
                 "the gateway publicly"
             )
+        # Editing config/*.yaml now takes effect on its own: the watcher reloads
+        # the moment the file settles (see app/core/config_watch.py). Started after
+        # the container is ready so a reload can never race startup.
+        container.start_config_watch()
+        # 限流账本以前只在优雅关闭时落盘，而这个网关从未优雅关闭过——
+        # 于是 per-account 的 token 配额守卫已经空转了好几天而没人发现。
+        container.start_rate_limit_flush()
         try:
             yield
         finally:

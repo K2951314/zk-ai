@@ -67,12 +67,20 @@ def load_document(path: Path) -> CommentedMap:
     return doc
 
 
-class ConfigStaleError(RuntimeError):
+class ConfigStaleError(ValueError):
     """Raised when the on-disk config changed after we loaded it.
 
     见模块顶部「陈旧检测」的说明：网关不监听配置文件，所以外部编辑在 reload
     之前对内存不可见；此时若把控制台表单（基于旧内存值）写回文件，就会**静默
     回滚**那次外部编辑。宁可拒绝写入并让运营者先 reload，也不要悄悄覆盖。
+
+    继承 ``ValueError`` 是刻意的（2026-09-29 第三轮审查抓到的真 bug）：它原本
+    继承 ``RuntimeError``，于是从所有 ``except (OSError, ValueError)`` 写入点
+     **穿过去**变成 500——``admin._file_write_failed`` 里那段专门写的
+    409 + 「先 reload」提示成了死代码，运营者看到的是「网关内部错误」。
+    语义上也说得通：要写进去的值来自一份**陈旧快照**，这是「值不合法」，
+    不是「文件坏了」（那才是 OSError）。继承 ValueError 让每个现存与未来的
+    写入点不用各自记得把这个异常列进 except。
     """
 
 

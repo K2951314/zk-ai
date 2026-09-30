@@ -320,26 +320,6 @@ def _isolate_loaded_mtimes():
         cw._loaded_mtimes.update(saved)
 
 
-@pytest.fixture(autouse=True)
-def _isolate_loaded_mtimes():
-    """``config_writer._loaded_mtimes`` 是模块级全局，必须逐测试隔离。
-
-    不加这个夹具时，别的测试里 `load_app_config()` 记录过的**真实** config/*.yaml
-    会留在注册表里；只要那个文件在此后被动过，`stale_config_files()` 就会带上它，
-    于是断言 `== []` 随机失败。实测踩到：test_stale_config_files_reports_the_name
-    第一次就红。与消耗器测试隔离 DEFAULT_LOG 是同一个道理。
-    """
-    from app.core import config_writer as cw
-
-    saved = dict(cw._loaded_mtimes)
-    cw._loaded_mtimes.clear()
-    try:
-        yield
-    finally:
-        cw._loaded_mtimes.clear()
-        cw._loaded_mtimes.update(saved)
-
-
 def _providers_yaml(tmp_path):
     p = tmp_path / "providers.yaml"
     p.write_text(

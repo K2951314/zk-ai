@@ -22,7 +22,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import ContainerDep, require_admin
-from app.core.config import PROJECT_ROOT, apply_db_overrides, load_app_config
+from app.core.config import PROJECT_ROOT, load_app_config
 from app.core.config_writer import (
     append_credential_to_provider,
     delete_credential_from_provider,
@@ -44,7 +44,6 @@ from app.models.provider import (
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.providers.base import ProviderContext
 from app.retry.classifier import ErrorClassifier
-from app.routing.aliases import AliasRegistry
 from app.routing.limits import RateLimitRule
 from app.services import burner_service, chatgpt_service
 
@@ -1152,42 +1151,19 @@ async def delete_alias(name: str, container: ContainerDep) -> dict[str, Any]:
 
 @router.post("/config/reload", summary="重载 YAML 配置")
 async def reload_config(container: ContainerDep) -> dict[str, Any]:
-    """Re-read the YAML files and rebuild aliases + adapters (no restart needed)."""
+    """Re-read the YAML files and rebuild aliases + adapters (no restart needed).
+
+    Thin wrapper: the real work is :meth:`Container.reload_config`, which the
+    config file watcher calls too. Keeping one implementation is the point -
+    "it only works after I press reload" must not be a possible state.
+    """
     try:
-        config = load_app_config(container.settings)
+        return await container.reload_config()
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"message": str(exc), "type": "config_error"}},
         ) from exc
-
-    # Re-apply quota rules that could not reach providers.yaml (file is otherwise
-    # authoritative: models/aliases edits were written back to it on save).
-    apply_db_overrides(
-        config,
-        await container.config_repository.provider_rate_limit_overrides(),
-    )
-
-    container.router.reload(config, alias_registry=AliasRegistry(config.aliases.values()))
-    container.config = config
-    container.model_service.config = config
-    container.health_service.config = config
-    container.usage_service.config = config
-    container.rate_limiter.configure(config.providers)
-    for provider in config.providers.values():
-        container.pool.register_provider(provider)
-    # The pool is in-memory state: dropping a credential/provider from YAML and
-    # hitting reload must remove it here too, not just from the DB mirror.
-    pruned = container.pool.reconcile(config.providers)
-    if pruned:
-        logger.info("config reload pruned %d stale credential(s) from the pool", pruned)
-    return {
-        "reloaded": True,
-        "models": len(config.models),
-        "aliases": sorted(config.aliases),
-        "providers": sorted(config.providers),
-        "warnings": config.warnings,
-    }
 
 
 # --------------------------------------------------------------------------- #

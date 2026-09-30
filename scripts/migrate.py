@@ -36,9 +36,12 @@ import getpass
 import hashlib
 import json
 import os
+import re
+import shutil
 import socket
 import sqlite3
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -148,6 +151,118 @@ def _check_env_health(root: Path, *, stage: str) -> list[str]:
         f"——{stage}会把这个损坏带过去"
     )
     return [problem]
+
+
+#: ``env: NAME`` / ``env_var: NAME`` — the line form a credential uses to name
+#: the variable it reads. The value is resolved straight from ``os.environ`` by
+#: CredentialPool (app/credentials/pool.py), never from ``.env``. The ``${NAME}``
+#: spelling is accepted too so this scan cannot drift from
+#: ``CredentialConfig.env_reference()`` (which normalises both to the same
+#: thing); ``tests/test_migrate.py`` pins the two against the real config.
+_ENV_LINE = re.compile(
+    r"^\s*-?\s*env(?:_var)?\s*:\s*(?:\$\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))\s*$"
+)
+#: ``- id: sensenova-01`` — nearest preceding label, used to say *which*
+#: credential is affected instead of only naming a variable.
+_ID_LINE = re.compile(r"^\s*-?\s*id\s*:\s*['\"]?([A-Za-z0-9_.\-]+)['\"]?\s*$")
+#: burner.yaml's ``only:`` block names the keys the burner may burn.
+_ONLY_HEAD = re.compile(r"^\s*only\s*:\s*($|#)")
+_ONLY_ITEM = re.compile(r"^\s*-\s*([A-Z][A-Z0-9_]{2,})\s*$")
+
+
+def _credential_env_refs(root: Path) -> dict[str, list[str]]:
+    """{环境变量名: 读它的地方}，例如 ``{"SENSENOVA_API_KEY": ["providers.yaml:sensenova-01"]}``。
+
+    Deliberately a **text scan**, not ``load_app_config()``: export has to keep
+    working when the config is broken, because a broken config is exactly when
+    the operator wants a backup. Parsing would trade a loud failure for a
+    silent one. The trade is that it tracks the two shapes actually in use
+    (``env:`` in providers.yaml credentials, the ``only:`` list in burner.yaml)
+    and stays quiet about everything else — a warning tool only needs to be
+    right about what it claims.
+    """
+    refs: dict[str, list[str]] = {}
+    providers = root / "config" / "providers.yaml"
+    if providers.is_file():
+        label = ""
+        for line in providers.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            who = _ID_LINE.match(line)
+            if who:
+                label = who.group(1)
+                continue
+            what = _ENV_LINE.match(line)
+            if what:
+                name = what.group(1) or what.group(2)
+                where = f"providers.yaml:{label or '?'}"
+                refs.setdefault(name, [])
+                if where not in refs[name]:
+                    refs[name].append(where)
+    burner = root / "config" / "burner.yaml"
+    if burner.is_file():
+        inside = False
+        for line in burner.read_text(encoding="utf-8", errors="replace").splitlines():
+            if _ONLY_HEAD.match(line):
+                inside = True
+                continue
+            if not inside:
+                continue
+            item = _ONLY_ITEM.match(line)
+            if item:
+                refs.setdefault(item.group(1), []).append("burner.yaml:only")
+                continue
+            if line.strip() and not line.lstrip().startswith(("#", "-")):
+                inside = False
+    return refs
+
+
+def _check_credential_envs(root: Path, *, stage: str) -> dict[str, str]:
+    """Warn about credential keys that will NOT travel with the package.
+
+    ``.env`` is the only secret the transfer carries (see ``_secrets_files``),
+    but credentials resolve their names from the *process* environment. A name
+    that lives only in the OS environment (HKCU\\Environment or Machine) is
+    invisible to the package: the source machine works, the new machine comes
+    up with that credential DISABLED, and nothing says why it used to work.
+
+    Found for real on 2026-09-29: ``SENSENOVA_API_KEY`` — ``sensenova-01``,
+    priority 100, the account-A key — is set at the *user* level on this
+    machine and absent from ``.env``, which carries ``SENSENOVA_API_KEY_02``
+    through ``_10`` only. One machine move and the gateway's most important
+    credential silently disappears.
+
+    Returns ``{变量名: 问题描述}`` so the caller can print one remediation
+    block per name without re-deriving which name went with which problem.
+    """
+    problems: dict[str, str] = {}
+    for name, where in sorted(_credential_env_refs(root).items()):
+        if _env_value(name, root=root):
+            continue  # in .env -> travels with the package
+        who = "、".join(where)
+        if os.environ.get(name):
+            problems[name] = (
+                f"{who} 要读 {name}，但它不在 .env 里（只存在于本机 OS 环境变量）"
+                f"——{stage}会漏掉它，新机器上这个凭据 DISABLED"
+            )
+        else:
+            problems[name] = (
+                f"{who} 要读 {name}，.env 和 OS 环境变量里都没有"
+                f"（这台机器上它已经是 DISABLED）——{stage}帮不了它"
+            )
+    return problems
+
+
+def _print_credential_env_fix(names: list[str]) -> None:
+    """One remediation block for a batch of problems (no value is ever shown)."""
+    print("    影响：迁移包只带 .env 这一份密钥载体，OS 环境变量带不走。")
+    print("    修复（不重设值，从 OS 环境变量里取，全程不回显；改 .env 前先备份）：")
+    for name in names:
+        print(f'      $v=[Environment]::GetEnvironmentVariable("{name}","User")')
+        print(f'      if (-not $v) {{ $v=[Environment]::GetEnvironmentVariable("{name}","Machine") }}')
+        print(f'      Add-Content -Path .env -Value "{name}=$v"')
+    print("    然后重跑本脚本。")
 
 
 def _collect(root: Path) -> tuple[dict[str, Path], list[str]]:
@@ -263,8 +378,27 @@ def export_package(out_path: Path, passphrase: str, root: Path = _ROOT) -> dict:
         print("    判定：python -c \"raw=open('.env','rb').read();"
               " print(raw.count(b'\\r\\r'), raw.count(b'\\r\\n'))\" —— 两数相等就是全文件损坏")
 
-    tmp = _ROOT / ".migrate_tmp"
-    tmp.mkdir(exist_ok=True)
+    # Keys that only exist in the OS environment do not travel: the package
+    # carries .env and nothing else. This is the same class of bug as the CR
+    # damage above (a .env problem that only shows up on the *new* machine),
+    # but it is found by comparing the names credentials read against the names
+    # .env declares - and it is common, because Windows tools routinely set
+    # ANTHROPIC_*/OPENAI_* at the user level for their own use.
+    cred_problems = _check_credential_envs(root, stage="导出")
+    if cred_problems:
+        print(f"  [警告] {len(cred_problems)} 个凭据要读的环境变量不在 .env 里"
+              "——照现在导出，新机器会缺 Key")
+        for problem in cred_problems.values():
+            print(f"    - {problem}")
+        _print_credential_env_fix(sorted(cred_problems))
+
+    # A *unique* temp dir, not the old fixed ``.migrate_tmp``: the cleanup below
+    # empties the directory, so two exports at once (an operator double-clicking
+    # export while a test suite runs) used to delete each other's in-flight
+    # payload and produce an archive that fails with ``BadZipFile`` on import —
+    # a corrupt package that looks like a wrong passphrase. Seen for real on
+    # 2026-09-29 while this file was being reviewed.
+    tmp = Path(tempfile.mkdtemp(prefix=".migrate_tmp-", dir=_ROOT))
     try:
         db_snapshot = _snapshot_database(root, tmp)
         files: dict[str, int] = {}
@@ -293,12 +427,9 @@ def export_package(out_path: Path, passphrase: str, root: Path = _ROOT) -> dict:
         out_path.write_bytes(blob)
         return manifest
     finally:
-        # Never leave plaintext key material on disk longer than needed.
-        for junk in tmp.glob("*"):
-            with contextlib.suppress(OSError):
-                junk.unlink()
-        with contextlib.suppress(OSError):
-            tmp.rmdir()
+        # Never leave plaintext key material on disk longer than needed. This
+        # dir is ours alone, so removing it whole is both simpler and safe.
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
@@ -446,6 +577,18 @@ def import_package(
                 print(f"  [警告] {problem}")
                 print("    这台机器上的其它一切看起来都正常，但一启动就会 bind 失败。")
                 print("    修复：把开头的 \\r\\r\\n 全替换成 \\r\\n（改前先备份，改后逐行比对）。")
+            # Same check on the receiving end. Here it means something stronger
+            # than "this machine is missing a key": the package could not have
+            # carried it, so no amount of re-importing will help - the operator
+            # has to go back to the old machine and add it to .env first.
+            cred_problems = _check_credential_envs(root, stage="导入")
+            if cred_problems:
+                print(f"  [警告] {len(cred_problems)} 个凭据的环境变量不在刚恢复的 .env 里")
+                for problem in cred_problems.values():
+                    print(f"    - {problem}")
+                print("    这不是这台机器的问题：迁移包只带 .env，源机器上漏了的 Key "
+                      "重跑导入也拿不回来。")
+                print("    回源机器补进 .env（见导出时的提示）后重新导出导入。")
             # New machine: the ChatGPT/Codex client is configured from the
             # package's desired config (file-level only - the OS env var is the
             # CLI layer's job, see _provision_chatgpt_env).

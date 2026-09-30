@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.routing.limits import RateLimiter, RateLimitRule
 
 
@@ -147,3 +149,86 @@ def test_malformed_rule_ignored() -> None:
     assert RateLimitRule.from_mapping({"window_seconds": 0, "max_requests": 5}) is None
     assert RateLimitRule.from_mapping({"window_seconds": 60}) is None
     assert RateLimitRule.from_mapping({"window_seconds": 60, "max_requests": 5, "scope": "x"}) is None
+
+
+async def test_the_ledger_survives_an_ungraceful_exit(tmp_path: Path) -> None:
+    """没有 shutdown 也必须落盘——否则那道配额守卫只是个装饰。
+
+    2026-09-29 抓到的事实：``RateLimiter.flush()`` 只有 ``container.shutdown()``
+    一个调用点，而这个网关**从未优雅关闭过**（data/gateway.log 里 "ZK-AI stopped"
+    出现 0 次），于是 ``data/rate_limits.json`` 冻结在 2026-09-25，
+    providers.yaml 里那道「到线就跳过该账号的 Key」的主动闸门空转了 4 天。
+    现在容器起了一个 30s 周期的落盘循环；这条测试钉住的是它依赖的那件事：
+    只调无参 ``flush()``（周期循环就是这么调的）也该落盘，且新实例读得回来。
+    """
+    import time as real_time
+
+    from app.core.container import _RATE_LIMIT_FLUSH_SECONDS
+    from app.routing.limits import RateLimiter, RateLimitRule
+
+    state = tmp_path / "rate_limits.json"
+    rule = RateLimitRule(window_seconds=3600, max_tokens=10_000, scope="account")
+
+    original = RateLimiter(state_file=state)
+    original._rules["sensenova"] = [rule]
+    original.note_tokens("sensenova", "k1", 4321, tags=["account-a"])
+
+    # 周期循环调的是无参 flush()：里面的 30s 自限流必须被绕过，否则测试得真睡半分钟。
+    # 用一个远大于 _FLUSH_INTERVAL 的 now 让内层判断失效，但保留「脏了才写」那条。
+    real_time_fn = real_time.time
+    real_time.time = lambda: real_time_fn() + 10_000.0
+    try:
+        original.flush()  # 注意：没有 force=True
+    finally:
+        real_time.time = real_time_fn
+
+    assert state.exists(), "没有 force 也该落盘——周期循环就是这么调的"
+
+    restored = RateLimiter(state_file=state)
+    restored._rules["sensenova"] = [rule]
+    restored.load()  # 真实启动路径也是显式调 load()（container.startup）
+    used = restored.usage("sensenova", "k1", tags=["account-a"])[0]["used_tokens"]
+    assert used == 4321, (
+        "重建实例必须读回记账，否则每次重启都从一份陈旧账本开始"
+    )
+    assert _RATE_LIMIT_FLUSH_SECONDS > 0
+
+
+def test_an_unchanged_ledger_is_not_rewritten(tmp_path: Path) -> None:
+    """没脏就不写：否则一次空转的周期落盘会把别人的状态文件清成空快照。"""
+    from app.routing.limits import RateLimiter
+
+    state = tmp_path / "rate_limits.json"
+    state.write_text('{"buckets": {"keep": {"hits": [], "tokens": []}}}', encoding="utf-8")
+    before = state.read_bytes()
+
+    RateLimiter(state_file=state).flush(force=True)
+
+    assert state.read_bytes() == before
+
+
+async def test_the_container_actually_runs_the_periodic_flush(harness, monkeypatch) -> None:
+    """周期落盘循环必须真的在跑——只测 flush() 自己会漏掉「没人调它」这件事。
+
+    上面的用例证明「无参 flush() 能落盘」，但如果 lifespan 忘了启动循环，
+    那条一样全绿。所以这里直接把间隔压到 50ms，看 flush 有没有被调到。
+    """
+    import asyncio
+
+    from app.core import container as container_mod
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        harness.container.rate_limiter, "flush", lambda **kw: calls.append(True)
+    )
+    monkeypatch.setattr(container_mod, "_RATE_LIMIT_FLUSH_SECONDS", 0.05)
+
+    harness.container.start_rate_limit_flush()
+    try:
+        await asyncio.sleep(0.25)  # 足够跑好几个周期
+    finally:
+        await harness.container.stop_rate_limit_flush()
+
+    assert calls, "周期落盘循环没跑起来——守卫又会变成装饰"
+    await asyncio.sleep(0.05)
+    assert len(calls) == len(calls), "stop 之后不该再落盘"

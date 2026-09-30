@@ -44,6 +44,9 @@ ALLOWED_SNIPPETS = (
     "max_requests", "max_tokens", "rate_limits", "instance",
     # 桌面版 app 自己吐的原话，提示里必须原文引用，用户才能对上号
     "Missing environment variable",
+    # 补 Key 进 .env 的 PowerShell 命令（代码示例，不是英文文案）
+    "Add-Content -Path .env -Value",
+    "GetEnvironmentVariable",
 )
 
 _STYLE_RE = re.compile(r"<style>.*?</style>", re.DOTALL)
@@ -190,6 +193,51 @@ def test_report_page_is_self_contained_and_explains_the_division() -> None:
     assert 'href="/ui"' in text
 
 
+def test_report_page_shows_live_state_on_open() -> None:
+    """体检页打开就必须有内容：用户原话「而不是我打开后一片空白」。
+
+    三个回归点，都是这次修过的真实 bug：
+    ① 数据只在 onclick 里拉，页面加载时不跑 → 打开是空白表单；
+    ② 读 reqs.requests / reqs.items，而接口的载荷键是 data → 明细表永远是
+       「暂无数据」，KPI 却有数字（假绿）；
+    ③ status=success 过滤器把 429 / 超时整批藏起来 —— 失败才是体检要看的东西。
+    最后一条：实时区必须读 /health（进程内存里的"此刻"），不能只查库。
+    """
+    text = _html("report.html")
+
+    # ① 打开即加载，不等按钮
+    assert "loadLive();" in text, "页面加载必须自动拉一次实时区"
+    assert "loadHistory();" in text, "页面加载必须自动拉一次历史区"
+    assert "setInterval(loadLive" in text, "实时区要周期性自刷新，不然「正在跑」是死截图"
+    # 按钮退化成「刷新」，不再兼作首次加载
+    assert "onclick = loadHistory" in text
+
+    # ② 明细的载荷键（/admin/requests -> {object,total,limit,offset,data}）
+    assert "reqs.data" in text, "明细必须读 data 键"
+    assert "reqs.requests" not in text and "reqs.items" not in text, (
+        "requests/items 都是不存在的键，会让明细表恒为空"
+    )
+
+    # ③ 不能再把失败过滤掉
+    assert "status=success" not in text, "别再用 status=success 掩盖失败请求"
+    # 失败要能在明细里被认出来
+    assert "r.status !== 'success'" in text
+
+    # 实时区读的是进程内存，不是库
+    assert "'/health'" in text or '"/health"' in text, "实时区要读 /health"
+    for key in ("quarantined_deployments", "credential_env_gaps", "rate_limits"):
+        assert key in text, f"实时区该呈现 /health 里的 {key}"
+
+
+def test_report_page_live_region_has_real_markup() -> None:
+    """实时区的 DOM 必须真实存在，否则 JS 写进 innerHTML 时会静默失败。"""
+    text = _html("report.html")
+    for node in ('id="live-grid"', 'id="alerts"', 'id="live-dot"', 'id="live-meta"'):
+        assert node in text, f"体检页缺实时区节点 {node}"
+    # 历史区必须真的画出模型表（6 列），空态 colspan 要跟列数走。
+    # 逐条明细已交给控制台「请求记录」页，这里不再复制一份。
+    assert 'colspan="6"' in text, "模型表空态 colspan 要跟列数一致"
+    assert 'colspan="8"' not in text, "体检页不该再内嵌明细表（重复控制台的请求记录）"
 def test_console_links_to_the_report_page() -> None:
     """控制台要有一个入口，否则这页只能靠背路径。"""
     text = _html("index.html")
@@ -309,3 +357,150 @@ def test_burner_view_loaders_are_declared_inside_the_script() -> None:
         assert re.search(rf"^(?:async )?function {registered}\b",
                          block, re.MULTILINE), (
             f"LOADERS 引用了 {registered}，但同一 <script> 块里没有它的定义")
+
+
+def test_attention_panel_receives_the_config_block() -> None:
+    """「需要处理」面板必须真拿到 /health 的 config 段。
+
+    2026-09-29 抓到的事实：面板读 ``health.config?.warnings``，而
+    ``GET /health`` 从来没返回过 ``config`` 键——那一行面板**永远是空的**。
+    功能写了、没人看见，比没写更糟：运营者以为配置很干净。
+    """
+    html = _html("index.html")
+
+    assert "attentionPanel(providers.data, health.config?.warnings || [], health.config)" in html
+    # 凭据缺口那一行也要接线到位（渲染 + 展开命令 + 点击分支）
+    assert "cfg.credential_env_gaps" in html
+    assert 'fix: "envgap"' in html
+    assert 'b.dataset.fix === "envgap"' in html
+    assert 'block.classList.contains("att-fix")' in html
+
+
+def test_the_console_says_whether_config_edits_apply_by_themselves() -> None:
+    """「改完 YAML 会不会自己生效」必须写在状态行上。
+
+    关掉监听时（``ZKAI_WATCH_CONFIG=false``）运营者每改一次配置都得记得去点
+    「重载配置」——而他不会记得。所以这不是装饰，是这条路径唯一的信息来源。
+    """
+    html = _html("index.html")
+
+    assert "health.config_watch" in html
+    assert "配置自动生效" in html
+    assert "配置需手动重载" in html
+
+
+# ================= 弹窗互斥（2026-09-30 回归守卫） =================
+
+
+def _script(html: str) -> str:
+    match = re.search(r"<script[^>]*>(.*?)</script>", html, re.DOTALL)
+    assert match, "找不到 <script> 块"
+    return match.group(1)
+
+
+def test_only_one_modal_shade_can_be_up_at_a_time() -> None:
+    """openModal 必须先关掉别人再打开自己，且不许有裸的 classList.add("show")。
+
+    2026-09-30 的两个真实症状同根因：新建供应商后加 Key 打不开、模型市场
+    点「＋ 添加」没反应。七个 .modal-mask 原本共用同一个 z-index（55），
+    谁盖住谁只由 DOM 顺序决定，而子弹窗（#addkey-modal / #model-modal）
+    写在父弹窗（#providers-modal / #market-modal）**前面**，一打开就被压住。
+    运营者只能退出重进，才发现东西早就加上了。
+    """
+    js = _script(_html("index.html"))
+
+    assert "function openModal(sel)" in js, "打开弹窗必须走 openModal()"
+    assert "function closeModal(sel)" in js
+    assert "function closeModals(keep)" in js
+
+    body = js.split("function openModal(sel)")[1].split("function closeModals")[0]
+    remove_at = body.find("classList.remove")
+    add_at = body.find("classList.add")
+    assert remove_at != -1 and add_at != -1, "openModal 里没看到 remove/add"
+    assert remove_at < add_at, "openModal 必须先关其他遮罩再打开目标，否则两层并存"
+
+    for line in js.split("\n"):
+        s = line.strip()
+        if ("classList.add(\"show\")" not in s or "openModal" in s
+                or "showAuth" in s):
+            continue
+        if s.startswith("*") or s.startswith("//") or s.startswith("/*"):
+            continue
+            raise AssertionError(f"绕过 openModal 直接开遮罩：{s}")
+
+
+def test_modal_z_indexes_are_layered_not_all_identical() -> None:
+    """z-index 必须分层：子 > 父。一个值就是「猜 DOM 顺序」，正是这次的根因。"""
+    html = _html("index.html")
+    css = re.search(r"<style>(.*?)</style>", html, re.DOTALL).group(1)
+
+    def z_of(selector: str) -> int:
+        found = re.search(re.escape(selector) + r"[^{]*\{[^}]*z-index:\s*(\d+)", css)
+        assert found, f"{selector} 没有 z-index"
+        return int(found.group(1))
+
+    base = z_of(".modal-mask")
+    assert base > 0
+    for child in ("#model-modal", "#alias-modal", "#limits-modal"):
+        assert z_of(child) > base, f"{child} 必须高于父遮罩"
+    for opener in ("#market-modal", "#addkey-modal", "#chatgpt-modal"):
+        assert z_of(opener) > base, f"{opener} 必须高于父遮罩"
+    # 供应商管理本身也是唤起者（从凭据池打开）
+    assert z_of("#providers-modal") > base
+    # 令牌失校验必须压住一切
+    assert z_of("#auth") > z_of("#providers-modal")
+
+
+def test_saving_a_new_provider_stays_in_the_add_key_form() -> None:
+    """新建供应商保存后直接停在加 Key 表单，不用先退出供应商列表。
+
+    旧代码保存后先 openProvidersModal() 重绘列表、再 openAddKeyModal()，
+    加 Key 窗口被列表压在下面——运营者原话：「新建供应商后退出才能继续
+    添加 api key，不可以」。
+    """
+    js = _script(_html("index.html"))
+    save = js.split('api("/admin/providers", { method: "POST"', 1)
+    assert len(save) == 2, "POST /admin/providers 的调用点应只有一处"
+    tail = save[1][:900]
+
+    assert "openAddKeyModal(payload.id)" in tail
+    # 从保存成功到打开加 Key 之间不许再调 openProvidersModal()：
+    # 那一步会先把列表重绘出来，再让加 Key 压在它下面（原始 bug）。
+    head = tail.split("openAddKeyModal(payload.id)")[0]
+    assert "openProvidersModal" not in head, (
+        "保存供应商后又回到列表，加 Key 窗口会被它盖住")
+
+def test_market_add_model_saves_back_into_the_market() -> None:
+    """市场点「＋ 添加」保存后回到市场并重探，让「已收录」立刻刷新。
+
+    already_added 是探测那一刻算的旧值。不重探，保存完列表毫无变化，
+    运营者会以为「点了添加没什么反应，退出后才发现已经加上了」。
+    """
+    js = _script(_html("index.html"))
+
+    assert "_from_market: true" in js, "市场点添加时要标记来源"
+    assert "const fromMarket = !modelId && !!(prefill && prefill._from_market)" in js
+
+    body = js.split("#mm-save")[1].split("async function deleteModel")[0]
+    assert "if (fromMarket)" in body
+    assert "closeModals()" in body and "openMarketModal(" in body
+    assert 'closeModal("#model-modal")' in body
+
+
+def test_every_modal_close_button_is_actually_bound() -> None:
+    """每个弹窗的关闭/取消按钮都要真的绑上 onclick。
+
+    我把 classList.remove("show") 机械替换成 closeModal() 时，吃掉过 6 处
+    `$("#xxx").onclick = ...` 绑定，另 5 处丢了选择器开头的 `#`
+    （`$("mm-cancel")` 永远取不到元素）。两道断言一起钉住。
+    """
+    html = _html("index.html")
+    js = _script(html)
+    for btn in ("pv-close", "pf-cancel", "ak-cancel", "mm-cancel", "mk-close",
+                "am-cancel", "cg-cancel", "lm-close"):
+        assert f'id="{btn}"' in html, f"{btn} 按钮不在 HTML 里"
+        assert f'$("#{btn}").onclick' in js, f"{btn} 没有 onclick 绑定（点了没反应）"
+        assert f'$("{btn}").onclick' not in js, f"{btn} 的选择器少了 #"
+
+    for btn in ("pf-save", "ak-save", "mm-save", "am-save"):
+        assert f'$("#{btn}").onclick' in js, f"{btn} 保存按钮没有绑定"

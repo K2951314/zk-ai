@@ -70,6 +70,20 @@ def _unknown_model_message(
     return base
 
 
+@dataclass(slots=True, frozen=True)
+class FrontModelOutcome:
+    """What the front-line promotion actually did.
+
+    ``applied`` is the model id that now leads the chain; ``note`` explains why
+    nothing was promoted (e.g. "隔离/冷却中，未提升"). Splitting the two keeps
+    the routing reason honest: it must never name a model the scheduler is going
+    to skip.
+    """
+
+    applied: str | None
+    note: str | None
+
+
 @dataclass(slots=True)
 class RoutingDecision:
     """Why this request went where it went (recorded on every response)."""
@@ -195,11 +209,41 @@ class Router:
     ) -> CapabilityRequirement:
         return infer_requirement(request, alias=alias, model=model)
 
+    def _servable_aliases(self) -> set[str]:
+        """别名里**现在真能产出候选**的那些（agent_auto 改写目标的可服务判据）。
+
+        判据刻意与 :meth:`resolve_model_ids` 的第一步**逐字一致**（同一个
+        ``expand(name, model_ids=set(self.config.models))``）：那里返回空就会抛
+        ``AliasNotFoundError``，所以"expand 非空"就是"plan() 走得通"。
+        自己另发明一套更严或更松的标准，就会重新造出"检查说行、实际 404"的裂缝。
+        """
+        model_ids = set(self.config.models)
+        return {
+            name
+            for name in self.aliases.names()
+            if self.aliases.expand(name, model_ids=model_ids)
+        }
+
     # ------------------------------------------------------------------ #
     # Planning
     # ------------------------------------------------------------------ #
-    def plan(self, request: ChatCompletionRequest) -> RoutingDecision:
-        """Build the ordered attempt plan for *request*."""
+    def plan(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        unavailable: set[str] | None = None,
+    ) -> RoutingDecision:
+        """Build the ordered attempt plan for *request*.
+
+        *unavailable* is the set of deployment ids the scheduler currently refuses
+        to call (short cooldown or automatic quarantine). It is passed **as data**,
+        never fetched: the router does no I/O, and the only component that knows
+        the health state is the scheduler. Without it the front-line model could
+        be promoted to first place while being quarantined - the scheduler would
+        then skip it anyway, and the routing reason would claim an order that
+        never happened. That lie is expensive: it is what makes "my front model
+        is set but nothing answers" look like a routing bug.
+        """
         requested = request.model
         # agent-auto: rewrite the requested alias by request *shape* before the
         # scorer sees it. This is what makes "reasoning must stay on K3" hard:
@@ -207,7 +251,13 @@ class Router:
         # ever ranks models inside the chain the shape picked. A mechanical
         # request sent to zk-long has no K3 in its candidate list at all, so
         # no weight vector can resurrect it.
-        rewrite = rewrite_model(request, known_aliases=set(self.aliases.names()))
+        # 传「现在真能服务的别名」，不是「配置里写过的别名」。AliasRegistry.names()
+        # 包含 enabled=false 的条目，而 expand() 对它们返回空列表——按名字判断会让
+        # 改写目标看似可用，实际每个命中的请求都以 404 结束且一句 WARNING 都没有
+        # （2026-09-29 第三轮审查抓到：控制台把 zk-long 停用 = 所有带图/工具轮/
+        # 长上下文请求全灭）。这与「把 /v1/models 的目录当成能调用」是同一个错，
+        # 只是这次犯在别名层。
+        rewrite = rewrite_model(request, known_aliases=self._servable_aliases())
         if rewrite.changed:
             logger.info(
                 "agent-auto: %s -> %s (%s)",
@@ -254,7 +304,7 @@ class Router:
         strategy_name = alias.strategy if alias else None
         strategy = get_strategy(strategy_name)
         ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
-        front_applied = self._promote_front_model(ordered, alias)
+        front = self._promote_front_model(ordered, alias, unavailable or set())
 
         # Safety valve: per-deployment ``request_requires`` gates can leave a
         # request with zero eligible deployments (e.g. every deployment on the
@@ -287,7 +337,7 @@ class Router:
             # dropped here, a request whose gates all fail would silently lose the
             # only model that answers, which is exactly the case where the
             # operator needs it most.
-            self._promote_front_model(ordered, alias)
+            self._promote_front_model(ordered, alias, unavailable or set())
             logger.warning(
                 "alias '%s' left no eligible deployment (all request_requires gates failed); "
                 "falling back to the ungated ranking - this usually means the deployment "
@@ -303,8 +353,10 @@ class Router:
         ]
         if rewrite.changed:
             reason_parts.append(f"agent_auto={rewrite.rewritten}({rewrite.reason})")
-        if front_applied:
-            reason_parts.append(f"front_model={front_applied}")
+        if front.applied:
+            reason_parts.append(f"front_model={front.applied}")
+        elif front.note:
+            reason_parts.append(f"front_model={front.note}")
         if requirement.notes:
             reason_parts.append("hints: " + "; ".join(requirement.notes))
         blocked = [c.deployment.id for c in ordered if not c.eligible]
@@ -332,11 +384,12 @@ class Router:
         self,
         ordered: list[RoutingCandidate],
         alias: ModelAliasConfig | None,
-    ) -> str | None:
+        unavailable: set[str] | None = None,
+    ) -> FrontModelOutcome:
         """Float *alias.front_model* to the head of the attempt order.
 
-        Returns the promoted model id (for the routing reason) or ``None`` when
-        nothing was promoted.
+        Returns what actually happened, so the routing reason cannot claim an
+        order the scheduler will not follow.
 
         Deliberately conservative, because the whole point is *reliability*:
 
@@ -344,33 +397,52 @@ class Router:
           ``request_requires`` (or with no deployment at all) must not be forced
           to the front - that would turn a working request into a guaranteed
           failure, which is the opposite of what a front-line model is for;
+        * only a deployment the scheduler will actually **call** is promoted. One
+          that is cooling down or quarantined gets skipped at execution time
+          (scheduler.py ``deployment_cooling_down``), so promoting it would buy
+          nothing and cost the truth - the log would name a model that never
+          received the request. This is the gap found in the 2026-09-29 review:
+          the operator's front model was 403-dead and still reported as first;
         * the promotion is a reorder, not a filter: everything the capability
           router ranked stays in the chain behind it, so content-based selection
           still decides the *backup* and the failover order;
-        * when the front model is missing or ineligible the chain is returned
-          untouched, so a typo in ``front_model`` degrades to the old behaviour
-          instead of breaking routing.
+        * when the front model is missing, ineligible, or unavailable the chain is
+          returned untouched, so a typo in ``front_model`` degrades to the old
+          behaviour instead of breaking routing.
 
         Callers hold no locks; ``ordered`` is mutated in place because it is a
         freshly built list owned by ``plan()``.
         """
         if alias is None or not alias.front_model:
-            return None
+            return FrontModelOutcome(None, None)
         wanted = alias.front_model
+        parked: list[str] = []
         for index, candidate in enumerate(ordered):
             if candidate.model.id != wanted or not candidate.eligible:
                 continue
+            if unavailable and candidate.deployment.id in unavailable:
+                parked.append(candidate.deployment.id)
+                continue
             if index == 0:
-                return wanted  # already leading, nothing to do
+                return FrontModelOutcome(wanted, None)  # already leading
             ordered.insert(0, ordered.pop(index))
-            return wanted
+            return FrontModelOutcome(wanted, None)
+        if parked:
+            logger.debug(
+                "alias '%s' front_model '%s' is parked (cooldown/quarantine: %s); "
+                "keeping the routed order",
+                alias.name,
+                wanted,
+                "、".join(parked),
+            )
+            return FrontModelOutcome(None, f"{wanted}(隔离/冷却中，未提升)")
         logger.debug(
             "alias '%s' front_model '%s' is not an eligible candidate; "
             "keeping the routed order",
             alias.name,
             wanted,
         )
-        return None
+        return FrontModelOutcome(None, None)
 
     def eligible_candidates(self, decision: RoutingDecision) -> list[RoutingCandidate]:
         """Eligible candidates in attempt order."""

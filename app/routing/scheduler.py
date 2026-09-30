@@ -263,6 +263,18 @@ class Scheduler:
             if health.consecutive_failures or health.quarantined_until
         }
 
+    def unavailable_deployments(self) -> set[str]:
+        """调度器现在**不会调用**的部署 id（短冷却 + 自动隔离）。
+
+        交给 Router 当纯数据用（``plan(..., unavailable=...)``），让前端模型不会被
+        提到一个马上会被跳过的位置上。健康判断只有这一处，`Router` 依旧不做 I/O。
+        """
+        return {
+            deployment_id
+            for deployment_id in (*self._deployment_cooldowns, *self._deployment_health)
+            if self.deployment_cooling_down(deployment_id)
+        }
+
     def _apply_deployment_cooldown(self, deployment_id: str, info: ErrorInfo) -> float:
         if info.cooldown_scope != "deployment" or info.cooldown_seconds <= 0:
             return 0.0
@@ -479,7 +491,7 @@ class Scheduler:
         self, request: ChatCompletionRequest, *, request_id: str
     ) -> ExecutionResult:
         """Run *request* to completion, retrying and failing over as configured."""
-        decision = self.router.plan(request)
+        decision = self.router.plan(request, unavailable=self.unavailable_deployments())
         session_key = self._session_key(request)
         attempts: list[AttemptOutcome] = []
         errors: list[ErrorInfo] = []
@@ -683,7 +695,7 @@ class Scheduler:
         (the service layer's own list was never populated, so failures were
         recorded as ``attempt_count=0`` with no upstream detail at all).
         """
-        decision = self.router.plan(request)
+        decision = self.router.plan(request, unavailable=self.unavailable_deployments())
         session_key = self._session_key(request)
         attempts: list[AttemptOutcome] = []
         errors: list[ErrorInfo] = []

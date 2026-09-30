@@ -714,3 +714,55 @@ def _live_response() -> Any:
         )],
         usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
     )
+
+
+def test_assistant_tool_calls_message_always_carries_content() -> None:
+    """assistant + tool_calls 的消息必须带 ``content`` 键。
+
+    2026-09-29 第三轮审查抓到的真 bug：``model_dump(exclude_none=True)`` 把这个键
+    整个删掉（canonical 模型里它是 ``content=None``）。OpenAI 自家 API 容忍，
+    NVIDIA NIM 的严格反序列化不容忍：``missing field `content```
+    ——而 400 被分类成「调用方的错」，不重试、不换 Key、不故障转移，
+    于是整条请求死在链上最后一个部署。2026-09-27 有三个真实请求这么死的。
+    """
+    from app.models.provider import DeploymentConfig, ProviderConfig, ProviderType
+    from app.models.request import (
+        ChatCompletionRequest,
+        ChatMessage,
+        FunctionCall,
+        ToolCall,
+    )
+    from app.providers.base import OpenAICompatibleAdapter
+
+    adapter = OpenAICompatibleAdapter(
+        ProviderConfig(id="p", type=ProviderType.OPENAI_COMPATIBLE, base_url="http://127.0.0.1:9/v1")
+    )
+    request = ChatCompletionRequest(
+        model="m",
+        messages=[
+            ChatMessage(role="user", content="读一下这个文件"),
+            # 这个形状由 app/models/request.py 的 flush_calls() 造出来——Responses
+            # 路径的每一个工具轮都必然产生它，客户端输入里根本没有 assistant 消息
+            ChatMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(id="c1", function=FunctionCall(name="read_file", arguments='{"p":"a.py"}'))
+                ],
+            ),
+            ChatMessage(role="tool", tool_call_id="c1", content="文件内容"),
+        ],
+    )
+    deployment = DeploymentConfig(
+        id="d", provider_id="p", model="m", context_window=128000
+    )
+
+    payload, _ = adapter.build_payload(request, deployment)
+
+    for message in payload["messages"]:
+        assert "content" in message, (
+            f"{message['role']} 消息缺 content 键——严格反序列化的上游会 400 整条请求"
+        )
+    assert payload["messages"][1]["content"] == "", "只说工具调用时 content 是空串"
+    assert payload["messages"][1]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert payload["messages"][1]["tool_calls"][0]["id"] == "c1"

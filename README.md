@@ -609,7 +609,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 25 个测试模块，568 个用例，全部 Mock
+├── tests/                # conftest + 33 个测试模块，811 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -617,7 +617,10 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 66 个文件约 15,400 行，`tests/` 约 7,300 行，`scripts/` 约 3,600 行。
+规模：`app/` 71 个文件约 18,900 行，`tests/` 33 个测试模块 811 个用例（约 12,300 行），
+`scripts/` 18 个文件约 5,200 行。**测试/产品代码 = 65%**。
+（这两个数字上一次更新是 2026-09-19 的 15,400/7,300/3,600——**文档规模必须跟着代码走**，
+第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
 ---
 
@@ -1085,11 +1088,12 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 
 | 视图 | 能干什么 |
 |---|---|
-| 总览 | 供应商可用性、池成功率、60 分钟失败率、7 天 Token 与等价成本；**顶部「需要处理」面板把配置层面待手动的問題一次列清，每行带一键修复**；一键健康检查 / 重载配置 / 清空冷却 |
+| 总览 | 供应商可用性、**两个总数字**（可用凭据 / 60 分钟失败率——其余成功率、token、成本在「凭据池」「用量统计」，不再复制）；**顶部「需要处理」面板把配置层面待手动的問題一次列清，每行带一键修复**；一键健康检查 / 重载配置 / 清空冷却 |
 | 凭据池 | 每把 Key 的状态徽章、优先级、配额用量、冷却倒计时；逐把启用 / 禁用 / 解除冷却；加删 Key、供应商管理、主动配额限额 |
 | 请求记录 | 多条件筛选 + 分页；点击任意一行看**每一次尝试**的上游错误原文与路由决策 |
 | 用量统计 | 按天 / 供应商 / 模型 / 凭据的 token 与等价成本 |
 | 模型与别名 | 模型 → 部署 → 供应商全景；**路由预览**（不花钱就能看到某个请求会怎么走）；**模型市场**（探测供应商真实可用模型，点选即预填上下文/能力/价格） |
+| 🩺 体检 | 跳转 `/ui/report`：打开即加载的「慢在哪 / 派给谁 / 为什么」单页，实时区 10 秒自刷，令牌与深浅色跟控制台共用 |
 
 页面壳公开、不含数据，所有数据仍走下面鉴权的 `/admin/*`。界面文案、接口报错文案
 全部为中文；`/admin/*` 返回的 `error.type` 机器码与 HTTP 状态码保持不变。
@@ -1284,7 +1288,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**568 个用例，全部通过，零网络、零真实配额。**
+**811 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1404,7 +1408,7 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
 
 ```bash
 uv run ruff check app tests scripts   # All checks passed!
-uv run mypy app scripts               # Success: no issues found in 66 source files
+uv run mypy app scripts               # Success: no issues found in 88 source files
 ```
 
 > `mypy` 只检查交付代码（`app/`、`scripts/`）。`tests/` 在 `pyproject.toml` 中显式排除：

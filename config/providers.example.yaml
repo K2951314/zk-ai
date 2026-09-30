@@ -5,6 +5,16 @@
 # 环境变量名，启动时用 `${VAR}` 或 `${VAR:-默认值}` 语法解析（本文件里任何
 # 位置都可以用这种写法）。
 #
+# 【接入点变量必须带 ZKAI_ 前缀】
+#   base_url / enabled / referer 这类**网关自己的**开关，一律写成
+#   `${ZKAI_XXX_BASE_URL:-默认值}`，不要写成 `${ANTHROPIC_BASE_URL:-...}`。
+#   不带前缀的那些名字是别人家的：Claude Code、cc-switch、各种 OpenAI 代理
+#   工具都会在用户级环境变量里设 ANTHROPIC_BASE_URL / OPENAI_BASE_URL。写裸名字
+#   的结果是「.env 里配了官方地址，实际却打到一个本地代理」——而且没有任何报错。
+#   2026-09-29 在本机实测到这条：`ANTHROPIC_BASE_URL` 被 cc-switch 设成了
+#   http://127.0.0.1:15721，.env 里的值被静默顶掉。密钥名（OPENAI_KEY_01 等）
+#   不需要前缀——它们本来就不和任何工具重名。
+#
 # 【最容易配错的一点】
 #   env 填的是「环境变量的名字」，不是密钥本身，也不是 ${} 引用。
 #   写 env: ${OPENAI_KEY_01} 会被 YAML 插值展开成密钥本体，导致凭据拿着一个
@@ -35,9 +45,9 @@ providers:
   # -------------------------------------------------------------------------
   - id: openai
     type: openai
-    # 想走代理/Azure 风格网关，改 OPENAI_BASE_URL 即可，不用动本文件
-    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-    enabled: ${OPENAI_ENABLED:-true}
+    # 想走代理/Azure 风格网关，改 ZKAI_OPENAI_BASE_URL 即可，不用动本文件
+    base_url: ${ZKAI_OPENAI_BASE_URL:-https://api.openai.com/v1}
+    enabled: ${ZKAI_OPENAI_ENABLED:-true}
     # 单次请求超时（秒）
     timeout: 120
     # 适配器自身的重试次数（网关层面的重试在 retry 段配置）
@@ -58,8 +68,8 @@ providers:
   # -------------------------------------------------------------------------
   - id: anthropic
     type: anthropic
-    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
-    enabled: ${ANTHROPIC_ENABLED:-true}
+    base_url: ${ZKAI_ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
+    enabled: ${ZKAI_ANTHROPIC_ENABLED:-true}
     # Anthropic 要求的 API 版本号，随官方废弃节奏调整
     api_version: "2023-06-01"
     timeout: 120
@@ -87,8 +97,8 @@ providers:
   # -------------------------------------------------------------------------
   - id: gemini
     type: gemini
-    base_url: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
-    enabled: ${GEMINI_ENABLED:-true}
+    base_url: ${ZKAI_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+    enabled: ${ZKAI_GEMINI_ENABLED:-true}
     timeout: 120
     credentials:
       - id: gemini-01
@@ -101,11 +111,11 @@ providers:
   # -------------------------------------------------------------------------
   - id: openrouter
     type: openrouter
-    base_url: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
-    enabled: ${OPENROUTER_ENABLED:-true}
+    base_url: ${ZKAI_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+    enabled: ${ZKAI_OPENROUTER_ENABLED:-true}
     # HTTP-Referer 与 X-Title，OpenRouter 用于区分调用来源
-    referer: ${OPENROUTER_REFERER:-https://github.com/zk-ai}
-    app_title: ${OPENROUTER_TITLE:-ZK-AI}
+    referer: ${ZKAI_OPENROUTER_REFERER:-https://github.com/zk-ai}
+    app_title: ${ZKAI_OPENROUTER_TITLE:-ZK-AI}
     timeout: 120
     credentials:
       - id: openrouter-01
@@ -119,7 +129,7 @@ providers:
   # -------------------------------------------------------------------------
   - id: ollama
     type: ollama
-    base_url: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+    base_url: ${ZKAI_OLLAMA_BASE_URL:-http://127.0.0.1:11434}
     enabled: ${ZKAI_OLLAMA_ENABLED:-false}
     # 本地模型冷启动慢，超时给宽一点
     timeout: 300

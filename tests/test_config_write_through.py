@@ -381,3 +381,43 @@ async def test_market_falls_back_to_plain_id_list(write_api) -> None:
     assert rows, "the default catalogue wraps list_models"
     assert all(row["discovered_known"] is False for row in rows)
     assert all(row["context_window_source"] == "preset" for row in rows)
+
+
+async def test_a_stale_config_save_returns_409_not_500(write_api) -> None:
+    """外部改过 models.yaml 之后从控制台保存，必须是 409 + 「先 reload」。
+
+    2026-09-29 第三轮审查抓到的真 bug：`ConfigStaleError` 原本继承
+    ``RuntimeError``，从五个写入点的 `except (OSError, ValueError)` **穿过去**
+    变成 500——`_file_write_failed` 里那段专门写的 409 提示是死代码。
+    这条测试钉在**唯一的消费者**（HTTP 端点）上，因为守护契约的旧测试只走到
+    `config_writer` 边界，从没走到这里。
+    """
+    from app.core.config_writer import ConfigStaleError
+
+    # 类型契约先钉住：它必须是「值不合法」，才能被所有写入点现有的 except 收到
+    assert issubclass(ConfigStaleError, ValueError), (
+        "改成别的基类会让 except (OSError, ValueError) 再次漏掉它，"
+        "运营者又会拿到 500 而不是 409"
+    )
+
+    client, _harness, config_dir = write_api
+    models_file = config_dir / "models.yaml"
+
+    # 模拟运营者在外部编辑器里改了文件（网关没有 reload）。
+    # 加一行注释是最真实的形状：内容变了、但别名和模型都还在。
+    original = models_file.read_text(encoding="utf-8")
+    models_file.write_text(original + "\n# 运营者刚在这里加了一行\n", encoding="utf-8")
+
+    # 删别名这条路径直接落到写文件（不像删模型那样有「还被引用」的前置 409）
+    response = await client.delete("/admin/aliases/zk-test", headers=ADMIN)
+
+    assert response.status_code == 409, (
+        f"期望 409（可操作的「先 reload」），实际 {response.status_code}: {response.text}"
+    )
+    body = response.json()
+    # FastAPI 把 HTTPException 的 detail 再包一层 "detail"
+    error = body["detail"]["error"]
+    assert error["type"] == "config_stale"
+    assert "reload" in error["hint"].lower()
+    # 文件必须没被覆盖——闸门的意义就在这
+    assert "运营者刚在这里加了一行" in models_file.read_text(encoding="utf-8")

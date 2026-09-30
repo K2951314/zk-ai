@@ -737,6 +737,85 @@ def test_rates_are_still_written_when_nobody_touched_them(tmp_path: Path) -> Non
     assert (blob["rate_in"], blob["rate_out"]) == (900.0, 2700.0)
 
 
+# ---------------------------------------------------------------------------
+# 费率优先级：命令行 > burner.yaml > 账本（2026-09-30，K_02 提前停的根因）
+#
+# 实测事故：burner.yaml 写着校准值 761/2292，账本里是旧值 830/2500，而
+# _load_rates_from_state 无条件用账本覆盖 args。日志实锤
+# 「已从账本恢复校准费率：入830/出2500」——yaml 里写的新值从没生效过。
+# 费率偏高 9.1% 让 K_02 按虚高记账提前撞上 54 万熔断线：账本估 539,964
+# （停），真实只烧 495,085（控制台剩 104,488）。用户看到的正是
+# 「明明剩 10 万，消耗器却在限流停靠」。
+# ---------------------------------------------------------------------------
+def test_yaml_rates_win_over_a_stale_ledger(tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """burner.yaml 显式给了费率，账本里的旧值不许覆盖它。"""
+    import json
+
+    state = tmp_path / "burn_state.json"
+    state.write_text(json.dumps({"rate_in": 830.0, "rate_out": 2500.0,
+                                 "safety_margin": 0.9}), encoding="utf-8")
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_in: 761\nrate_out: 2292\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+
+    burner = Burner(
+        parse_args(["--once"]),
+        [KeyState(name="K1", key="sk", account=AccountState(name="K1"))],
+    )
+    burner.state_file = state
+    assert (burner.args.rate_in, burner.args.rate_out) == (761.0, 2292.0)
+    burner._load_rates_from_state()
+    assert (burner.args.rate_in, burner.args.rate_out) == (761.0, 2292.0), (
+        "账本里的旧费率盖掉了 burner.yaml 的显式配置——K_02 少烧 10 万的老路"
+    )
+    # 生效值必须同步回账本，否则下次重启旧值又被当「上次校准」恢复出来
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert (after["rate_in"], after["rate_out"]) == (761.0, 2292.0)
+
+
+def test_ledger_rates_still_used_when_yaml_is_silent(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """yaml 没提费率时，账本仍是兜底来源（无回归）。"""
+    import json
+
+    state = tmp_path / "burn_state.json"
+    state.write_text(json.dumps({"rate_in": 830.0, "rate_out": 2500.0,
+                                 "safety_margin": 0.9}), encoding="utf-8")
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("concurrency: 16\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+
+    burner = Burner(
+        parse_args(["--once"]),
+        [KeyState(name="K1", key="sk", account=AccountState(name="K1"))],
+    )
+    burner.state_file = state
+    burner._load_rates_from_state()
+    assert (burner.args.rate_in, burner.args.rate_out) == (830.0, 2500.0)
+    assert burner.args.safety_margin == 0.9
+
+
+def test_command_line_beats_both_yaml_and_ledger(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """命令行显式传的优先级最高（临时调参的语义不能被任何来源夺走）。"""
+    import json
+
+    state = tmp_path / "burn_state.json"
+    state.write_text(json.dumps({"rate_in": 830.0, "rate_out": 2500.0}), encoding="utf-8")
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_in: 761\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+
+    burner = Burner(
+        parse_args(["--rate-in", "500", "--rate-out", "1500", "--once"]),
+        [KeyState(name="K1", key="sk", account=AccountState(name="K1"))],
+    )
+    burner.state_file = state
+    burner._load_rates_from_state()
+    assert (burner.args.rate_in, burner.args.rate_out) == (500.0, 1500.0)
+
+
 def test_fresh_start_writes_memory_rates_not_zero(tmp_path: Path) -> None:
     """_loaded_rate_in == 0（从未加载账本）不得被当成「外部改成了 0」。"""
     state = tmp_path / "burn_state.json"
@@ -752,3 +831,102 @@ def test_fresh_start_writes_memory_rates_not_zero(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # 外部校准不得被长命进程抹掉（2026-09-29 事故）
+
+# ---------------------------------------------------------------------------
+# 限流停靠（2026-09-30，运营者原话「达到上限自动停止且不再尝试」）
+#
+# 上一版只有预算熔断一种停靠，而它的语义是「积分不够了」。真实场景里账号
+# 积分还剩 10 万但挤不进共享的 tpm/rpm 桶，于是每个冷却周期都去撞一次——
+# 实测 19,714 次 429 对 80,345 次成功，19.7% 的请求是纯空转。
+# ---------------------------------------------------------------------------
+
+
+def test_rate_park_stops_an_account_that_cannot_get_into_the_bucket() -> None:
+    """连续撞满阈值就停手，且停手期间 pick_key 不再挑它。"""
+    burner = _burner(rate_park_after=3, rate_park_seconds=600, cooldown_base=1)
+    ks = burner.keys[0]
+    acct = ks.account
+
+    # 撞满阈值之前：照常给冷却，不停靠
+    for _ in range(2):
+        burner.on_error(ks, 429, '{"error":{"message":"tpm exhausted"}}')
+    assert acct.rate_park_until <= time.time()
+    ks.cooldown_until = 0.0  # 冷却期过了才会被挑中；这里只验「没被停靠挡住」
+    assert burner.pick_key() is ks
+
+    # 第 N 次：停手
+    burner.on_error(ks, 429, '{"error":{"message":"tpm exhausted"}}')
+    assert acct.rate_streak == 3
+    assert acct.rate_park_until > time.time()
+
+    # 停手期间不再被选中——这条是「不再尝试」的底线。
+    # 冷却也清掉：否则返回 None 分不清是冷却挡的还是停靠挡的。
+    ks.cooldown_until = 0.0
+    assert burner.pick_key() is None
+
+
+def test_a_single_success_clears_the_rate_streak() -> None:
+    """「偶尔挤一下」和「根本挤不进去」必须分开：成功一次就不能再累积。
+
+    否则按时窗口抖动的账号会被误判成死锁、白白停靠 10 分钟。
+    """
+    burner = _burner(rate_park_after=3, rate_park_seconds=600)
+    ks = burner.keys[0]
+    acct = ks.account
+    for _ in range(2):
+        burner.on_error(ks, 429, '{"error":{"message":"tpm exhausted"}}')
+    assert acct.rate_streak == 2
+
+    acct.rate_streak = 0  # burn_once 成功路径上就是这一行
+    burner.on_error(ks, 429, '{"error":{"message":"tpm exhausted"}}')
+    assert acct.rate_streak == 1
+    assert acct.rate_park_until <= time.time()
+
+
+def test_rate_park_state_survives_a_restart(tmp_path: Path) -> None:
+    """停靠记账必须落盘：不恢复的话每次重启 rate_streak 归零，又得从头撞满阈值。"""
+    state = tmp_path / "burn_state.json"
+    burner = _burner(rate_park_after=2, rate_park_seconds=600)
+    ks = burner.keys[0]
+    acct = ks.account
+    for _ in range(2):
+        burner.on_error(ks, 429, '{"error":{"message":"tpm exhausted"}}')
+    parked = acct.rate_park_until
+    assert parked > time.time()
+
+    burner.state_file = state
+    burner.save_state()
+
+    # 新进程：同样的 Key、空的 AccountState，只从账本恢复
+    fresh = Burner(parse_args(["--rate-park-after", "2", "--once"]),
+                   [KeyState(name="K1", key="sk-test",
+                             account=AccountState(name="K1"))])
+    fresh.state_file = state
+    fresh.load_state()
+    assert fresh.keys[0].account.rate_streak == 2
+    assert fresh.keys[0].account.rate_park_until == parked
+
+
+def test_budget_park_and_rate_park_are_independent() -> None:
+    """预算熔断与限流停靠是两套判据，不能互相干扰。
+
+    预算够但挤不进桶 → rate_park；桶空了但积分烧完 → parked_until。
+    混在一起会同时误伤：预算停了它的账号其实只是被限流，等窗口就好。
+    """
+    burner = _burner(weekly_credits=1000, window_credits=1000, safety_margin=0.5,
+                     rate_park_after=2, rate_park_seconds=600)
+    ks = burner.keys[0]
+    acct = ks.account
+
+    for _ in range(2):
+        burner.on_error(ks, 429, '{"error":{"message":"tpm exhausted"}}')
+    assert acct.rate_park_until > time.time()   # 被限流停住
+    assert acct.parked_until == 0.0             # 预算没动
+
+    # 预算触顶时也照样拒绝，且不碰 rate_park
+    burner2 = _burner(weekly_credits=100, window_credits=100, safety_margin=0.5)
+    acct2 = burner2.keys[0].account
+    acct2.events = [(time.time(), 90.0)]
+    assert burner2.budget_allow(acct2, 30.0) is False
+    assert acct2.parked_until > time.time()
+    assert acct2.rate_park_until == 0.0

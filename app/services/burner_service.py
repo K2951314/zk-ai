@@ -41,6 +41,10 @@ CONFIG_KEYS: dict[str, type] = {
     # 写在 burner.yaml 里会被静默忽略——运营者以为调了，其实没生效。
     "starve_after": float,
     "starve_grace": float,
+    # 限流停靠（2026-09-30 加，治「挤了也没用」的空转）。不加进白名单的话，
+    # 控制台写进 burner.yaml 也会被静默忽略——和上面两条同样的坑。
+    "rate_park_after": int,
+    "rate_park_seconds": float,
     "max_tokens": int,
     "filler_chars": int,
     "window_credits": float,
@@ -236,6 +240,11 @@ class AccountStatus:
     quota_hits: int = 0
     starve_boost: int = 0
     last_ok: float = 0.0
+    #: 连续撞 429 的次数 / 限流停靠截止时刻（2026-09-30 的 rate-park）。
+    #: 运营者必须能分清「积分烧完了」（parked）和「挤不进 tpm/rpm 桶」
+    #: （rate_park）——两者处置相反，被混成一个数字会当成号坏了。
+    rate_streak: int = 0
+    rate_park_until: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
 
@@ -297,6 +306,8 @@ def read_status(state_file: Path, config: dict[str, Any]) -> BurnerStatus:
             # 其中权益用尽的次数；旧账本没有这个键，回落 0（不做猜测）
             quota_hits=int(k.get("quota_hits") or 0),
             starve_boost=int(blob.get("starve_boost") or 0),
+            rate_streak=int(blob.get("rate_streak") or 0),
+            rate_park_until=float(blob.get("rate_park_until") or 0.0),
             last_ok=float(blob.get("last_ok") or 0.0),
             tokens_in=int(k.get("tokens_in") or 0),
             tokens_out=int(k.get("tokens_out") or 0),
@@ -357,6 +368,11 @@ def account_view(acct: AccountStatus, now: float, global_week_anchor: float,
         "freq_hits": max(0, acct.rate_limited - acct.quota_hits),
         # 饥饿救济是否正在借出额度（账本里的 starve_boost > 0）。
         # 运营者看到「已救济」就知道这不是号坏了，是网关在帮它抢配额。
+        # 限流停靠（2026-09-30）：账号连续撞 limit 后主动停手一段时间，
+        # 到期自动重试。前端据此显示「限流停靠」，别和「积分耗尽」混淆。
+        "rate_parked": bool(acct.rate_park_until and now < acct.rate_park_until),
+        "rate_park_until": acct.rate_park_until,
+        "rate_streak": acct.rate_streak,
         "starved": bool(getattr(acct, "starve_boost", 0)),
         "last_ok": getattr(acct, "last_ok", 0.0),
         "tokens_in": acct.tokens_in,

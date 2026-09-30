@@ -5,7 +5,8 @@
 # 覆盖，且环境变量优先级高于本文件：
 #   ZKAI_HOST、ZKAI_PORT、ZKAI_LOG_LEVEL、ZKAI_LOG_JSON、ZKAI_DATABASE_URL、
 #   ZKAI_ADMIN_TOKEN、ZKAI_CONFIG_DIR、ZKAI_DATA_DIR、ZKAI_REQUEST_TIMEOUT、
-#   ZKAI_HEALTH_CHECK_MODE、ZKAI_HEALTH_CHECK_INTERVAL、ZKAI_ALLOW_INLINE_SECRETS
+#   ZKAI_HEALTH_CHECK_MODE、ZKAI_HEALTH_CHECK_INTERVAL、ZKAI_ALLOW_INLINE_SECRETS、
+#   ZKAI_WATCH_CONFIG、ZKAI_WATCH_CONFIG_INTERVAL
 #
 # 如果 config.yaml 不存在，网关会自动回退到本示例文件，保证开箱即能跑起来。
 # ===========================================================================
@@ -52,6 +53,24 @@ request:
   # **默认关闭**：删上下文可能改变答案，要不要这个换血是产品决策。
   # 想省就先设成一个保守的大数（如 120000），再看日志里的「历史裁剪」WARNING。
   trim_history_tokens: ${ZKAI_TRIM_HISTORY_TOKENS:-0}
+
+# ---------------------------------------------------------------------------
+# 配置文件监听：改完 config/*.yaml 自动生效，不用再点「重载配置」也不用重启
+#
+# 为什么默认打开：网关只在启动时读一次配置，内存与磁盘会长期背离；更糟的是
+# 控制台表单用**内存值**渲染，一保存就把你刚才的文件编辑覆盖回去
+# （2026-09-28/29 一天内吃掉两次改动）。自动 reload 去掉的是根因——两边不再
+# 有可能不一致。配上 config_writer 的陈旧写闸：你改文件它接着，控制台想用旧
+# 值覆盖它会被拒（409 + 「先 reload」）。
+# 代价：每 interval 一次 stat。YAML 写坏了不会让网关倒下——保留上一份配置、
+# 把原因写进 /health 的 config_watch.last_error，你改好后下一次改动自动接上。
+#
+# 不想要这个行为就设 false，回到「必须手动 reload」。
+# ---------------------------------------------------------------------------
+watch_config: ${ZKAI_WATCH_CONFIG:-true}
+# 轮询间隔（秒）。纯标准库 stat 轮询，不引 watchdog/inotify：
+# 为一个 2 秒的 stat 加依赖不划算，而且轮询在网络盘/容器里更可靠。
+watch_config_interval: ${ZKAI_WATCH_CONFIG_INTERVAL:-2.0}
 
 # 同一个 provider 内部优先用哪把 Key：
 #   priority | round_robin | weighted | least_failures | fastest

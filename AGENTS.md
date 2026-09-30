@@ -192,6 +192,17 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   保留文件值并打 WARN（要生效仍需重启，因为记账用的是内存里的旧值）。
   回归测试 `test_external_rate_calibration_survives_a_running_process`。
   ⚠ 别把 `_loaded_rate_in == 0` 当成「外部改成了 0」——那只是本进程还没加载过账本。
+
+- **费率优先级是「命令行 > burner.yaml > 账本」，账本不许覆盖配置文件**（2026-09-30
+  修，K_02 提前停的根因）：`_load_rates_from_state()` 原来无条件用账本覆盖 args，于是
+  运营者在 `config/burner.yaml` 里写死的校准值被账本里的旧值盖掉——日志实锤
+  「已从账本恢复校准费率：入830/出2500」而 yaml 写的是 761/2292。费率偏高 9.1%
+  的后果不是「算错数」而是**真金白银少烧**：K_02 按虚高记账撞上 54 万熔断线停靠
+  （账本估 539,964），真实只烧 495,085、控制台剩 104,488——运营者看到「明明还剩
+  10 万却在限流」。判据是 `args._config_used`（`parse_args` 记下哪些键来自配置文件），
+  只有 yaml 没提的键才回落账本；生效值同时写回账本，否则下次重启旧值又被当成
+  「上次校准」恢复。**凡「账本/缓存覆盖显式配置」的写法都要产质疑一遍**：记忆盖掉
+  明确意图 = bug。回归测试三条（yaml 赢账本 / 账本兜底 / 命令行最高）。
 - **`ModelAliasConfig.front_model` 以控制台为准，且会写回 `models.yaml`**：
   `POST /admin/aliases` 走 `_write_alias_file()` 落盘，所以「配置文件里是 A、实际
   生效是 B」通常不是 bug，而是有人在控制台改过。排查前先 `grep front_model= data/gateway.log`
@@ -254,6 +265,17 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   - **诊断时先分清 429 类型**：`tpm exhausted`=吞吐不够，
     `rpm/rps exhausted`=发得太频，`entitlement exhausted`=额度真用尽（长停靠）。
     控制台「积分消耗器」页已把三者拆开显示（限流 / 额度用尽 / 已救济）。
+
+      - **限流停靠：治「挤了也没用」的空转**（2026-09-30 加，`rate_park_after` /
+        `rate_park_seconds`，默认 5 次 / 600s）。饥饿救济治「从没挤进去过」，这条治
+        「挤了也没用」：账号被 AIMD 压到并发 1 后，每 60s 冷却期满又去撞一次，撞完
+        继续被压回 1——**永远在试，永远失败**。判据是账号级 `rate_streak`（成功即清零，
+        不用 Key 级 `streak`：一个账号可能有多把 Key，只看一把会把「换把 Key 就好」
+        误判成死锁），达到阈值就把 `rate_park_until` 推到 10 分钟后，`pick_key` 跳过。
+        停靠与预算熔断**互相独立**：预算够但挤不进桶 → 限流停靠；桶空了但积分烧完 →
+        `budget_allow` 停靠到窗口边界。两个都落盘，重启不清零。
+        ⚠ 改它要同步三处：`burn_sensenova.py` 的 `_CONFIG_KEYS`、`app/services/
+        burner_service.py` 的 `CONFIG_KEYS`（控制台白名单）、`config/burner.example.yaml`。
   - 老坑仍然有效：满速烧 flash-lite 时同账号 K3 报 `inference exceeds tpm/rpm
     limit`——K3 频繁 429 先查消耗器是否在烧，用它时把消耗器停掉或调低
     `--per-account-max`

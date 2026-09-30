@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from app.core.config import (
     PROJECT_ROOT,
+    AppConfig,
     Settings,
     apply_settings_from_yaml,
+    credential_env_gaps,
+    env_file_names,
     interpolate_env,
     load_app_config,
     load_dotenv_file,
     malformed_env_names,
     shadowed_env_names,
 )
+from app.models.provider import CredentialConfig, ProviderConfig, ProviderType
 
 
 # --------------------------------------------------------------------------- #
@@ -105,9 +111,233 @@ def test_genuine_shadow_is_still_reported(tmp_path, monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# credential keys vs .env (would this key survive a machine move?)
+# --------------------------------------------------------------------------- #
+def test_env_file_names_reports_names_only(tmp_path) -> None:
+    """Values must not come back out — callers print what they are given."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=1\n# comment\nB='two'\n", encoding="utf-8")
+
+    assert env_file_names(env_file) == frozenset({"A", "B"})
+    assert env_file_names(tmp_path / "nope.env") == frozenset()
+
+
+def _config_with(credentials: list[CredentialConfig]) -> AppConfig:
+    provider = ProviderConfig(
+        id="p1",
+        type=ProviderType.OPENAI,
+        base_url="https://example.invalid/v1",
+        credentials=credentials,
+    )
+    return AppConfig(
+        settings=Settings(),
+        providers={"p1": provider},
+        models={},
+        aliases={},
+        warnings=[],
+    )
+
+
+def test_credential_env_gaps_names_keys_that_would_not_travel(tmp_path) -> None:
+    """The 2026-09-29 finding: a key that lives only in the OS environment.
+
+    ``sensenova-01`` reads ``SENSENOVA_API_KEY`` from the process env, so it
+    works on this machine — but the transfer package carries ``.env`` only, so
+    the new machine comes up with that credential DISABLED and no clue why.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRAVELS=yes\n", encoding="utf-8")
+    config = _config_with(
+        [
+            CredentialConfig(id="sensenova-01", env="SENSENOVA_API_KEY"),
+            CredentialConfig(id="sensenova-02", env="TRAVELS"),
+        ]
+    )
+
+    gaps = credential_env_gaps(config, env_file)
+
+    assert gaps == {"SENSENOVA_API_KEY": ["sensenova-01"]}
+
+
+def test_credential_env_gaps_covers_both_reference_spellings(tmp_path) -> None:
+    """``env: NAME`` and ``env_var: NAME`` are the same thing (see env_reference)."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    config = _config_with(
+        [
+            CredentialConfig(id="a", env="${ONE}"),
+            CredentialConfig(id="b", env_var="TWO"),
+        ]
+    )
+
+    gaps = credential_env_gaps(config, env_file)
+
+    assert gaps == {"ONE": ["a"], "TWO": ["b"]}
+
+
+def test_credential_env_gaps_ignores_credentials_without_an_env_name(tmp_path) -> None:
+    """A literal value or a keyless provider has no name to lose."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    config = _config_with(
+        [
+            CredentialConfig(id="inline", value="dev-only"),
+            CredentialConfig(id="keyless", enabled=False),
+        ]
+    )
+
+    assert credential_env_gaps(config, env_file) == {}
+
+
+def test_credential_env_gaps_ignores_an_inline_value_even_with_an_env_name(tmp_path) -> None:
+    """``env`` + ``value`` 同时存在 = 密钥在 providers.yaml 里，本来就会迁移。
+
+    这是全 Mock 测试夹具的真实形状（``make_provider`` 两个字段都填），所以这条
+    误报会在每个跑门禁的人的屏幕上出现一遍——比没有检查更糟。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    config = _config_with([CredentialConfig(id="both", env="BOTH_WAYS", value="literal")])
+
+    assert credential_env_gaps(config, env_file) == {}
+
+
+def test_credential_env_gaps_merges_credentials_sharing_one_name(tmp_path) -> None:
+    """Two credentials on the same account read the same variable: one entry."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    config = _config_with(
+        [
+            CredentialConfig(id="x", env="SHARED"),
+            CredentialConfig(id="y", env="SHARED"),
+        ]
+    )
+
+    assert credential_env_gaps(config, env_file) == {"SHARED": ["x", "y"]}
+
+
+def test_credential_env_gaps_is_silenced_by_an_empty_value(tmp_path) -> None:
+    """2026-09-30：运营者主动删掉 .env 里的 SENSENOVA_API_KEY，原话
+    「不用管，空着就行，别报警了」。
+
+    这里的关键是**把这一行留着但留空**——不是把行删掉，也不是拿 skipped 之类的
+    新开关绕过检查。`dotenv_values()` 把「键存在、值是空串」记成 `("")`，所以名字
+    已经在 `.env` 声明的集合里，缺口自然消失。而凭据侧照旧从 `os.environ` 解析，
+    HKCU 里那份真实密钥继续生效（本机正是如此：那把 Key 还活着，换机时同账号的
+    `_02` 会把它带走，所以本来就没有任何缺口需要报）。
+
+    删掉那一行反而会让告警回来——这是运营者已经选过的答案，别让人再选一次。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("SENSENOVA_API_KEY=\nTRAVELS=yes\n", encoding="utf-8")
+    config = _config_with(
+        [
+            CredentialConfig(id="sensenova-01", env="SENSENOVA_API_KEY"),
+            CredentialConfig(id="sensenova-02", env="TRAVELS"),
+        ]
+    )
+
+    assert credential_env_gaps(config, env_file) == {}
+
+
+def test_credential_env_gaps_names_an_absent_name(tmp_path) -> None:
+    """反面：名字真的不在 `.env` 里，告警必须回来。
+
+    和上一条必须成对存在——否则「静音空值」会被顺手改成「什么都不报」，
+    而告警本身是 2026-09-29 抓到的真问题（一把只活在 HKCU 里的 Key）。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRAVELS=yes\n", encoding="utf-8")
+    config = _config_with([CredentialConfig(id="sensenova-01", env="SENSENOVA_API_KEY")])
+
+    assert credential_env_gaps(config, env_file) == {"SENSENOVA_API_KEY": ["sensenova-01"]}
+
+
+def test_credential_env_gaps_is_empty_on_a_healthy_repo(tmp_path) -> None:
+    """No noise on a machine where every key is in ``.env`` — otherwise the
+    warning gets trained into something people skip."""
+    env_file = Path(PROJECT_ROOT) / ".env"
+    if not env_file.is_file():
+        pytest.skip("no local .env")
+    config = load_app_config()
+
+    gaps = credential_env_gaps(config, env_file)
+
+    # This asserts the *contract* (the function returns a dict), not a live
+    # value: what it holds on any given machine is that machine's business.
+    assert isinstance(gaps, dict)
+
+
+#: Environment variable names that belong to *other* software, not to this
+#: gateway. Anything a template interpolates from one of these is decided by
+#: whatever tool happens to have set it at the user level.
+TOOL_OWNED_ENV_NAMES = frozenset(
+    {
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_ENABLED",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_ENABLED",
+        "GEMINI_BASE_URL",
+        "GEMINI_API_KEY",
+        "GEMINI_ENABLED",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_ENABLED",
+    }
+)
+
+_INTERP_NAME = re.compile(r"\$\{([A-Z0-9_]+)(?::-[^}]*)?\}")
+
+
+def test_example_templates_do_not_read_tool_owned_env_names() -> None:
+    """接入点不许用别人家的变量名（2026-09-29 实测踩到过）。
+
+    这台机器上 `ANTHROPIC_BASE_URL` 被 cc-switch 设成了 `http://127.0.0.1:15721`，
+    `.env` 里的官方地址被静默顶掉——因为 `load_dotenv(override=False)` 让进程环境赢。
+    模板改成 `ZKAI_` 前缀后这个方向就彻底没了：运营商仍然完全可控（设
+    `ZKAI_ANTHROPIC_BASE_URL` 即可），只是不再有无关工具能替网关决定上游。
+    """
+    template = Path(PROJECT_ROOT) / "config" / "providers.example.yaml"
+    if not template.is_file():
+        pytest.skip("no bundled providers.example.yaml")
+
+    lines = [
+        line
+        for line in template.read_text(encoding="utf-8").splitlines()
+        # 注释里出现裸名字是在「举例说明别这么写」，那不是真插值
+        if not line.lstrip().startswith("#")
+    ]
+    used = set(_INTERP_NAME.findall("\n".join(lines)))
+
+    assert not (used & TOOL_OWNED_ENV_NAMES), (
+        f"模板仍在使用别人家的变量名：{sorted(used & TOOL_OWNED_ENV_NAMES)}"
+        "——改成 ZKAI_ 前缀（见 .env.example 的说明）"
+    )
+
+
+def test_namespaced_base_url_still_overrides_and_survives_a_hijack(monkeypatch) -> None:
+    """ZKAI_ 前缀的两个方向都要对：自己设了就生效，别人设裸名字不影响。"""
+    doc = {
+        "providers": [
+            {
+                "id": "anthropic",
+                "base_url": "${ZKAI_ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}",
+            }
+        ]
+    }
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:15721")
+
+    assert interpolate_env(doc)["providers"][0]["base_url"] == "https://api.anthropic.com/v1"
+
+    monkeypatch.setenv("ZKAI_ANTHROPIC_BASE_URL", "https://my-proxy.internal/v1")
+    assert interpolate_env(doc)["providers"][0]["base_url"] == "https://my-proxy.internal/v1"
+
+
+# --------------------------------------------------------------------------- #
 # ${VAR} interpolation
 # --------------------------------------------------------------------------- #
-def test_interpolation_supports_defaults_and_nested_structures(monkeypatch) -> None:
     monkeypatch.setenv("ZKAI_TEST_INTERP_PORT", "9001")
     monkeypatch.setenv("ZKAI_TEST_INTERP_FLAG", "true")
     monkeypatch.delenv("ZKAI_TEST_INTERP_MISSING", raising=False)

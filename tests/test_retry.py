@@ -362,5 +362,22 @@ def test_error_info_helper_and_classifier_defaults() -> None:
     assert ErrorClassifier(default_cooldown=5).default_cooldown == 5
 
 
-def test_fake_adapter_is_used_for_every_attempt(harness: Harness) -> None:
+async def test_every_attempt_goes_through_the_registered_adapter(harness: Harness) -> None:
+    """每次尝试都必须走已注册的适配器路径——不能有一条分支绕过它直连 httpx。
+
+    原来这条叫 ``test_fake_adapter_is_used_for_every_attempt``，函数体只有
+    ``assert isinstance(harness.adapter, FakeAdapter)``——那是在断言「夹具还是
+    夹具」（``harness.adapter`` 的定义就是返回调用方传进来的那个），零不变量。
+    2026-09-29 第三轮审查标记为纯自证用例，改成名字承诺的那件事。
+    """
+    harness.adapter.queue_status(503, 503, 503)  # 逼它换 Key / 换部署，制造多次尝试
+    with pytest.raises(AllAttemptsFailedError):
+        await harness.request()
+
+    calls = harness.all_calls()
+    assert len(calls) > 1, "没有多次尝试就什么都没验"
+    # 每一次尝试都落在同一个已注册适配器上（FakeAdapter 只在被调用时记录）
+    assert {call["provider"] for call in calls} == {"fake"}, (
+        f"有尝试绕过了已注册的适配器：{[call.get('provider') for call in calls]}"
+    )
     assert isinstance(harness.adapter, FakeAdapter)

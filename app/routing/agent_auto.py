@@ -134,7 +134,13 @@ def has_tool_result(messages: list[ChatMessage]) -> bool:
 
 
 def _available(rewritten: str, known_aliases: set[str] | None) -> str:
-    """Fall back to ``zk-auto`` when the rewrite target is not configured.
+    """Fall back to ``zk-auto`` when the rewrite target cannot serve traffic.
+
+    *known_aliases* is "aliases that resolve to at least one model" as computed by
+    ``Router._servable_aliases()`` - **not** every name in the registry. Those are
+    different questions, and the difference bit for real on 2026-09-29: a name-only
+    check let the rewrite target be an ``enabled: false`` alias, so every image /
+    tool-turn / long-context request 404'd with no warning at all.
 
     ``known_aliases=None`` skips the check entirely (callers without a registry,
     and the pure unit tests). See :data:`ALIAS_LONG` for why this degrades
@@ -147,8 +153,9 @@ def _available(rewritten: str, known_aliases: set[str] | None) -> str:
     if rewritten in known_aliases:
         return rewritten
     logger.warning(
-        "agent-auto wants to rewrite to '%s' but that alias is not configured; "
-        "falling back to '%s'. Add the alias to models.yaml to get the intended "
+        "agent-auto wants to rewrite to '%s' but it cannot serve traffic right now "
+        "(not configured, disabled, or every model on it is unreachable); "
+        "falling back to '%s'. Fix the alias in models.yaml to get the intended "
         "(cheaper) routing - see config/models.real.example.yaml.",
         rewritten,
         AGENT_AUTO_ALIAS,

@@ -164,6 +164,14 @@ class AccountState:
     #: 最近一次 429 的响应体片段，用来区分频率（rpm/rps）与吞吐（tpm）两类限流。
     #: 频率类限流加并发有害——只会让它撞得更狠，该做的是降低发送频率。
     last_limit_body: str = ""
+    #: 连续撞 429 的次数（成功即清零）。用来把「偶尔挤一下」和「真的挤不进桶」
+    #: 区分开：前者是常态，后者必须停手，否则每个冷却周期都去撞一次，纯空转。
+    rate_streak: int = 0
+    #: 限流停靠截止时刻。连续撞 --rate-park-after 次 429 后，账号停手一段时间
+    #: （--rate-park-seconds）再试。这条是 2026-09-30 补的：此前账号撞 429 只
+    #: 冷却 60s（Key 级），60s 后又去撞，实测五个账号连续 77 次采样 0 成功、
+    #: 19,714 次 429 对 80,345 次成功——19.7% 的请求是纯空转。
+    rate_park_until: float = 0.0
     # 固定锚点窗口（可选）：anchor_ts 是控制台「重置时间」对应的 epoch，
     # 边界 = anchor_ts + k*5h。=0 表示未配置，走滚动窗口模型（保守、安全）。
     anchor_ts: float = 0.0
@@ -409,6 +417,10 @@ _CONFIG_KEYS: dict[str, type] = {
     # CONFIG_KEYS 保持一致——两边漏一处，写在 burner.yaml 里就会被忽略。
     "starve_after": float,
     "starve_grace": float,
+    # 限流停靠（2026-09-30 加）。同样要在 app/services/burner_service.py 的
+    # CONFIG_KEYS 里同步一份，否则控制台写进 burner.yaml 也会被忽略。
+    "rate_park_after": int,
+    "rate_park_seconds": float,
     "max_tokens": int,
     "filler_chars": int,
     "window_credits": float,
@@ -641,6 +653,8 @@ class Burner:
                                   "last_ok": a.last_ok,
                                   "starve_boost": a.starve_boost,
                                   "last_limit_body": a.last_limit_body,
+                                  "rate_streak": a.rate_streak,
+                                  "rate_park_until": a.rate_park_until,
                                   "anchor_ts": a.anchor_ts,
                                   "week_anchor_ts": a.week_anchor_ts}
                          for a in self.accounts},
@@ -728,6 +742,10 @@ class Burner:
             acct.last_ok = float(blob.get("last_ok") or 0.0)
             acct.starve_boost = int(blob.get("starve_boost") or 0)
             acct.last_limit_body = str(blob.get("last_limit_body") or "")[:200]
+            # 限流停靠的记账同样要恢复：不恢复的话每次重启 rate_streak 归零，
+            # 又得从头撞满阈值次数才停手——重启一次就白送一轮空转。
+            acct.rate_streak = int(blob.get("rate_streak") or 0)
+            acct.rate_park_until = float(blob.get("rate_park_until") or 0.0)
             # 恢复学到的并发目标（夹在 [起点, 本次数值上限] 内，避免跨配置残留）
             acct.target = min(max(float(blob.get("target") or self.args.per_account_start), 1.0),
                               float(self.args.per_account_max))
@@ -815,6 +833,12 @@ class Burner:
                 continue
             if now < acct.parked_until:
                 continue
+            # 限流停靠中的账号也不参与：它的问题不是预算，是挤不进共享的
+            # tpm/rpm 桶（商汤的桶按账号分，9 把 Key 抢同一个桶）。让它每 60s
+            # 再撞一次只会刷出更多 429，对谁都没好处。停手到 rate_park_until
+            # 之后自然恢复，不需要人工干预。
+            if now < acct.rate_park_until:
+                continue
             usable = [ks for ks in ks_list if ks.available(now)
                       and not (self.args.once and ks.attempts > 0)]
             if not usable:
@@ -887,6 +911,7 @@ class Burner:
         credits = (self.args.rate_in * tin + self.args.rate_out * tout) / 1e6
         ks.ok += 1
         ks.streak = 0
+        ks.account.rate_streak = 0
         ks.tokens_in += tin
         ks.tokens_out += tout
         self.total.ok += 1
@@ -964,6 +989,7 @@ class Burner:
             old_target = acct.target
             acct.target = max(1.0, acct.target * 0.5)
             acct.last_429 = time.time()
+            acct.rate_streak += 1
             if acct.target <= 1.0:
                 # 并发已到底还 429：多为 RPM 窗口未清，短冷却试探即可，不再指数升级
                 ks.streak = min(ks.streak + 1, 2)
@@ -973,6 +999,18 @@ class Burner:
                 cd = min(self.args.cooldown_base * 2 ** (ks.streak - 1), self.args.cooldown_max)
             ks.cooldown_until = time.time() + cd
             ks.last_err = f"429 x{ks.streak}"
+            # 连续撞墙就该停手——「偶尔挤一下」和「根本挤不进去」要分开处置。
+            # 判据用账号级 rate_streak（成功即清零），不用 Key 级 streak：
+            # 一个账号可能有多把 Key，只看一把会把「换把 Key 就好」误判成死锁。
+            after = int(getattr(self.args, "rate_park_after", 5))
+            if acct.rate_streak >= after:
+                park = float(getattr(self.args, "rate_park_seconds", 600))
+                acct.rate_park_until = time.time() + park
+                self.log(
+                    f"[{acct.name}] 连续 {acct.rate_streak} 次限流，账号停手 "
+                    f"{park:.0f}s（不是 Key 坏了，是挤不进共享的 tpm/rpm 桶；"
+                    "到点自动重试）", "WARN",
+                )
             # 响应体必须写进日志：2026-09-24 实测，只看「429 限流」分不清是
             # 「余额/积分耗尽」（该长停靠）还是「rpm exhausted」（共享 RPM 打满，
             # 等窗口滑过去就好）——两者处置相反，而 body 就一句话，抄下来零成本。
@@ -1069,13 +1107,38 @@ class Burner:
             tmp.replace(self.state_file)
 
     def _load_rates_from_state(self) -> None:
-        """从账本恢复上次校准的费率（如果存过）。"""
+        """从账本恢复上次校准的费率。**burner.yaml 显式给了就让位于它**。
+
+        2026-09-30 修（K_02 提前停的根因）：原来是「无条件用账本覆盖 args」，
+        于是运营者在 ``config/burner.yaml`` 里写死的新校准值会被账本里的旧值
+        盖掉——日志里出现「已从账本恢复校准费率：入830/出2500」，而 yaml 写的
+        是 761/2292。费率偏高 9.1%，账号按虚高的记账提前撞上熔断线停靠，
+        真实只烧了 495,085 却以为烧了 539,964，白白放过 10 万额度
+        （用户看到的现象：控制台剩 104,488，消耗器却在限流停靠）。
+
+        优先级改成：**命令行 > burner.yaml > 账本**。命令行和 yaml 都是运营者
+        显式的意图，账本只是「上次记住的值」——用记忆盖掉明确的配置就是本条
+        bug。判据是 ``args._config_used``：``parse_args`` 用它记下哪些键来自
+        配置文件，所以只有 yaml 没提的键才回落账本。
+        """
         import json
         try:
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        if "rate_in" in data and "rate_out" in data:
+        if "rate_in" not in data or "rate_out" not in data:
+            return
+        explicit = set(getattr(self.args, "_config_used", {}) or {})
+        from_yaml = "rate_in" in explicit or "rate_out" in explicit
+        if from_yaml:
+            # 运营者在 yaml 里给了费率：账本不覆盖，只把 yaml 的值同步回账本，
+            # 免得下次重启时旧值又被当成「上次校准」恢复出来。
+            self.log(f"费率按 config/burner.yaml 生效：入{self.args.rate_in:.0f}/"
+                     f"出{self.args.rate_out:.0f}（账本里是 入{float(data['rate_in']):.0f}/"
+                     f"出{float(data['rate_out']):.0f}，不让它覆盖配置文件）", "WARN")
+            self.args.rate_in = float(self.args.rate_in)
+            self.args.rate_out = float(self.args.rate_out)
+        else:
             self.args.rate_in = float(data["rate_in"])
             self.args.rate_out = float(data["rate_out"])
             if "safety_margin" in data:
@@ -1084,6 +1147,9 @@ class Burner:
                 self.capweek = self.args.weekly_credits * self.args.safety_margin
             self.log(f"已从账本恢复校准费率：入{self.args.rate_in:.0f}/出{self.args.rate_out:.0f}"
                      f" 积分/百万token，安全系数 {self.args.safety_margin}")
+        # 无论哪边生效，都把生效值写回账本：否则长命进程下一次 save_state
+        # 又会把内存值写进去，两处长期不一致（09-29 那个环的同一形式）。
+        self._save_rates_to_state(self.args.rate_in, self.args.rate_out)
 
     # ---- 周期汇总 ----------------------------------------------------------
     def _rebalance_concurrency(self) -> None:
@@ -1366,6 +1432,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="启动宽限期（秒）：重启后多久内不救济。账本旧格式没有 last_ok，"
                         "不宽限会让所有账号同时算「从未成功」、一秒内一起借出，"
                         "反而把桶挤爆（2026-09-28 实测 7 个账号同时借出后三种 429 齐炸）")
+    # ---- 限流停靠（2026-09-30 加）----
+    # 上面两条（starve-after / starve-grace）救的是「从没挤进去过」；这一条救的是
+    # 「挤了也没用」。商汤的 tpm/rpm 桶按账号分，9 把 Key 抢同一个桶时，抢不到的
+    # 账号每个冷却周期都去撞一次，实测 19.7% 的请求是纯空转。停手一段时间，
+    # 让抢到桶的账号把当前窗口烧完，桶空出来自然轮到他。
+    opt("--rate-park-after", type=int, default=5,
+                   help="连续撞这么多次 429 就让账号停手。判据是账号级计数"
+                        "（成功即清零），所以「换把 Key 就好」不会被误判成死锁")
+    opt("--rate-park-seconds", type=float, default=600,
+                   help="限流停靠时长（秒）。不是 Key 坏了，到期自动重试，无需人工")
     opt("--max-tokens", type=int, default=16384,
                    help="单次请求输出上限（越大烧得越狠）")
     opt("--filler-chars", type=int, default=6000,
@@ -1379,9 +1455,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--safety-margin", type=float, default=0.9,
                    help="预算安全系数（熔断线 = 上限 × 该系数）。2026-09-24 从 0.45 "
                         "提到 0.9：0.45 是费率不准时代的保守折扣（估算费率可能低估 2 "
-                        "倍），而费率已按控制台真值校准到 ±3%，继续用 0.45 只会让每个"
+                        "倍），而费率已按控制台真值校准到偏差约 3%%，继续用 0.45 只会让每个"
                         "账号每周白丢约 33 万回赠积分。0.9 = 熔断线 5.4万/54万，仍留 "
-                        "10% 缓冲带。若重新校准后发现费率又偏了，先改费率、再考虑降它")
+                        "10%% 缓冲带。若重新校准后发现费率又偏了，先改费率、再考虑降它")
     opt("--week-anchor", default="Mon 00:00",
                    help="周固定窗口的起点（星期几缩写 + HH:MM，本地时区），如 "
                         '"Mon 00:00"、"Wed 09:30"。自该时刻起累计周烧量，到线停靠'
@@ -1396,7 +1472,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "重启后以账本为准；可用 --calibrate-actual 精校准")
     opt("--rate-out", type=float, default=2500,
                    help="输出 token 积分费率（积分/百万token）。同上，两次独立读数"
-                        "反推 2516 / 2441（相差 3%），按 r_in=r_out/3 摊后取整。"
+                        "反推 2516 / 2441（相差 3%%），按 r_in=r_out/3 摊后取整。"
                         "单条请求（6000 字填充 + 16384 出）≈46 积分，5h 熔断线"
                         "27000 ≈ 587 条")
     opt("--quota-park-hours", type=float, default=12,
