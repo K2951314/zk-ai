@@ -178,35 +178,35 @@ def test_absolute_total_cap_parks_account_forever() -> None:
 
 
 def test_default_margin_does_not_trip_its_own_warning() -> None:
-    """默认 0.9 不许触发「已高于默认」提示——否则每次启动都刷一句废话。
+    """默认 0.95 不许触发「已高于默认」提示——否则每次启动都刷一句废话。
 
     旧版判据写 ``> 0.6``，而默认值就是 0.9，于是自相矛盾：日志说
-    「安全系数 0.9 已高于默认 0.9」。更早一版建议「保持默认 0.45 或更低」，
+    「安全系数 0.95 已高于默认 0.95」。更早一版建议「保持默认 0.45 或更低」，
     而默认值早就改成 0.9 了。**自相矛盾的提示等于没有提示**——运营者学会
     忽略它，真正该警醒的那次就被淹了。
     """
-    assert burn_sensenova.DEFAULT_SAFETY_MARGIN == 0.9
+    assert burn_sensenova.DEFAULT_SAFETY_MARGIN == 0.95
     assert burn_sensenova.is_above_default_margin(
         burn_sensenova.DEFAULT_SAFETY_MARGIN) is False
 
 
 def test_over_default_margin_is_flagged() -> None:
     """真调到默认值以上要报警：缓冲带更薄，烧穿风险实打实升高。"""
-    for margin in (0.91, 0.95, 1.0):
+    for margin in (0.96, 0.98, 1.0):
         assert burn_sensenova.is_above_default_margin(margin) is True
 
 
 def test_under_default_margin_stays_quiet() -> None:
     """比默认更保守不该被唠叨（0.45 只是少烧，不是风险）。"""
-    for margin in (0.45, 0.6, 0.89):
+    for margin in (0.45, 0.9, 0.95):
         assert burn_sensenova.is_above_default_margin(margin) is False
 
 
 def test_the_note_names_the_numbers_the_operator_needs() -> None:
     """提示必须显示实际值和默认值，不能只说「太高了」。"""
-    note = burn_sensenova.above_default_margin_note(0.95)
+    note = burn_sensenova.above_default_margin_note(0.96)
+    assert "0.96" in note
     assert "0.95" in note
-    assert "0.9" in note
     assert "缓冲带" in note
 
 
@@ -223,12 +223,106 @@ def test_console_fallback_margin_matches_the_burner() -> None:
     assert console_default == burner_default, (
         f"控制台兜底 {console_default} != 消耗器默认 {burner_default}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 配置热加载：控制台改完/burner.yaml 被手改，不用重启就生效（2026-09-30 加）
+# ---------------------------------------------------------------------------
+
+
+def _burner_with_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                      cfg_text: str, **overrides: object) -> Burner:
+    """构造一个盯着 tmp 配置文件的 Burner（绝不碰真实 config/burner.yaml）。"""
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text(cfg_text, encoding="utf-8")
+    argv = ["--concurrency", "1", "--summary-interval", "1",
+            "--config-file", str(cfg)]
+    for key, value in overrides.items():
+        flag = f"--{key.replace('_', '-')}"
+        if value is True:
+            argv.append(flag)
+        else:
+            argv.extend([flag, str(value)])
+    args = parse_args(argv)
+    ks = KeyState(name="K1", key="sk-test", account=AccountState(name="K1"))
+    return Burner(args, [ks])
+
+
+def test_config_change_takes_effect_without_a_restart(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """改 safety_margin 后不用重启：熔断线立刻按新系数重算。
+
+    这条是运营者原话「后续在控制台修改后立即生效」。之前改 burner.yaml 必须重启
+    消耗器，托盘还要等一次心跳（约 3 秒），期间烧的仍是旧参数。
+    """
+    cfg = "safety_margin: 0.5\n"
+    # safety_margin 也走命令行：优先于同键的 YAML（命令行 > burner.yaml），
+    # 这样「YAML 改了要不要覆盖命令行」的行为被测到。
+    burner = _burner_with_cfg(tmp_path, monkeypatch, cfg, weekly_credits=1000,
+                               window_credits=10000, safety_margin=0.5)
+    burner._cfg_sig = burner._config_signature()
+    assert burner.args.safety_margin == 0.5
+    assert burner.capweek == 500.0
+
+    # 运营者在文件里（或经控制台）把系数调大
+    Path(burner.config_file).write_text(cfg.replace("0.5", "0.95"), encoding="utf-8")
+    changed = burner.reload_config()
+
+    assert "safety_margin" in changed
+    assert burner.args.safety_margin == 0.95
+    assert burner.capweek == 950.0, "熔断线没跟着系数重算——改了等于没改"
+
+
+def test_reload_is_a_noop_when_nothing_changed(tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """文件没动就不做事：不能每个汇总周期都刷一条热更新日志。"""
+    burner = _burner_with_cfg(tmp_path, monkeypatch, "safety_margin: 0.5\n")
+    burner._cfg_sig = burner._config_signature()
+    assert burner.reload_config() == []
+
+
+def test_a_broken_config_file_never_stops_the_burner(tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """写了一半/语法坏掉的 YAML 不能把消耗器打停。
+
+    保留上一份配置并告警，等运营者改完下一个周期自然恢复——他此刻正在编辑这个文件。
+    """
+    burner = _burner_with_cfg(tmp_path, monkeypatch, "safety_margin: 0.5\n",
+                               weekly_credits=1000)
+    burner._cfg_sig = burner._config_signature()
+    before = burner.args.safety_margin
+
+    Path(burner.config_file).write_text("safety_margin: [unclosed\n", encoding="utf-8")
+    changed = burner.reload_config()
+
+    assert changed == []
+    assert burner.args.safety_margin == before, "坏文件把好配置冲掉了"
+
+
+def test_restart_only_keys_are_flagged_not_silently_applied(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """改 Key 集合/窗口结构的键只提示要重启，不偷偷改内存。
+
+    因为它们决定账本结构：在飞请求按旧窗口记账、新请求按新窗口记账，账本就和
+    控制台对不上了。
+    """
+    burner = _burner_with_cfg(tmp_path, monkeypatch, "safety_margin: 0.5\n")
+    burner._cfg_sig = burner._config_signature()
+    original = burner.args.safety_margin
+
+    Path(burner.config_file).write_text(
+        "model: kimi-k3\n" + "only: SENSENOVA_API_KEY_01",
+        encoding="utf-8")
+    burner.reload_config()
+
+    assert burner.args.safety_margin == original, "顺手改了不该热改的键"
+    assert burner.args.model != "kimi-k3", "model 是重启键，不该被热改"
 def test_default_margin_is_conservative() -> None:
     args = parse_args([])
     # 2026-09-24 从 0.45 提到 0.9。0.45 是费率不准时代的折扣（估算可能低估 2 倍），
     # 但费率已按控制台「本周剩余」两次读数差校准到 ±3%，继续折半只会让每个账号
-    # 每周白丢约 33 万回赠积分。0.9 = 熔断线 5.4万/54万，仍留 10% 缓冲带。
-    assert args.safety_margin == 0.9
+    # 每周白丢约 33 万回赠积分。0.95 = 熔断线 5.7万/57万，仍留 5% 缓冲带。
+    assert args.safety_margin == 0.95
     assert args.week_anchor == "Mon 00:00"
     assert args.pool_total_credits == 0
 

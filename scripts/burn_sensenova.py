@@ -134,11 +134,16 @@ def is_quota_exhausted(body: str) -> bool:
 
 WIN_5H = 5 * 3600
 WIN_WEEK = 7 * 86400
-#: 安全系数默认值。熔断线 = 官方上限 × 该系数，0.9 = 5h 5.4 万 / 周 54 万，留 10% 缓冲。
-#: 单独抽成常量是因为它有三个消费者（argparse 默认值、启动提示的判据、控制台的
-#: 兜底默认值）——写死三份就必然漂移，2026-09-30 已经漂了一次：控制台还按 0.45 画
-#: 熔断线，消耗器按 0.9 跑，同一块屏幕上两个数。
-DEFAULT_SAFETY_MARGIN = 0.9
+#: 安全系数默认值。熔断线 = 官方上限 × 该系数。
+#:
+#: **全仓唯一的一处默认值。** 三个消费者都 import 它：argparse 的 --safety-margin
+#: 默认值、高于默认时的提示判据、控制台（app/services/burner_service.py）的兜底显示。
+#: 2026-09-30 之前三处各写各的，漂移过两次（控制台停在 0.45，消耗器已经是 0.9）——
+#: 同一块屏幕上画两条熔断线，运营者无从判断该信哪个。
+#:
+#: 0.95 = 5h 熔断 5.7 万 / 周熔断 57 万，留 5% 缓冲。2026-09-30 从 0.9 提到 0.95：
+#: 费率已按控制台实读数校准，10% 缓冲等于每账号每周白丢约 6 万回赠积分。
+DEFAULT_SAFETY_MARGIN = 0.95
 
 
 def is_above_default_margin(margin: float) -> bool:
@@ -466,6 +471,24 @@ _CONFIG_KEYS: dict[str, type] = {
 }
 
 
+#: 可热更新的键：下一条请求就会读到新值，改完不用重启消耗器。
+#: 预算（窗口/周上限/安全系数）、费率、并发、冷却、限流停靠、汇总间隔都算——
+#: 它们只影响「这一条怎么发、记多少分」，不改账本结构。
+_HOT_KEYS: frozenset[str] = frozenset({
+    "safety_margin", "window_credits", "weekly_credits", "pool_total_credits",
+    "rate_in", "rate_out", "concurrency", "per_account_max", "per_account_start",
+    "starve_after", "starve_grace", "rate_park_after", "rate_park_seconds",
+    "cooldown_base", "cooldown_max", "connect_timeout", "read_timeout",
+    "quota_park_hours", "summary_interval", "max_tokens", "filler_chars",
+})
+
+#: 改了必须重启才生效的键：它们决定 Key 集合与窗口结构，热改会让「在飞请求按旧
+#: 窗口记账、新请求按新窗口记账」，账本和控制台就对不上了。所以只提示、不静默改。
+_RESTART_ONLY_KEYS: frozenset[str] = frozenset({
+    "model", "only", "account_groups", "anchors", "week_anchors", "week_anchor",
+})
+
+
 def load_config(path: Path | None = None) -> dict:
     """读 config/burner.yaml（gitignore 的本地配置入口）→ argparse dest 字典。
 
@@ -614,6 +637,10 @@ class Burner:
         self._calibrate_start_out = 0
         self.log_path = Path(args.log_file)
         self.state_file = Path(args.state_file)
+        # 配置热加载：记住来源文件与签名，每个汇总周期比对一次。
+        # config_file 由 parse_args 注入（默认 config/burner.yaml），测试里指向 tmp 文件。
+        self.config_file = Path(args.config_file) if getattr(args, "config_file", "") else None
+        self._cfg_sig: tuple[int, int] | None = None
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         # 本段运行的基线（恢复账本后「速率」只算本次运行新增的量）
         self.base_in = 0
@@ -1104,11 +1131,12 @@ class Burner:
         old_in, old_out = self.args.rate_in, self.args.rate_out
         self.args.rate_in = r_in
         self.args.rate_out = r_out
-        # 费率精确了，安全系数可以提到 0.9（不再预留 2 倍不确定性）
+        # 费率变精确了，安全系数回到默认值（不再预留「费率可能低估 2 倍」的折扣）。
+        # 引用常量而不是写死数字：这是全仓唯一出处，写死就又是一次漂移。
         if not self.args.auto_calibrate_keep_margin:
-            self.args.safety_margin = 0.9
-            self.cap5h = self.args.window_credits * 0.9
-            self.capweek = self.args.weekly_credits * 0.9
+            self.args.safety_margin = DEFAULT_SAFETY_MARGIN
+            self.cap5h = self.args.window_credits * DEFAULT_SAFETY_MARGIN
+            self.capweek = self.args.weekly_credits * DEFAULT_SAFETY_MARGIN
         # 把费率存到账本里，重启后 load_state 恢复
         self._save_rates_to_state(r_in, r_out)
         self.log(f"费率已校准：入 {old_in:.0f}→{r_in:.0f}，出 {old_out:.0f}→{r_out:.0f}"
@@ -1249,6 +1277,90 @@ class Burner:
             return "freq"
         return "throughput"
 
+    # ---- 配置热加载（控制台改完即生效，不用重启）--------------------------
+    def _config_signature(self) -> tuple[int, int] | None:
+        """配置文件的 (mtime_ns, size)。文件不存在/读不到 → None。
+
+        用 mtime_ns 而不是 mtime：快编辑器能在一毫秒内写两次。加 size 是因为
+        同一 tick 内的等长改写（如 0.9 → 0.95，字节数不同倒是能区分；但 1.0 → 0.95
+        这类等长替换只有 mtime 能抓到，两个一起最稳）。
+        """
+        cfg_path = self.config_file
+        if not cfg_path:
+            return None
+        try:
+            st = cfg_path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def reload_config(self) -> list[str]:
+        """重读 config/burner.yaml，把变更应用到内存。返回真正变了的键名。
+
+        2026-09-30 补。此前改配置必须重启消耗器，而运营者在控制台点「保存并重启」
+        之后要等托盘心跳（约 3 秒）、期间旧值还在跑；更糟的是「重启才生效」这条规则
+        本身容易被忘——改了个数以为生效了，其实烧的还是旧参数。
+
+        现在每个汇总周期比对一次 (mtime_ns, size)：文件变了就重读并应用。轮询而不是
+        watchdog，理由与网关的 config_watch 相同（多一个依赖换一个 stat，不划算）。
+
+        **只热更新「即时生效」的键**：预算、费率、并发上限、冷却、限流停靠这些
+        下一条请求就会读到新值。而 model / only / account_groups / anchors /
+        week_anchors 改变的是 Key 集合与窗口结构，热改会让「在飞请求按旧窗口记账、
+        新请求按新窗口记账」，账本对不上控制台——这些键改了只打日志提示需重启，
+        不静默改内存。
+        """
+        sig = self._config_signature()
+        if sig is None or sig == self._cfg_sig or self.config_file is None:
+            return []
+        try:
+            raw = yaml.safe_load(self.config_file.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            # 半写入/语法错误：保留旧配置，等下一个周期再试。绝不让一次坏编辑
+            # 把消耗器打停——运营者正在改这个文件。
+            self.log(f"配置热加载失败，继续用上一份配置：{exc}", "WARN")
+            return []
+        if not isinstance(raw, dict):
+            self.log("config/burner.yaml 顶层不是映射，继续用上一份配置", "WARN")
+            return []
+        self._cfg_sig = sig
+        changed: list[str] = []
+        args = self.args
+        for key, value in raw.items():
+            dest = str(key).replace("-", "_")
+            if dest not in _CONFIG_KEYS or dest not in _HOT_KEYS:
+                continue
+            if getattr(args, dest, None) != value:
+                changed.append(dest)
+        if not changed:
+            return []
+        for dest in changed:
+            want = _CONFIG_KEYS[dest]
+            raw_val = raw[dest if dest in raw else dest.replace("_", "-")]
+            try:
+                if want is bool:
+                    setattr(args, dest, bool(raw_val))
+                elif want is int:
+                    setattr(args, dest, int(raw_val))
+                elif want is float:
+                    setattr(args, dest, float(raw_val))
+                else:
+                    setattr(args, dest, str(raw_val))
+            except (TypeError, ValueError) as exc:
+                self.log(f"配置键 {dest}={raw_val!r} 类型不对，已跳过：{exc}", "WARN")
+                continue
+        # 预算熔断线是「上限 × 系数」的派生物，必须跟着重算，否则改了系数不生效
+        self.cap5h = args.window_credits * args.safety_margin
+        self.capweek = args.weekly_credits * args.safety_margin
+        self.cap_total = args.pool_total_credits
+        pretty = ", ".join(f"{k}={getattr(args, k)!r}" for k in sorted(changed))
+        self.log(f"配置已热更新（未重启）：{pretty}；"
+                 f"新熔断线 5h {self.cap5h:.0f} / 周 {self.capweek:.0f} 积分", "WARN")
+        for dest in sorted(changed):
+            if dest in _RESTART_ONLY_KEYS:
+                self.log(f"⚠ {dest} 改了，但要重启消耗器才生效（它决定 Key 集合/窗口结构）",
+                         "WARN")
+        return changed
     # ---- 周期汇总 ----------------------------------------------------------
     async def periodic_summary(self) -> None:
         while not self.stop.is_set():
@@ -1265,6 +1377,8 @@ class Burner:
                          "ERROR")
                 self.stop.set()
                 break
+            # 配置热加载：控制台改完/burner.yaml 被手改，下个周期就生效（不用重启）
+            self.reload_config()
             # AIMD 加性增：账号静默（60s 无 429）就 +1 并发，自动贴回供应商上限
             self._rebalance_concurrency()
             self.save_state()
@@ -1426,7 +1540,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="持续、多账号并行消耗商汤 sensenova-6.8-flash-lite 的专属池积分"
                     "（只烧专属池，预算熔断防止溢出扣到 kimi-k3 要用的通用池）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        # argparse 自带的三行说明（usage / options / show this help message）默认是英文，
+        # 而运营者就靠 --help 调参——看不到自己语言的提示等于没有提示。
+        usage="用法：burn_sensenova.py [选项]",
+        add_help=False,
     )
+    p.add_argument("-h", "--help", action="help",
+                   help="显示本帮助并退出（各项默认值以启动日志的「配置来源」为准）")
+    # 「options:」这一行 argparse 只认英文。最小侵入的做法：格式化时替换显示文本，
+    # 不改 argparse 本身（它的 Error/Exit 消息我们也包不住， bott 线以上覆盖就行）。
+    _orig_format_help = p.format_help
+
+    _zh_options = "选项（括号里是默认值；预算/费率/并发类改完下个周期自动生效）"
+
+    def _zh_format_help() -> str:
+        return _orig_format_help().replace("options:", _zh_options)
+
+    p.format_help = _zh_format_help  # type: ignore[method-assign]
 
     def opt(flag: str, **kw):
         """add_argument 的薄包装：配置文件里有同名键就顶掉 default。"""
@@ -1528,6 +1658,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--log-file", default=str(DEFAULT_LOG), help="日志文件路径")
     opt("--state-file", default=str(STATE_FILE),
                    help="账本持久化文件（重启不清零，累计口径与控制台连续）")
+    opt("--config-file", default=str(CONFIG_FILE),
+                   help="配置文件路径（热加载就监听这个文件；改了不用重启，下个汇总周期生效）")
     opt("--calibrate-actual", type=float, default=0,
                    help="校准模式：传入控制台「积分消耗明细」里与账本同时段的实扣积分"
                         "（如 --calibrate-actual 7000），算出精确费率后退出，不烧积分")
@@ -1669,7 +1801,12 @@ def main(argv: list[str] | None = None) -> int:
                    f"（当前费率 入{args.rate_in:.0f}/出{args.rate_out:.0f}）")
     cfg_used = ", ".join(f"{k}={args._config_used[k]}" for k in sorted(args._config_used)) \
         if args._config_used else "无（全用命令行/默认）"
+    # 记录启动时的配置签名，否则第一个汇总周期会把「文件本来就这样」当成一次改动、
+    # 白打一条热更新日志（并可能把命令行显式传的值按 YAML 覆盖回去）。
+    burner._cfg_sig = burner._config_signature()
     burner.log(f"配置来源：config/burner.yaml → {cfg_used}")
+    burner.log("配置热加载已开启：改 config/burner.yaml 后不用重启，下个汇总周期生效"
+               f"（当前每 {args.summary_interval:.0f}s 一次）")
     burner.log(f"目标池：Flash-Lite 专属池（model={args.model}；"
                f"只有它扣专属池、能 1:1 折算回充成 K3 可用积分）")
     burner.log(f"接口：{burner.url}")

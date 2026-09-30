@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from scripts.burn_sensenova import DEFAULT_SAFETY_MARGIN
+
 WIN_5H = 5 * 3600
 WIN_WEEK = 7 * 86400
 
@@ -255,10 +257,9 @@ class BurnerStatus:
     accounts: list[AccountStatus] = field(default_factory=list)
     rate_in: float = 0.0
     rate_out: float = 0.0
-    # 兜底默认值必须与 burn_sensenova.py 的 argparse 默认值一致（0.9，2026-09-30
-    # 提上来）。这里若写 0.45，YAML 与账本都没提系数时控制台会按 27 万画熔断
-    # 线，而消耗器按 54 万跑——同一块屏幕上两个数。
-    safety_margin: float = 0.9
+    # 没有本地兜底值：直接 import burn_sensenova 的唯一常量。这里曾写死 0.45，
+    # 于是控制台按 27 万画熔断线、消耗器按 54 万跑，同一块屏幕两个数。
+    safety_margin: float = DEFAULT_SAFETY_MARGIN
     window_credits: float = 60000.0
     weekly_credits: float = 600000.0
     pool_total_credits: float = 0.0
@@ -270,7 +271,7 @@ def read_status(state_file: Path, config: dict[str, Any]) -> BurnerStatus:
     status = BurnerStatus(
         rate_in=float(config.get("rate_in") or 0.0),
         rate_out=float(config.get("rate_out") or 0.0),
-        safety_margin=float(config.get("safety_margin") or 0.9),
+        safety_margin=float(config.get("safety_margin") or DEFAULT_SAFETY_MARGIN),
         window_credits=float(config.get("window_credits") or 60000.0),
         weekly_credits=float(config.get("weekly_credits") or 600000.0),
         pool_total_credits=float(config.get("pool_total_credits") or 0.0),
