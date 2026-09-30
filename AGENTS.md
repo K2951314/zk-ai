@@ -45,6 +45,13 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   .cmd 必须保持纯 ASCII（见上），所以它的中文文案统一放 `scripts/start_msg.py`。
   有意保留的英文只有两类：上游报错原文（运营者要拿去比对日志）和
   `mock_upstream.py` 的 mock 响应体（测的就是真实错误形状）——白名单里有，别删。
+  还有一类**扫描器结构上查不到**的：前端把后端枚举值翻译成中文时用的映射表
+  （`index.html` 的 `VERDICT` / `STATUS_PILL` / `ERR_TYPE_ZH`）。这类是
+  「后端新增一个枚举值，前端映射表没跟着加」——文案本身是中文，扫英文句扫不出来，
+  而 `_probe_verdict` 加一种结论（2026-09-30 的 `timeout`）就会让运营者看到一个
+  裸英文词。所以**新加后端枚举值时要同步前端映射表**，守卫
+  `test_marketplace_verdict_labels_cover_the_backend_vocabulary`
+  从后端源码推导 `VERDICT` 词表来钉这件事（同套路：`BURNER_LABELS` 加参数自动撞）。
 
 ## 已知坑（不看会犯错）
 
