@@ -34,13 +34,13 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   ⚠ 纯 `.bak`（不带日期）是 `config_writer.atomic_write` 的**滚动备份，功能性，别删**。
 
 - **所有面向用户的提示都必须是中文，且有测试守门**（2026-09-30 补全）。
-  覆盖：控制台三页、API 报错与 toast、argparse 的 --help 和报错分支、
-  .cmd 启动器的失败提示、托盘菜单、scripts/ 下的运维脚本输出。
+  覆盖：控制台三页（`app/web/*.html`）、API 报错与 toast、argparse 的 `--help` 和报错分支、
+  `scripts/` 下的运维脚本输出与 `.cmd` 启动器的失败提示、托盘菜单；
   守卫在 `tests/test_console_zh.py`（前端英文句 + 后端用户可见英文）与
   `tests/test_start_msg.py`（.cmd ASCII 契约 + helper 中文），
   另有一条 `tests/test_burn_budget.py` 的 argparse 中文断言。
   **新增页面/脚本/提示键时，这些守卫按目录或元组自动覆盖，不要手写清单**——
-  历史上三次漏网（report.html 页面、export/import 两个 .cmd、scripts/ 整目录）
+  历史上三次漏网（`report.html` 页面、export/import 两个 `.cmd`、`scripts/` 整目录）
   全是手写清单漏改导致的。
   .cmd 必须保持纯 ASCII（见上），所以它的中文文案统一放 `scripts/start_msg.py`。
   有意保留的英文只有两类：上游报错原文（运营者要拿去比对日志）和
