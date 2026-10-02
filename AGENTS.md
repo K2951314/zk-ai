@@ -375,24 +375,25 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   https://pypi.tuna.tsinghua.edu.cn/simple`**：PyPI 直连和走 10808 代理都能挂死，
   镜像几秒完成；代价是它会把 `uv.lock` 里的 URL 改成镜像域（哈希不变，纯 URL churn），
   同步完 `git checkout -- uv.lock` 复原
-- **导入迁移包前必须先停网关**（2026-09-21 为这条流过血）：`import` 覆盖 `data/zkai.db`
+- **导入迁移包前必须先停网关**（2026-09-21 为这条流过血）：换机包覆盖 `data/zkai.db`
   时，若同目录还留着上一代的 `-wal`/`-shm`，下次开库会把别人的 WAL 帧回放到新库上 →
   `database disk image is malformed`，且**不是警告是真损坏**（本机 `requests`/
-  `usage_records` 就是这么废的；SQLite 的 `-wal`/`-shm` 不属于迁移包内容）。现在
-  `import_package` 先把 side-car 备份进 `imports_backup/<时间戳>/` 再删除，CLI 侧只要
-  端口有人听就直接拒绝。验证损坏库要用 sqlite3 backup API 取一致快照再 `PRAGMA
-  integrity_check`——直接 `cp` 正在写的库必然报假阳性
+  `usage_records` 就是这么废的；SQLite 的 `-wal`/`-shm` 不属于迁移包内容）。一键换机
+  Skill 引擎的 `import` 会先备份 side-car 再删除；但最稳的做法是先从托盘退出网关再导入。
+  验证损坏库要用 sqlite3 backup API 取一致快照再 `PRAGMA integrity_check`——直接 `cp`
+  正在写的库必然报假阳性
 - **`~/.codex/config.toml` 归 ChatGPT app 所有，只能外科手术式 patch**（2026-09-22）：
   整文件重写会毁掉 app 的 mcp_servers/plugins/projects/desktop 段落（真实文件上百行）。
   `chatgpt_service.patch_text` 只增改我们的键：顶层键只可能在第一个 `[section]` 前动，
   provider 表只在其表体内动；`apply_config` 读文件必须 `newline=""`（`read_text()` 会把
   CRLF 归一化成 LF，悄悄改掉 app 的换行风格）；`auth.json` **永远不写**（运营决策）。
-  改 `env_key`/`ZKAI_API_TOKEN` 后记得桌面版要重启才读到新环境变量；换机导入时
-  `migrate._provision_chatgpt_env` 会把它写进 HKCU\Environment 并广播+回读校验，别在测试里
-  直接跑那个函数（会碰真实用户环境，测试要 patch `write_user_env_var`）。
+  改 `env_key`/`ZKAI_API_TOKEN` 后记得桌面版要重启才读到新环境变量；**换机后这一步要
+  手工做**——一键换机 Skill 只搬文件，不碰 `~/.codex/config.toml` 和用户级环境变量
+  （`.migrate/manifest.toml` 有标注）。`POST /admin/chatgpt/sync-env` 或控制台面板
+  「🔧 同步令牌」可以代劳，但不会自动触发。
   桌面版报 `Missing environment variable: X` = 用户级环境变量缺 X：诊断看
   `GET /admin/chatgpt` 的 `env_key_visible`/`env_key_matches_gateway`（陈旧令牌会 401），
-  一键修复 `POST /admin/chatgpt/sync-env`（或导入输出的 setx 命令），然后重启桌面版。
+  一键修复 `POST /admin/chatgpt/sync-env`，然后重启桌面版。
   **客户端 `model` 写错（如 'zk'）桌面版每条消息 404**：`PUT /admin/chatgpt/client`
   在 zk-ai 模式下按 `config.known_names()`（全部模型+别名，即路由器准入口径）
   硬拦截未知模型并附可用清单（09-23 从警告升级为 400）；路由器的
@@ -448,9 +449,9 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   模式会把 CRLF 悄悄归一成 LF，混着写就成了半 LF 半 CRLF；要么全程字节，要么
   `open(..., newline="")`（同 `chatgpt_service.apply_config`）。②**不许为了跑测试
   去改本机 `.env`**——那是运营配置，不是测试夹具；门禁跑不了就停下来问，别再自作
-  主张写占位符。③`malformed_env_names()` 是现成的体检入口，返回空才算健康。
-  ④`scripts/migrate.py` 的 export 侧已有 `_check_env_health` 把关（`\r\r\n` 判据），
-  导入侧也会警告，这条链路是好的。
+  ③`malformed_env_names()` 是现成的体检入口，返回空才算健康。
+  ④换机已改用一键换机 Skill（项目 `migrate.py` 已删），Skill 引擎不检查 `.env` 换行，
+  但启动日志仍会替你把关。
 - 2026-09-26（请求体/上下文治理，承接 Codex 413 排查）：①`estimated_input_tokens()`
   补了 `tool_call arguments` 与图片 token，低估 2.67 倍的问题见「已知坑」；
   ②Codex 截图不再被静默吞（`ZKAI_FORWARD_IMAGES`），见「已知坑」；

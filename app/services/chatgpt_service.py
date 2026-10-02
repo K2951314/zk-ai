@@ -16,14 +16,14 @@ ZK-AI 只需要其中四个顶层键加一张 provider 表::
 
 所以写入必须是**文本级外科手术**：读用 stdlib tomllib，写只改这些行，文件里
 其他每一个字节原样保留。``auth.json``（ChatGPT 登录态）**永远不写**——桌面版
-从 ``env_key`` 指向的环境变量取 Key，换机流程会负责把该变量 provision 好
-（见 ``scripts/migrate.py``）。
+从 ``env_key`` 指向的环境变量取 Key，换机后由运营者手工 provision
+（一键换机 Skill 只搬文件，不碰用户级环境变量，见 ``.migrate/manifest.toml``）。
 
 期望配置存在 ``config/chatgpt.yaml``（本地现役、gitignore、随迁移包加密同行），
-新机器导入后即可自动生成客户端配置，"换机后上来就能用"。
+新机器导入后由运营者用控制台面板写入客户端配置（Skill 不自动做这一步）。
 **密钥不落 yaml**：令牌值永远取 ``ZKAI_API_TOKEN``（.env / 用户环境变量）。
 
-本模块只依赖 stdlib + pyyaml，``scripts/migrate.py`` 也复用它（无 app 栈依赖）。
+本模块只依赖 stdlib + pyyaml，无 app 栈依赖。
 """
 
 from __future__ import annotations

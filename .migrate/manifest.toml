@@ -138,12 +138,12 @@ include = [
 # 即可。Dockerfile / docker-compose.yml 在仓库里，真要容器化部署时
 # `docker compose up -d --build` 一条命令，不需要从旧机采集任何系统文件。
 #
-# ⚠️ 导入后有两件项目目录外的事必须手工做（旧模块 scripts/migrate.py 的
-#    _apply_chatgpt_client + _provision_chatgpt_env 会代劳，本技能尚未实现）：
+# ⚠️ 导入后有两件项目目录外的事必须手工做（一键换机 Skill 引擎不碰这两样）：
 #      1) setx ZKAI_API_TOKEN "<与 .env 同值>"，否则桌面版报
 #         Missing environment variable（它从 explorer 启动，读不到 .env）
 #      2) 把 config/chatgpt.yaml 的期望配置写进 ~/.codex/config.toml
 #    不做这两步，网关本身正常，但 ChatGPT/Codex 桌面版连不上它。
+#    （项目曾有 migrate.py 会自动做这两步，已删除，统一走 Skill + 控制台面板。）
 
 # ── 环境变量键名审计（值永不入库）────────────────────────────────────
 [env_audit]

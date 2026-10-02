@@ -87,7 +87,7 @@
 | **流式** | 纯 `data:` + `data: [DONE]`，OpenAI SDK 直接可用；路由元数据走 SSE **注释行**，不污染 chunk 流。 |
 | **零秘密泄漏** | Key 只从环境变量解析；日志、数据库、admin API 一律脱敏。 |
 | **可审计** | SQLite/SQLAlchemy 2.x 落库：requests、request_attempts、usage_records、health_checks。 |
-| **积分消耗器** | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。控制台「🔥 积分消耗器」页可看每账号 5h/周窗口余量与下一边界、改 `config/burner.yaml`（模板 `burner.example.yaml`）并一键重启；`model` 硬校验只能是 Flash-lite 家族。换机时随迁移包携带。见使用手册「后台烧 flash-lite 积分」。 |
+| **积分消耗器** | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。控制台「🔥 积分消耗器」页可看每账号 5h/周窗口余量与下一边界、改 `config/burner.yaml`（模板 `burner.example.yaml`）并一键重启；`model` 硬校验只能是 Flash-lite 家族。换机时随迁移包携带（见 §20.1）。见使用手册「后台烧 flash-lite 积分」。 |
 
 ---
 
@@ -296,13 +296,14 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
   不设就是标准的 `~/.codex`。
 - **桌面版的 Key 只认用户级环境变量**：`env_key` 指向的变量必须存在于 Windows 用户级
   环境（HKCU\Environment）——桌面版从 explorer 启动，读不到 shell 变量也读不到 `.env`。
-  换机导入时会自动写入并**回读校验**；控制台状态条实时显示「可见 / 读不到 / 与网关令牌
-  不一致」，一键修复点「🔧 同步令牌到用户环境变量」（`POST /admin/chatgpt/sync-env`）。
+  控制台状态条实时显示「可见 / 读不到 / 与网关令牌不一致」，一键修复点
+  「🔧 同步令牌到用户环境变量」（`POST /admin/chatgpt/sync-env`）。
   改完必须**重启桌面版**（含托盘退出）才生效。桌面版报
   `Missing environment variable: ZKAI_API_TOKEN` 就是这个变量没配。
-- **换机自动配置**：`config/chatgpt.yaml` 随迁移包同行；新机器导入后自动 patch
-  `~/.codex/config.toml`，并把 `.env` 的 `ZKAI_API_TOKEN` 写进 Windows 用户级环境变量
-  （旧值备份 + 打印还原命令）。装好 app 打开即用。
+- **换机后需手工配**：一键换机 Skill 只搬文件，不碰 `~/.codex/config.toml` 和用户级
+  环境变量。导入后两件事要做（`.migrate/manifest.toml` 有标注）：① 控制台「🤖 ChatGPT」
+  面板点「保存并写入」把 `config/chatgpt.yaml` 写进 config.toml；② `setx ZKAI_API_TOKEN
+  "<与 .env 同值>"` 或用面板的「🔧 同步令牌」。装好 app、做完这两步，打开即用。
 - **热切换不用改文件**：桌面版本来就发 `model = "zk-auto"`，控制台把目标模型提到
   `zk-auto` 链首（下一条消息生效，不用重启 app）；`zk-auto` 是能力分排序，切换会顺手
   置 `pin_first` 才能盖过分数。
@@ -607,9 +608,9 @@ ZK-AI/
 │                         # chatgpt.yaml / chatgpt.example.yaml —— 桌面版期望配置，见 §3.6.3
 ├── scripts/              # init_db, health_check, benchmark, mock_upstream, smoke_test,
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
-│                         # migrate.py + export_machine.cmd / import_machine.cmd（一键换机，见 §20.1）
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
-├── tests/                # conftest + 34 个测试模块，838 个用例，全部 Mock
+│                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
+├── tests/                # conftest + 33 个测试模块，798 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -617,7 +618,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 71 个文件约 21,400 行，`tests/` 34 个测试模块 838 个用例（约 15,700 行），
+规模：`app/` 71 个文件约 21,400 行，`tests/` 33 个测试模块 798 个用例（约 15,700 行），
 `scripts/` 18 个文件约 5,500 行。**测试/产品代码 = 73%**。
 （这两个数字上一次更新是 2026-09-19 的 15,400/7,300/3,600——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
@@ -1288,7 +1289,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**838 个用例，全部通过，零网络、零真实配额。**
+**798 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1306,8 +1307,6 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
 | `tests/test_api.py` | 全部 HTTP 端点、SSE 形状、流式预检状态码、admin 鉴权、断开连接 |
 | `tests/test_config.py` | `.env` 注入进程环境、`${VAR}` 插值与默认值、env 优先于 YAML、三文件端到端加载、`*.example.yaml` 兜底、凭证配置告警 |
 | `tests/test_adapters.py` | **只在真实端点上才会暴露的形状**：推理模型只回思考内容、`base_url` 尾斜杠、带厂商前缀的模型名 |
-| `tests/test_migrate.py` | 一键换机：载荷清单、密文不含明文 Key、加解密往返、错密码 fail-closed、拒绝覆盖、覆盖前备份 |
-
 所有测试都用 `FakeAdapter`，**不会**发出任何真实请求。
 
 ### 开发过程中被测试/冒烟测出来的 11 个真实缺陷
@@ -1437,50 +1436,45 @@ docker run --rm -p 8317:8317 \
 
 ## 20.1 一键换机（迁移全部 Key / 配置 / 数据）
 
-换电脑不用重抄一遍密钥。整套可迁移状态 = `.env`（所有 Key）+ `config/*.yaml`
-（供应商/模型/别名）+ `data/zkai.db`（用量、Agent 会话、限额账本）+ 消耗器账本
+换机用**一键换机 Skill**（`~/.claude/skills/my-skills/one-click-migrate/`），
+项目自带的 `migrate.py` / `export_machine.cmd` / `import_machine.cmd` 已删除。
+项目侧只保留 `.migrate/manifest.toml`（声明搬什么，可提交、不含密钥值）。
+
+整套可迁移状态 = `.env`（所有 Key）+ `config/*.yaml`（供应商/模型/别名/消耗器/
+桌面版期望配置）+ `data/zkai.db`（用量、Agent 会话、限额账本）+ 消耗器账本
 `data/burn_state.json` / `data/rate_limits.json`。
 
-- **旧电脑**：双击 `scripts/export_machine.cmd` → 设迁移密码 → 得到加密 zip
-  （`exports/zkai-machine-*.zip`）。纯快照，不停网关、不删文件。
-- **搬文件**：zip 拷到新电脑（任意方式）。
+- **旧电脑**：触发一键换机 Skill（说「一键换机」），或手动跑引擎 CLI
+  `migrate.cmd export --root .` → 口令交互输入 → 得到加密 `.enc` 包。
+- **搬文件**：包拷到新电脑（任意方式）。
 - **新电脑**：装 uv → 跑一次 `scripts/start_gateway.cmd`（建 `.venv`）→
-  双击 `scripts/import_machine.cmd` → 拖入 zip → 输密码 → 再启动即可。
+  触发 Skill 导入（或 `migrate.cmd import <包> --root .`）→ 默认只写不存在的文件，
+  覆盖加 `--on-conflict overwrite`（旧文件先进 `backup-<时间戳>/`）。
 
-**ChatGPT / Codex 桌面版也跟着搬**：期望配置 `config/chatgpt.yaml` 在包里。导入时自动
-patch 新机的 `~/.codex/config.toml`（只动 `model`/`model_provider`/`model_reasoning_effort`
-和 `[model_providers.zkai]` 表，app 自管段落原样保留；旧文件备份为 `.bak-时间戳`；新机器
-没装 app 也会先生成最小配置），并把 `.env` 里的 `ZKAI_API_TOKEN` 写进 **Windows 用户级
-环境变量**（HKCU\Environment + 广播，写后**回读校验**，旧值备份 + 打印还原命令）——装好
-app 打开即用，不用再手工抄三处配置。用户级环境变量的写入**只以 `.env` 进门控**（不依赖
-chatgpt.yaml）：哪怕你的 `~/.codex` 是从旧机器整个手抄过来的（没有 chatgpt.yaml），也会按
-config.toml 里实际引用的 `env_key` 自动 provision；`.env` 里缺这个值时导入输出会直接给出
-`setx` 修复路径。**换机后桌面版报 `Missing environment variable` = 这步没成**，按导入输出
-的告警处理即可（或控制台「🤖 ChatGPT」面板一键同步）。
+**Skill 引擎不做、需要手工做的两件事**（`.migrate/manifest.toml` 里有标注）：
 
-等价命令行（可脚本化）：
-
-```bash
-.venv/Scripts/python.exe scripts/migrate.py export            # 交互输密码
-.venv/Scripts/python.exe scripts/migrate.py import pkg.zip    # 还原
-.venv/Scripts/python.exe scripts/migrate.py import pkg.zip --overwrite  # 允许覆盖（旧文件先备份）
-```
+1. **桌面版客户端配置**：Skill 不 patch `~/.codex/config.toml`。导入后打开
+   控制台「🤖 ChatGPT」面板，点「保存并写入」把 `config/chatgpt.yaml` 的期望配置
+   写进新电脑的 config.toml（旧文件备份为 `.bak-时间戳`，app 段落保留）。
+2. **用户级环境变量**：Skill 不写 `ZKAI_API_TOKEN`。导入后在新电脑跑
+   `setx ZKAI_API_TOKEN "<与 .env 同值>"`（或控制台面板点「🔧 同步令牌到用户环境变量」），
+   然后**重启桌面版**（含托盘退出）才读到。报 `Missing environment variable` 就是这步没做。
 
 安全说明：
 
-- 迁移包是 **XOR + PBKDF2 加密**的自包含 zip（仅依赖标准库，新机器不用装 7-Zip），
-  内嵌 SHA-256 校验——密码错了立刻报「密码不对」，不会解密出垃圾再坏掉。
-- 包与 `imports_backup/` 都含全部明文 Key，已在 `.gitignore` 忽略；别发公开群。
+- 迁移包是 **PBKDF2 + HMAC 加密**的自包含 `.enc`（仅依赖 Python 标准库），
+  口令错了立刻报错，不会解密出垃圾。**口令丢了无法找回**。
+- 包与 `backup-*/` 都含全部明文 Key，已在 `.gitignore` 忽略；别发公开群。
 - 导出是**在线备份**（SQLite backup API），网关正在写也不会拿到半提交的页。
-- 只想搬配置不要历史：删掉包内 `data/zkai.db` 再导入即可（标准 zip）。
+- 只想搬配置不要历史：用 `--profile machine-only`（manifest 里已定义，排除数据库）。
 - **在已经跑过网关的机器上重导（含本机自我修复）：先从托盘右键「退出」再导入**。
-  导入现在会先备份并删除目标机上残留的 `data/zkai.db-wal` / `-shm`——留着上一代的
-  WAL 去开新库，就是 `database disk image is malformed`。命令行侧 `import` 只要发现
-  端口有人听就直接拒绝；双击 `import_machine.cmd` 撞到「文件已存在」守卫时，回答 `y`
-  即带 `--overwrite` 重试（覆盖前一定先备份到 `imports_backup/<时间戳>/`）。
+  导入会先备份并删除目标机上残留的 `data/zkai.db-wal` / `-shm`——留着上一代的
+  WAL 去开新库，就是 `database disk image is malformed`。
 - 启动失败不再静默：托盘进程自己的输出在 `data/tray_gateway.log`（消耗器为
   `data/tray_burner.log`），网关进程输出在 `data/gateway.log`。托盘没起来时
   `start_gateway.cmd` 会留在窗口里打印退出码和日志末尾，不会再「闪退后一无所知」。
+
+换机的坑与常见问题见使用手册「一键换机」一节。
 
 ---
 

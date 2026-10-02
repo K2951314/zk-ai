@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from unittest import mock
 
 from scripts import start_msg
 
@@ -57,11 +56,8 @@ def test_every_key_the_cmds_ask_for_actually_exists() -> None:
     for name in _CMD_FILES:
         text = (_SCRIPTS / name).read_text(encoding="ascii")
         asked |= set(re.findall(r"start_msg\.py\s+([a-z-]+)", text))
-    assert asked, "两个 .cmd 都没有调用 start_msg.py，说明又回到英文 echo 了"
-    # ask-zip 这类前动模式读键盘，它用的提示键是 prompt-zip。
-    # 所以提取到的键要先去掉前缀再拼上，否则会误报缺键。
-    resolved = {("prompt-" + k[4:]) if k.startswith("ask-") else k for k in asked}
-    missing = sorted(k for k in resolved if k not in start_msg.MESSAGES and k != "banner")
+    assert asked, ".cmd 都没有调用 start_msg.py，说明又回到英文 echo 了"
+    missing = sorted(k for k in asked if k not in start_msg.MESSAGES and k != "banner")
     assert not missing, f"helper 缺这些键，启动失败时会静默无提示：{missing}"
 
 
@@ -124,37 +120,4 @@ def test_burner_argparse_errors_are_chinese() -> None:
         assert expect in text, (argv, text[-200:])
 
 
-def test_ask_mode_keeps_stdout_clean_for_for_f() -> None:
-    """ask-* 的 stdout 只允许有答案那一行。
-
-    这一步踩过：input() 的提示符默认走 stdout，for /f 抓回来就成了
-    "path > (你填的路径)"，变量被污染，导入直接用错路径。
-    同理，中文说明也必须走 stderr。
-    """
-    import contextlib
-    import io
-
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        stdin = io.StringIO("D:" + chr(92) + "temp" + chr(92) + "x.zip" + chr(10))
-        with mock.patch("sys.stdin", stdin):
-            start_msg.main(["ask-zip"])
-
-    lines = [x for x in out.getvalue().splitlines() if x.strip()]
-    assert lines == ["D:" + chr(92) + "temp" + chr(92) + "x.zip"], lines
-    assert any("请输入" in x for x in err.getvalue().splitlines()), err.getvalue()
-
-
-def test_the_cmd_files_use_the_verified_for_f_pattern() -> None:
-    """import_machine.cmd 必须用 usebackq 反引号模式读回输入。
-
-    非反引号的 for /f 把内容当文件名，实测报 cannot find the file；
-    反引号模式才是执行命令。这个模式是拿 cmd 实测过的，不是猜的。
-    """
-    text = (_SCRIPTS / "import_machine.cmd").read_text(encoding="ascii")
-    for key in ("ask-zip", "ask-overwrite"):
-        marker = "start_msg.py " + key
-        assert marker in text, f"import_machine.cmd 没有调用 {key}"
-        line = next(ln for ln in text.splitlines() if marker in ln)
-        assert "usebackq" in line and "`" in line, line
 

@@ -1263,8 +1263,8 @@ async def backfill_cost(container: ContainerDep) -> dict[str, Any]:
 #   the app, so only our keys are touched and a ``.bak-<stamp>`` is kept.
 #
 # The desired config lives in ``config/chatgpt.yaml`` (single source of truth,
-# travels inside the migration package - importing on a new machine
-# reconfigures the client automatically, see scripts/migrate.py).
+# travels inside the migration package - importing on a new machine via
+# 一键换机 Skill does NOT auto-configure the client; use this panel after import).
 # --------------------------------------------------------------------------- #
 
 #: The alias the desktop app already sends.

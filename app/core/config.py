@@ -682,7 +682,7 @@ def load_dotenv_file(path: Path | str | None = None) -> bool:
 def env_file_names(path: Path | str = ".env") -> frozenset[str]:
     """Names declared in ``.env`` — values are deliberately not returned.
 
-    The transfer package (``scripts/migrate.py``) carries ``.env`` and nothing
+    The transfer package (一键换机 Skill 引擎) carries ``.env`` and nothing
     else, so "is this name in ``.env``" is the same question as "does this key
     survive a machine move". Reporting names only keeps callers from having to
     handle secrets.

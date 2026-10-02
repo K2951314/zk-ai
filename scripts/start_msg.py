@@ -53,46 +53,6 @@ MESSAGES = {
         ['先双击 scripts\\start_gateway.cmd 跑一遍，', '它会自动把环境重建好。'],
         '',
     ),
-    "export-banner": (
-        '正在导出本机的 ZK-AI 身份（Key + 配置 + 数据库）。',
-        ['稍后会要求输入迁移密码，记住它，新电脑要用同一个。', '输入时不回显（安全起见）。'],
-        '',
-    ),
-    "failed-see-above": (
-        '失败了，原因看上面几行。',
-        [],
-        '',
-    ),
-    "drag-zip": (
-        '把迁移包的 .zip 拖进这个窗口，然后回车。',
-        [],
-        '',
-    ),
-    "no-archive": (
-        '【错误】没给迁移包。',
-        [],
-        '',
-    ),
-    "overwrite-guard": (
-        '这些文件已经存在，这是覆盖保护在工作，不算失败。',
-        [],
-        '',
-    ),
-    "ask-overwrite": (
-        '要用 --overwrite 重试吗？',
-        [],
-        '覆盖前会先把当前文件备份到 imports_backup\\',
-    ),
-    "prompt-zip": (
-        '请输入迁移包的 .zip 路径',
-        [],
-        '',
-    ),
-    "prompt-overwrite": (
-        '要用 --overwrite 重试吗？ y/N',
-        [],
-        '覆盖前会先把当前文件备份到 imports_backup',
-    ),
 }
 
 BANNER = {
@@ -115,11 +75,7 @@ BANNER = {
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print('用法: start_msg.py <提示键|banner|ask>',
-              file=sys.stderr)
-        print('      ask-zip → 打印中文提示并读取路径',
-              file=sys.stderr)
-        print('      ask-overwrite → 打印中文提示并读取 y/N',
+        print('用法: start_msg.py <提示键|banner>',
               file=sys.stderr)
         return 2
     key = argv[0]
@@ -132,8 +88,6 @@ def main(argv: list[str]) -> int:
             print("  " + line.format(port=opts["--port"], host=opts["--host"]))
         print()
         return 0
-    if key.startswith("ask-"):
-        return _ask(key[len("ask-"):], argv)
     entry = MESSAGES.get(key)
     if entry is None:
         print("未知的提示键: " + key, file=sys.stderr)
@@ -152,48 +106,6 @@ def _show(entry: tuple) -> None:
     if hint:
         print("          " + '下一步：' + hint)
     print()
-
-
-def _prompt_to_stderr(entry: tuple) -> None:
-    """Like _show() but writes to stderr: stdout is reserved for the
-    single line `for /f` reads back, so nothing else may land there."""
-    _title, body, hint = entry
-    print(file=sys.stderr)
-    print('  ' + _title, file=sys.stderr)
-    for _line in body:
-        print('          ' + _line, file=sys.stderr)
-    if hint:
-        print('          ' + hint, file=sys.stderr)
-
-
-def _ask(what: str, argv: list[str]) -> int:
-    """打印中文提示并读一行键盘输入，把结果写到 stdout。
-
-    为什么不让 .cmd 用 set /p：AGENTS.md 要求 .cmd 纯 ASCII，而 set /p 的
-    提示串是给人看的（archive path / Retry with --overwrite）。改成这里收
-    键盘，.cmd 里就一个英文字母都不剩了。.cmd 用 for /f 拿回去。
-    """
-    if what == "zip":
-        _prompt_to_stderr(MESSAGES["prompt-zip"])
-        prompt = '路径 > '
-    elif what == "overwrite":
-        _prompt_to_stderr(MESSAGES["prompt-overwrite"])
-        prompt = ' [y/N] > '
-    else:
-        print('未知的读取项: ' + what, file=sys.stderr)
-        return 2
-    try:
-        # The prompt MUST go to stderr: `for /f` captures stdout, and a prompt
-        # mixed into stdout would make the batch variable hold
-        # 'path > D:\temp\x.zip' instead of just the path.
-        print(prompt, end="", file=sys.stderr)
-        sys.stderr.flush()
-        answer = input("").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return 1
-    print(answer)   # .cmd 用 for /f 读回这一行
-    return 0
 
 
 
