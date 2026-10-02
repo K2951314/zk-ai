@@ -1,0 +1,208 @@
+# ============================================================
+# ZK-AI · 一键换机声明
+#
+# 只描述「该搬什么」，不放任何密钥值。可提交。
+#
+# 颗粒度说明（重要）：这个项目**逐文件点名**，不用 dir/glob 型条目。
+# data/ 下有 176MB 运行日志（*.log）与多个 .bak，一条 `path = "data"` 的
+# dir 条目会把它们全收进包；config/ 下有 10 个 .bak-*，glob 同理。
+#
+# data/zkai.db 用 item_type = "sqlite"：引擎走 backup API 生成崩溃一致性快照，
+# -wal/-shm 不发货（它们属于磁盘上那一代数据库，重放进新库 = database malformed）。
+# ============================================================
+
+schema_version = 1
+project = "zk-ai"
+artifacts_dir = "exports"
+
+rebuild = [
+  "uv sync",
+  ".venv\\Scripts\\python scripts\\init_db.py",
+]
+verify = [
+  ".venv\\Scripts\\python -m pytest tests/ -q",
+  ".venv\\Scripts\\python scripts\\smoke_test.py",
+]
+
+# ── 密钥载体：缺了网关起得来但谁都调不通 ────────────────────────────
+[[items]]
+id = "env-file"
+path = ".env"
+class = "required"
+item_type = "file"
+scope = "workspace"
+on_missing = "block"
+sensitive = true
+note = "全部 API key（36 键）"
+
+# ── 算子调好的配置：缺了网关用代码默认值，表现为「能用但行为不对」─────────
+[[items]]
+id = "config-core"
+path = "config/config.yaml"
+class = "required"
+item_type = "file"
+scope = "workspace"
+on_missing = "block"
+sensitive = true
+note = "网关核心配置（绑定地址/端口/超时/健康检查）"
+
+[[items]]
+id = "config-providers"
+path = "config/providers.yaml"
+class = "required"
+item_type = "file"
+scope = "workspace"
+on_missing = "block"
+sensitive = true
+note = "各服务商凭据定义；凭据名从这里引用环境变量，不是值本身"
+
+[[items]]
+id = "config-models"
+path = "config/models.yaml"
+class = "required"
+item_type = "file"
+scope = "workspace"
+on_missing = "block"
+sensitive = true
+note = "模型清单与路由"
+
+[[items]]
+id = "config-chatgpt"
+path = "config/chatgpt.yaml"
+class = "recommended"
+item_type = "file"
+scope = "workspace"
+on_missing = "warn"
+sensitive = true
+note = "ChatGPT/Codex 桌面版期望配置（导入后由钩子写入 ~/.codex）"
+
+[[items]]
+id = "config-burner"
+path = "config/burner.yaml"
+class = "recommended"
+item_type = "file"
+scope = "workspace"
+on_missing = "warn"
+sensitive = true
+note = "积分消耗器：烧哪些 key、5h/周锚点、费率与预算熔断线。缺了费率退回低估 7 倍的默认值"
+
+# ── 数据：丢了能重建，但重建的是空历史 ──────────────────────────────
+[[items]]
+id = "zkai-db"
+path = "data/zkai.db"
+class = "recommended"
+item_type = "sqlite"
+scope = "workspace"
+on_missing = "warn"
+note = "用量历史 + 会话 + 限流台账。64MB，backup API 快照"
+
+[[items]]
+id = "burn-state"
+path = "data/burn_state.json"
+class = "recommended"
+item_type = "file"
+scope = "workspace"
+on_missing = "warn"
+note = "消耗器锚点（每账号 5h/周窗口）；丢了重新烧穿专属池只是时间问题"
+
+[[items]]
+id = "rate-limits"
+path = "data/rate_limits.json"
+class = "recommended"
+item_type = "file"
+scope = "workspace"
+on_missing = "warn"
+note = "限流状态"
+
+[profiles.machine-only]
+# 只换电脑、不带历史数据（包从 64MB 降到几十 KB）
+exclude = ["zkai-db", "burn-state", "rate-limits"]
+
+# ── 导入时允许写进项目根的路径白名单 ────────────────────────────────
+[merge]
+include = [
+  ".env",
+  "config",
+  "data/zkai.db",
+  "data/burn_state.json",
+  "data/rate_limits.json",
+]
+
+# ── server：这个项目没有独立部署机 ────────────────────────────────────
+# ZK-AI 是本机开发网关（ZKAI_HOST=0.0.0.0、ZKAI_ENVIRONMENT=development），
+# 没有 /opt 下的部署检出、没有 systemd 单元由本技能采集。所以不配 scope=server
+# 条目——配了就是虚构一个不存在的采集目标。
+#
+# 换「常开主机」时它是被搬的一方，不是搬的一方：把整台机器的资产打成
+# workspace 包（本文件上面那些条目），拷到新常开机 git clone + uv sync + import
+# 即可。Dockerfile / docker-compose.yml 在仓库里，真要容器化部署时
+# `docker compose up -d --build` 一条命令，不需要从旧机采集任何系统文件。
+#
+# ⚠️ 导入后有两件项目目录外的事必须手工做（旧模块 scripts/migrate.py 的
+#    _apply_chatgpt_client + _provision_chatgpt_env 会代劳，本技能尚未实现）：
+#      1) setx ZKAI_API_TOKEN "<与 .env 同值>"，否则桌面版报
+#         Missing environment variable（它从 explorer 启动，读不到 .env）
+#      2) 把 config/chatgpt.yaml 的期望配置写进 ~/.codex/config.toml
+#    不做这两步，网关本身正常，但 ChatGPT/Codex 桌面版连不上它。
+
+# ── 环境变量键名审计（值永不入库）────────────────────────────────────
+[env_audit]
+code_dirs = ["app", "scripts"]
+env_files = [".env"]
+# 由非 Python 工具消费的键（静态扫不到，不是死键）
+non_python_consumers = []
+# 有默认值或可选功能，缺了不算缺失
+defaulted_or_optional = [
+  "ZKAI_LOG_LEVEL", "ZKAI_LOG_JSON", "ZKAI_ENVIRONMENT", "ZKAI_HOST",
+  "ZKAI_REQUEST_TIMEOUT", "ZKAI_DEFAULT_MAX_TOKENS", "ZKAI_STRIP_REASONING",
+  "ZKAI_HEALTH_CHECK_MODE", "ZKAI_HEALTH_CHECK_INTERVAL",
+  "ZKAI_MAX_INPUT_TOKENS", "ZKAI_FORWARD_IMAGES", "ZKAI_OLLAMA_ENABLED",
+  "ZKAI_CONFIG_DIR", "ZKAI_DATA_DIR", "ZKAI_ALLOW_INLINE_SECRETS",
+  "OPENROUTER_REFERER", "OPENROUTER_TITLE", "PW_TEST_PROV_KEY",
+]
+prod_required = ["ZKAI_API_TOKEN", "ZKAI_DATABASE_URL"]
+
+# ── 非 Python 消费者：凭据名来自 YAML，不是 os.environ ────────────────
+# 引擎的静态扫描只看 Python 源码，扫不到这两类引用。不声明的话，
+# providers.yaml 引用的十几个凭据会被判成「死键，确认后可删」——照做网关当场全瘫。
+[[env_audit.consumers]]
+glob = "config/providers.yaml"
+# 匹配 `env: SENSENOVA_API_KEY` 与 `env_var: ${NAME}` 两种写法
+pattern = '''(?m)^\s*-?\s*env(?:_var)?\s*:\s*(?:\$\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))\s*$'''
+
+[[env_audit.consumers]]
+glob = "config/burner.yaml"
+pattern = '''(?m)^\s*-\s*([A-Z][A-Z0-9_]{2,})\s*$'''
+section = "only"
+
+# only: 有时写成逗号连接的单行而不是列表（本项目就是这样）。
+# split 让 pattern 抓到的整串按逗号/分号/空白再切开，否则一个键都认不出来。
+[[env_audit.consumers]]
+glob = "config/burner.yaml"
+pattern = '''(?m)^\s*only\s*:\s*["']?([A-Z0-9_,\s;]+)["']?\s*$'''
+split = ",; \t"
+
+# 框架式读取：这几个键不由 os.environ.get 读，而是 pydantic-settings 按字段名
+# 取值 / 启动自检时提到变量名。静态扫不到，但不声明就会被误判成死键——而
+# ZKAI_DATABASE_URL 缺了数据库连不上、ZKAI_ADMIN_TOKEN 缺了 /admin/* 裸奔。
+# 宁可靠声明覆盖，也不用「全大写标识符」兜底（那条路会收进 109 个普通常量）。
+# pattern 匹配反引号包裹的字面量（这些引用都写在 docstring 里，不锚定行首）。
+[[env_audit.consumers]]
+glob = "app/database/db.py"
+pattern = '''``(ZKAI_DATABASE_URL)``'''
+
+[[env_audit.consumers]]
+glob = "app/api/deps.py"
+pattern = '''``(ZKAI_ADMIN_TOKEN)``'''
+
+[[env_audit.consumers]]
+glob = "app/services/chatgpt_service.py"
+pattern = '''``(ZKAI_CODEX_HOME)``'''
+
+[[env_audit.consumers]]
+glob = "scripts/zkai_client.py"
+pattern = '''``(ZKAI_BASE_URL)``'''
+
+[[env_audit.consumers]]
+glob = "scripts/probe_upstream_path.py"
+pattern = '''``(HTTPS_PROXY)``'''

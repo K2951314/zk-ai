@@ -70,3 +70,13 @@ config/*.bak*
 .workbuddy-ai/
 # 诊断会话留下的临时调试脚本（自带 ruff/mypy 历史错误，去留未定，先排除出提交）
 scripts/probe_upstream_path.py
+
+# 一键换机（one-click-migrate 技能）：manifest.toml 要入库（只描述「搬什么」，
+# 不含密钥值），其余全是产物——加密包、导入时备份的明文 .env、journal。
+# ⚠ 2026-10-01 实测踩到：12MB 的 workspace 加密包（内含全部 API key）落在
+#   _bm/ 而忽略规则没覆盖，它一直以未跟踪状态挂在 git status 里，一个
+#   git add -A 就会把加密的密钥+数据库提交上去。.migrate 与 *.enc 都要排除。
+.migrate/*
+!.migrate/manifest.toml
+*.enc
+_bm/
