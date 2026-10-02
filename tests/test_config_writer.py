@@ -336,8 +336,10 @@ def _providers_yaml(tmp_path):
 def test_write_is_refused_when_the_file_changed_underneath(tmp_path) -> None:
     """实测事故：文件里禁用了 nvidia，控制台一保存又把它启用回去。
 
-    网关不监听配置文件，所以外部编辑在 reload 之前对内存不可见；此时把控制台
-    表单（基于旧内存值）写回文件，就会静默回滚那次编辑。宁可拒绝，也不要悄悄覆盖。
+    网关通过 ``ConfigWatcher`` 每 2s 轮询配置文件并自动 reload，但 watcher 有
+    轮询间隔 + settle 窗口的延迟——在它还没 reload 时，控制台表单（基于旧内存值）
+    若写回文件，就会静默回滚那次外部编辑。这道闸是 watcher 的第二道防线：
+    宁可拒绝，也不要悄悄覆盖。
     """
     import time
 

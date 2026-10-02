@@ -70,9 +70,11 @@ def load_document(path: Path) -> CommentedMap:
 class ConfigStaleError(ValueError):
     """Raised when the on-disk config changed after we loaded it.
 
-    见模块顶部「陈旧检测」的说明：网关不监听配置文件，所以外部编辑在 reload
-    之前对内存不可见；此时若把控制台表单（基于旧内存值）写回文件，就会**静默
-    回滚**那次外部编辑。宁可拒绝写入并让运营者先 reload，也不要悄悄覆盖。
+    见模块顶部「陈旧检测」的说明：网关通过 :class:`app.core.config_watch.ConfigWatcher`
+    每 2s 轮询配置文件并自动 reload，但 watcher 有轮询间隔 + settle 窗口的延迟——
+    在它还没来得及 reload 时，控制台表单（基于旧内存值）若直接写回文件，仍会
+    **静默回滚**那次外部编辑。所以这道闸是 watcher 的第二道防线：宁可拒绝写入
+    并让运营者先等 watcher reload（或手动 POST /admin/config/reload），也不要悄悄覆盖。
 
     继承 ``ValueError`` 是刻意的（2026-09-29 第三轮审查抓到的真 bug）：它原本
     继承 ``RuntimeError``，于是从所有 ``except (OSError, ValueError)`` 写入点

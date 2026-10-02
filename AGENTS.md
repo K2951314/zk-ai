@@ -141,17 +141,23 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   未部署**。论坛同名帖「Request to enable **Public API Endpoints** ... 404 Function
   Not Found」；官方页写明需 **Developer Program 会员**。改配置解决不了，
   要去 build.nvidia.com 查权限。
-- **外部改配置文件会被长命进程静默回滚**（2026-09-29 实测，同类 bug 本会话第 2 次）：
-  网关**不监听**配置文件，内存里是启动时的值；控制台表单**用内存值渲染**，
+- **外部改配置文件曾会被长命进程静默回滚**（2026-09-29 实测，同类 bug 本会话第 2 次）：
+  历史上网关不监听配置文件，内存里是启动时的值；控制台表单**用内存值渲染**，
   保存时把旧值写回文件。实测：08:20 在文件里禁用 nvidia，09:15 运营者在控制台
   打开 nvidia 页签并保存 → `enabled` 被改回 true（日志：
   `provider nvidia upserted via console` + `config file updated`）。
   **同日同型**：消耗器把 `burn_state.json` 的费率 761/2292 写回 830/2500。
   共同点：长命进程把内存状态写回文件，外部编辑在它看来不存在。
-  已修：`config_writer` 陈旧检测闸（`ConfigStaleError`）——`load_app_config` 记 mtime，
-  写前比对，文件更新过就**拒绝写入**并返回 **409 + 「先 reload」指引**；
-  写后刷新记录，自己写的不会被自己判陈旧。`stale_config_files()` 供体检/健康检查用。
-  **未修**：根治要网关监听文件自动 reload（行为变更，待定）。
+  已修（两道防线）：
+  ①`config_writer` 陈旧检测闸（`ConfigStaleError`）——`load_app_config` 记 mtime，
+    写前比对，文件更新过就**拒绝写入**并返回 **409 + 「先 reload」指引**；
+    写后刷新记录，自己写的不会被自己判陈旧。`stale_config_files()` 供体检/健康检查用。
+  ②`app/core/config_watch.py`（`ConfigWatcher`）——lifespan 启动后每 2s stat 轮询
+    `AppConfig.source_files`，签名（mtime_ns, size）稳定 settle 窗口后自动 reload。
+    改完 YAML **自动生效**，不再需要手动 reload 或重启。坏 YAML 保留旧配置 + 记
+    `last_error`，改好后自动接上。`ZKAI_WATCH_CONFIG` / `ZKAI_WATCH_CONFIG_INTERVAL` 可控。
+    `/health` 暴露 `config_watch`，控制台状态行显示「配置自动生效（已自动 reload N 次）」。
+    纯标准库 stat 轮询（不引 watchdog/inotify），监听名单 = loader 真正读过的文件（不是 glob）。
 - **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
   「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
   只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
@@ -533,7 +539,6 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `/ui/agent` 任务台（一次任务付一次编排成本），不走对外路径。
 
 - 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
-- 待办（2026-09-24 发现，未处理）：`MOONSHOT_API_KEY` 在 `.env` 里是空值，
-  `kimi-k3-moonshot` 恒为 DISABLED —— 它在 `zk-auto`/`zk-k3` 的故障转移链上
-  （`kimi-k3-sensenova` 之后），轮到必然失败，是个**死部署**：要么填 Key，
-  要么把 `models.yaml` 里 `kimi-k3-moonshot` / `kimi-k3-nvidia` 从别名链摘掉
+- ~~待办~~（已解决）：moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），
+  `kimi-k3-moonshot` 部署不存在了。`kimi-k3-nvidia` 仍保留但靠自动隔离兜底
+  （见上面「部署级自动隔离」那条）。

@@ -115,6 +115,11 @@ def _write_model_file(container: ContainerDep, model: ModelConfig) -> str | None
         )
     except (OSError, ValueError) as exc:
         raise _file_write_failed(exc) from exc
+    # 自己写的文件不会被自己判陈旧（atomic_write 内部 note_loaded），但
+    # ConfigWatcher 用的是独立的 (mtime_ns, size) 签名——不 reseed 的话，下一
+    # 次 poll 会在 ~2.4s 后看到文件变了并触发一次冗余 reload（结果与内存一致，
+    # 纯浪费）。reseed 让 watcher 把刚写的文件认作新基线。
+    container.refresh_config_watch()
     return path.name
 
 
@@ -128,6 +133,7 @@ def _write_alias_file(container: ContainerDep, alias: ModelAliasConfig) -> str |
         )
     except (OSError, ValueError) as exc:
         raise _file_write_failed(exc) from exc
+    container.refresh_config_watch()  # 见 _write_model_file 的说明
     return path.name
 
 
@@ -139,6 +145,7 @@ def _delete_file_entry(container: ContainerDep, section: str, key: str, name: st
         delete_list_entry(path, section, key, name)
     except (OSError, ValueError) as exc:
         raise _file_write_failed(exc) from exc
+    container.refresh_config_watch()  # 见 _write_model_file 的说明
     return path.name
 
 
@@ -150,6 +157,7 @@ def _write_limits_file(container: ContainerDep, provider_id: str, rules: list[di
         sync_provider_rate_limits(path, provider_id, rules)
     except (OSError, ValueError, KeyError) as exc:
         raise _file_write_failed(exc) from exc
+    container.refresh_config_watch()  # 见 _write_model_file 的说明
     return path.name
 
 
@@ -680,6 +688,7 @@ async def add_credential(
     if path is not None:
         append_credential_to_provider(path, provider_id, credential)
         synced = path.name
+        container.refresh_config_watch()  # 见 _write_model_file 的说明
     # Update in-memory config + credential pool
     from app.models.provider import CredentialConfig
 
@@ -723,6 +732,7 @@ async def delete_credential(
     if path is not None:
         delete_credential_from_provider(path, provider_id, credential_id)
         synced = path.name
+        container.refresh_config_watch()
     provider.credentials = [c for c in provider.credentials if c.id != credential_id]
     container.pool.register_provider(provider)
     return {"deleted": credential_id, "provider_id": provider_id, "synced": synced}
@@ -804,6 +814,7 @@ async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDe
         file_payload.pop("credentials", None)  # never overwrite keys from here
         upsert_provider_file(path, provider.id, file_payload)
         synced = path.name
+        container.refresh_config_watch()
     container.config.providers[provider.id] = provider
     container.pool.register_provider(provider)
     container.rate_limiter.register_provider(provider)
@@ -849,6 +860,7 @@ async def delete_provider(provider_id: str, container: ContainerDep) -> dict[str
     if path is not None:
         delete_provider_file(path, provider_id)
         synced = path.name
+        container.refresh_config_watch()
     container.config.providers.pop(provider_id, None)
     pruned = container.pool.reconcile(container.config.providers)
     container.router.remove_adapter(provider_id)
