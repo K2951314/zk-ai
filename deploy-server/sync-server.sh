@@ -13,14 +13,19 @@
 # 3. Public entry, four layers, each with its own credential:
 #      /zkai/v1/* , /v1/* , /health      - gateway API, needs Bearer api token
 #      /ui , /ui/report , /ui/agent      - console HTML shell (zero data)
-#      /admin/*                          - routed by admin token: gateway if
-#                                          correct, smart-quotation otherwise
+#      /admin/*                          - routed by request shape: correct admin
+#                                          token -> gateway; tokenless XHR ->
+#                                          gateway (so its 401 pops the login
+#                                          dialog); tokenless navigation ->
+#                                          smart-quotation
 #      /zkai/health                      - gateway probe, Bearer api token
 #    The gateway itself only authenticates /v1/chat/completions; /v1/models,
 #    /health and /admin/* are open or singly guarded, so Caddy adds the second
 #    check. /admin/* MUST stay shared because index.html's api() fetches that
 #    absolute path and <base> does not affect JS fetch(); smart-quotation owns
-#    /admin/* via StaticFiles, hence token-based routing instead of rewriting.
+#    /admin/* via StaticFiles. Tokenless /admin/* XHRs still go to the gateway so
+#    its 401 drives index.html's showAuth() -- sending them to smart-quotation
+#    would answer 404 and the login dialog would never appear.
 #
 # Keys travel over scp/SSH only. This directory holds no secrets; the three
 # committed files are burner.yaml, zkai-burner.service, Caddyfile.

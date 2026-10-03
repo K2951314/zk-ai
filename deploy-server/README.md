@@ -66,7 +66,7 @@ https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>
 | `/zkai/v1/*` | OpenAI 兼容接口 | `Bearer <ZKAI_API_TOKEN>`，Caddy 精确比对 |
 | `/v1/*`、`/health` | 同上（裸路径形式） | 同上 |
 | `/ui` `/ui/report` `/ui/agent` | 控制台 HTML 外壳 | 不校验（外壳零数据，见下） |
-| `/admin/*` | 管理接口 | 带正确 `<ZKAI_ADMIN_TOKEN>` 进网关；不带或带错回落智能询价 |
+| `/admin/*` | 管理接口 | 按请求形态分流，见下 |
 | `/health` | 探活 | 正确 API token，或 Referer 指向 `/ui`（见下） |
 
 `/zkai/admin/*`、`/zkai/ui/*`、`/zkai/web` **永不暴露**（实测 404）。
@@ -90,12 +90,29 @@ https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>
 Referer 可伪造，但这里只读、无写操作；真正敏感的数据在 `/v1/*` 与 `/admin/*`，
 那两层不松。
 
-**为什么 `/admin/*` 要按 token 分流**：控制台 `index.html` 的 `api()` 用
+**为什么 `/admin/*` 要按请求形态分流**：控制台 `index.html` 的 `api()` 用
 **绝对路径** `fetch("/admin/providers")`，而 `<base href>` 对 JS 里的
 `fetch("/...")` 无效（只影响 HTML 相对链接）。所以访问 `/ui` 时浏览器会去请求
 裸 `/admin/*`。但 `/admin/*` 是智能询价自己 `app.mount("/admin", StaticFiles)`
-占着的，不能整个抢过来。于是 Caddy 在这里按 token 分流：带正确 admin token 的
-请求进网关，其余照旧给智能询价。两边都只看到自己该看的。
+占着的，不能整个抢过来。
+
+分流规则（Caddy C 块）：
+
+| 请求 | 去向 | 结果 |
+|---|---|---|
+| 带正确 admin token（`Bearer` 或 `X-Admin-Token`） | 网关 | 200，控制台取到数据 |
+| 不带/带错 token，且是 XHR（`Sec-Fetch-Mode: cors/no-cors`） | 网关 | **401，`showAuth()` 弹出登录框** |
+| 不带 token 且是浏览器导航（`navigate`）或 curl | 智能询价 | 它的 /admin 后台，行为不变 |
+
+**为什么第三列第二个必须是 401**：`index.html` 的 `api()` 有一段约定 ——
+`if (resp.status === 401) { showAuth(); throw ... }`。它期待 401 后把登录框弹出来。
+第一版我把不带 token 的请求送去智能询价，那边没有 `/admin/providers` 路由，
+回 404，登录框永远不触发，现象就是「控制台一片 404、总览空白」。
+这是产品代码里的人机交互约定，代理层不能破坏它。
+
+用 `Sec-Fetch-Mode` 区分导航与 XHR：浏览器地址栏/点链接是 `navigate`，
+JS `fetch()` 是 `cors`（同源也是）。curl 两个头都不带，归 `navigate` 分支，
+运维排查时看到的是智能询价页面而不是 401，符合直觉。
 
 **为什么在 Caddy 层就拦**：网关自身只对 `/v1/chat/completions` 校验 token，
 `/v1/models` 和 `/health` 是裸的——本机部署假定，所以无 token 也返回 200。

@@ -150,10 +150,31 @@ https://120.53.28.29 {
 		}
 	}
 
-	# ---- C. /admin/* 按 admin token 分流 ---------------------------------
+	# ---- C. /admin/* 分流 ------------------------------------------------
+	# /admin/* 是智能询价 app.mount("/admin", StaticFiles) 占着的，但同时
+	# 又是控制台 api() 的取数路径（绝对路径 fetch("/admin/providers")）。
+	#
+	# 关键约束：控制台 api() 自己有 401 语义 —— index.html 里
+	#   if (resp.status === 401) { showAuth(); throw ... }
+	# 它期待收到 401 后弹登录框。所以不带 token 的请求**必须**由网关应答，
+	# 让网关的 require_admin 回 401（本机实测无 token 就是 401）。
+	# 一旦把它送去智能询价，那边没这个路由会回 404，登录框永远不弹，
+	# 页面表现为「总览空白 + 控制台一片 404」。
+	#
+	# 那智能询价自己的后台怎么办？它的 /admin/ 是 StaticFiles（html=True），
+	# 真实访问是浏览器导航（Accept: text/html），不是 XHR。所以按请求形态分：
+	#   - 带正确 admin token                → 网关（控制台取数）
+	#   - 不带 token 且是 XHR（fetch 语义）   → 网关（让它回 401 触发登录框）
+	#   - 不带 token 且是浏览器导航（HTML）   → 智能询价（保持它原有行为）
+	#
+	# 判据用 Sec-Fetch-Mode：浏览器地址栏导航/点链接是 navigate，
+	# JS fetch()/XHR 是 cors（同源）或 no-cors。curl 请求两个头都不带，
+	# 归到 navigate 分支，对运维排查友好（看到的是智能询价的页面而不是 401）。
 	handle /admin/* {
 		@zk_console_bearer header Authorization "Bearer {$ZKAI_ADMIN_TOKEN_PUBLIC}"
 		@zk_console_xadm header X-Admin-Token "{$ZKAI_ADMIN_TOKEN_PUBLIC}"
+		@zk_console_xhr header Sec-Fetch-Mode cors
+		@zk_console_xhr2 header Sec-Fetch-Mode no-cors
 		handle @zk_console_bearer {
 			reverse_proxy 127.0.0.1:8318 {
 				flush_interval -1
@@ -170,7 +191,23 @@ https://120.53.28.29 {
 				}
 			}
 		}
-		# 不带 token 或带错：保持智能询价原样
+		handle @zk_console_xhr {
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 120s
+				}
+			}
+		}
+		handle @zk_console_xhr2 {
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 120s
+				}
+			}
+		}
+		# 浏览器导航（或 curl）：智能询价的 /admin 后台，行为不变
 		handle {
 			reverse_proxy 127.0.0.1:8001 {
 				flush_interval -1
