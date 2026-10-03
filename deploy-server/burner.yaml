@@ -1,0 +1,36 @@
+# ZK-AI burner — server profile (2C2G shared with sq / tandian / zkai)
+#
+# Derived from config/burner.yaml (local, 96 concurrency).
+# The local profile assumes the whole machine. On the server, sq alone already
+# holds ~335MB RSS, so the burner is capped and scheduled under its own cgroup.
+#
+# Keys: read from /opt/zkai/.env (SENSENOVA_API_KEY_*), same as local.
+# State: /var/lib/zkai/burner/ (fresh account book; the local one is
+#        deliberately NOT copied — its rate_in/rate_out are calibrated against
+#        this machine's concurrency, and its anchors are per-account).
+
+model: sensenova-6.8-flash-lite
+base_url: https://token.sensenova.cn/v1
+max_seconds: 0
+once: false
+
+concurrency: 48
+per_account_start: 8
+per_account_max: 8
+
+starve_after: 300
+starve_grace: 120
+
+max_tokens: 16384
+filler_chars: 6000
+
+rate_in: 761
+rate_out: 2292
+
+only: "SENSENOVA_API_KEY_02,SENSENOVA_API_KEY_03,SENSENOVA_API_KEY_04,SENSENOVA_API_KEY_05,SENSENOVA_API_KEY_06,SENSENOVA_API_KEY_07,SENSENOVA_API_KEY_08,SENSENOVA_API_KEY_09,SENSENOVA_API_KEY_10"
+
+cooldown_base: 60
+cooldown_max: 900
+connect_timeout: 15
+read_timeout: 180
+summary_interval: 60

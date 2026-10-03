@@ -1,0 +1,41 @@
+[Unit]
+Description=ZK-AI SenseNova credit burner (flash-lite, server profile)
+After=network-online.target zkai.service
+Wants=zkai.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/zkai
+# 密钥走 /opt/zkai/.env（burn_sensenova.py 自己 load_dotenv）。systemd 的
+# EnvironmentFile 不读 .env，但这里仍然给一份，便于被 zkai-burner 派生的环境一致。
+EnvironmentFile=/etc/zkai.env
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+# 注意：burn_sensenova.py 的配置来源固定是 <cwd>/config/burner.yaml
+# （parse_args 里 load_config() 不接 --config-file），所以服务器档位直接改
+# /opt/zkai/config/burner.yaml，支持热加载，不用重启本服务。
+# 账号账本与日志放在 /var/lib/zkai/burner，与网关数据目录分开，便于限额与备份。
+ExecStart=/opt/zkai/.venv/bin/python scripts/burn_sensenova.py --state-file /var/lib/zkai/burner/burn_state.json --log-file /var/lib/zkai/burner/burn_sensenova.log
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zkai/burner /opt/zkai/config
+# 保守档：burner 只允许拿到 1 核的一半算力与 400MB 常驻内存。
+# sq 单独就要 ~335MB，tandian 与 zkai 也在同一台机器上，不能让它把整机拖进 swap。
+MemoryMax=400M
+MemoryHigh=320M
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zkai-burner
+
+[Install]
+WantedBy=multi-user.target

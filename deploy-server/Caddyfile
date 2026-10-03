@@ -1,0 +1,74 @@
+# ── 大众点评评价助手（tandian）─────────────────────────
+# 与智能询价共用 https://<IP>，用子路径 + handle 块区分：
+#   /tandian/* 与 /api/*  → 反代到 手机端.py（127.0.0.1:<PORT>）
+#   /zkai/v1/* 与 /zkai/health → ZK-AI 网关（127.0.0.1:8318）
+# 其余（/、/apps、/admin...）一律反代 8001 智能询价，行为不变。
+# 还原智能询价独占：sudo cp /etc/caddy/Caddyfile.sq /etc/caddy/Caddyfile && sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+{
+	cert_issuer acme {
+		profile shortlived
+		disable_tlsalpn_challenge
+	}
+	default_sni 120.53.28.29
+}
+
+https://120.53.28.29 {
+
+	# 访问日志只留 tandian 相关，避免把智能询价的量也卷进来
+	log {
+		output file /var/log/caddy/tandian-access.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format json
+		level INFO
+	}
+
+	# ── ZK-AI 网关（公网入口）──────────────────────────────
+	# 只放行 /v1/*（OpenAI 兼容接口）与 /health。/admin/*、/ui/*、/web 永不暴露。
+	#
+	# 为什么在 Caddy 层就拦：网关自身只对 /v1/chat/completions 校验 token，
+	# /v1/models 和 /health 是裸的（本地部署假定，无 token 也返回 200）。
+	# 一旦暴露到公网，「列模型 / 探活 / 拿路由拓扑」就变成免费信息。
+	# 这里用 env 里的 ZKAI_PUBLIC_TOKEN 做**精确比对**，不是 Bearer 通配——
+	# 通配匹配等于任何非空串都能过，拦不住扫描器。
+	#
+	# 用法（任何地方都能调）：
+	#   curl https://120.53.28.29/zkai/v1/chat/completions \
+	#     -H "Authorization: Bearer <ZKAI_API_TOKEN>" \
+	#     -H "Content-Type: application/json" \
+	#     -d '{"model":"zk-auto","messages":[{"role":"user","content":"hi"}]}'
+	@zkai path /zkai/health /zkai/v1 /zkai/v1/*
+	handle @zkai {
+		@zkai_auth header Authorization "Bearer {$ZKAI_PUBLIC_TOKEN}"
+		handle @zkai_auth {
+			uri strip_prefix /zkai
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				# 慢请求预算：网关上游可达 300s，且同一请求内会沿候选链重试，
+				# 整条链墙钟默认 300s。600s 覆盖它，不让 Caddy 先掐断。
+				transport http {
+					response_header_timeout 600s
+				}
+			}
+		}
+		handle {
+			respond "Unauthorized" 401
+		}
+	}
+
+	@tandian path /tandian /tandian/* /api/style /api/write /api/write/* /api/explore /api/job/* /api/history /api/history/*
+	handle @tandian {
+		uri strip_prefix /tandian
+		reverse_proxy 127.0.0.1:8787 {
+			flush_interval -1
+		}
+	}
+
+	# 智能询价：其余全部照旧反代 8001，不记日志（它的量由自己的中间件管）
+	handle {
+		reverse_proxy 127.0.0.1:8001 {
+			flush_interval -1
+		}
+	}
+}
