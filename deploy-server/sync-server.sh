@@ -10,11 +10,17 @@
 # 2. Burner: install the conservative profile (48 concurrency / per_account 8)
 #    + zkai-burner.service (MemoryMax=400M / CPUQuota=50%, protecting sq and
 #    tandian), enable + start.
-# 3. Public entry: Caddyfile exposing /zkai/v1/* + /zkai/health (gateway API)
-#    and /zkconsole/ui/* + /zkconsole/admin/* (operator console), with exact
-#    Bearer comparisons in Caddy. The gateway itself only authenticates
-#    /v1/chat/completions; /v1/models, /health and /admin/* are either open or
-#    guarded by a single check, so Caddy adds the second one.
+# 3. Public entry, four layers, each with its own credential:
+#      /zkai/v1/* , /v1/* , /health      - gateway API, needs Bearer api token
+#      /ui , /ui/report , /ui/agent      - console HTML shell (zero data)
+#      /admin/*                          - routed by admin token: gateway if
+#                                          correct, smart-quotation otherwise
+#      /zkai/health                      - gateway probe, Bearer api token
+#    The gateway itself only authenticates /v1/chat/completions; /v1/models,
+#    /health and /admin/* are open or singly guarded, so Caddy adds the second
+#    check. /admin/* MUST stay shared because index.html's api() fetches that
+#    absolute path and <base> does not affect JS fetch(); smart-quotation owns
+#    /admin/* via StaticFiles, hence token-based routing instead of rewriting.
 #
 # Keys travel over scp/SSH only. This directory holds no secrets; the three
 # committed files are burner.yaml, zkai-burner.service, Caddyfile.
@@ -80,7 +86,7 @@ journalctl -u zkai-burner --no-pager | grep '配置来源' | tail -1 | grep -o '
 fi
 
 if [ "${SKIP_CADDY:-0}" != "1" ]; then
-  echo "==> 3/3 public entry (Caddy subpath + exact Bearer match)"
+  echo "==> 3/3 public entry (gateway API + console + /admin token routing)"
   scp "$DEPLOY/Caddyfile" "$TARGET:/tmp/zkai-Caddyfile" >/dev/null
   STEP3="set -e
 install -o root -g root -m 644 /tmp/zkai-Caddyfile /etc/caddy/Caddyfile
@@ -99,8 +105,8 @@ A2=\$(grep '^ZKAI_ADMIN_TOKEN=' /opt/zkai/.env | cut -d= -f2-)
 echo -n 'console ui:       '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkconsole/ui/
 echo -n 'api no-token:     '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkai/health
 echo -n 'api bad-token:    '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' -H 'Authorization: Bearer wrong' https://120.53.28.29/zkai/health
-echo -n 'admin no-token:   '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkconsole/admin/providers
-echo -n 'admin good-token: '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' -H "Authorization: Bearer \"\$A2\"" https://120.53.28.29/zkconsole/admin/providers
+echo -n 'admin no-token:   '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/admin/providers
+echo -n 'admin good-token: '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' -H "Authorization: Bearer \"\$A2\"" https://120.53.28.29/admin/providers
 echo -n 'tandian:          '; curl -sS --max-time 20 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/tandian/"
   remote "$(printf '%s' "$STEP3" | base64 -w0)"
 fi
@@ -109,4 +115,4 @@ echo ""
 echo "Done. Public endpoints:"
 echo "  POST https://120.53.28.29/zkai/v1/chat/completions"
 echo "  Header: Authorization: Bearer <ZKAI_API_TOKEN>"
-echo "  Console: https://120.53.28.29/zkconsole/ui/?token=<ZKAI_ADMIN_TOKEN>"
+echo "  Console: https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>"

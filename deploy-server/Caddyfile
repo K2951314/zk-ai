@@ -63,43 +63,54 @@ https://120.53.28.29 {
 	}
 
 	# ── ZK-AI 控制台（公网入口）──────────────────────────
-	# 专属前缀 /zkconsole，与网关 API 的 /zkai 分开，也和智能询价的 /admin、
-	# /apps 零重叠（那些是它自己的路由，且 /ui 在它上面是 404）。
 	#
-	# 分三层，越往内越严：
-	#   1. /zkconsole/ui/*   → 控制台 HTML 外壳。外壳本身零数据（每个值都由
-	#      /admin/* 现取），所以这一层只做 IP 来源提示，不做 token 校验——
-	#      否则浏览器首次打开时没有任何请求能带上 token，页面会白屏。
-	#      真正的鉴权在第二层。
-	#   2. /zkconsole/admin/* → 管理接口。网关侧 require_admin 校验
-	#      ZKAI_ADMIN_TOKEN（X-Admin-Token 或 Bearer）；这里再加一道 Caddy
-	#      精确比对，双保险。**任何写操作都经过这里。**
-	#   3. /zkconsole/health  → 只读探活，放行不校验（与 /zkai/health 一致，
-	#      不含敏感信息）。
+	# 控制台 index.html 的 api() 用绝对路径 fetch("/admin/providers")，
+	# <base> 对 JS 里的 fetch 无效，所以必须让**裸路径**也达网关。
+	# 而 /admin/* 是智能询价自己 mount 的 StaticFiles，它占着；
+	# /ui、/v1、/health 它没占用（/ui 在它上面是 404）。
 	#
-	# 用法：打开 https://120.53.28.29/zkconsole/ui/?token=<ZKAI_ADMIN_TOKEN>
-	#       页面会把 token 存进本机浏览器 localStorage，之后自动带。
-	#       （?token= 是网关 index.html 原生支持的直登参数，登录后地址栏会被
-	#         replaceState 抹掉，不会留在历史里。）
-	@zkconsole_admin path /zkconsole/admin /zkconsole/admin/*
-	handle @zkconsole_admin {
-		@console_bearer header Authorization "Bearer {$ZKAI_ADMIN_TOKEN_PUBLIC}"
-		@console_xadm header X-Admin-Token "{$ZKAI_ADMIN_TOKEN_PUBLIC}"
-		handle @console_bearer {
-			uri strip_prefix /zkconsole
-			reverse_proxy 127.0.0.1:8318 {
-				flush_interval -1
-				transport http {
-					response_header_timeout 120s
-				}
-			}
+	# 分三类，各自独立鉴权，互不影响：
+	#
+	#   A. /ui /*、/ui/report/*、/ui/agent/*
+	#      控制台 HTML 外壳。外壳零数据（每个值都由 /admin/* 现取），
+	#      所以不校验 token —— 否则浏览器首次打开时没有任何请求能带上
+	#      token，页面会白屏。登录后位置就是 /ui，页面只在这里做展示。
+	#      ⚠️ 这一层不校验，正是因为数据不在这一层。
+	#
+	#   B. /v1/*、/health
+	#      网关 API 与探活。必须带 `Authorization: Bearer <ZKAI_API_TOKEN>`，
+	#      Caddy 精确比对（网关自身只校验 chat/completions，/v1/models 和
+	#      /health 是裸的，这层补上）。
+	#
+	#   C. /admin/*（与智能询价共享）
+	#      按 token 分流：带正确 admin token → 网关；不带或带错 → 智能询价
+	#      （它原有的 /admin 后台行为不变）。Caddy + 网关 require_admin 双保险。
+	#
+	# 打开 https://120.53.28.29/zkconsole/ui/?token=<ZKAI_ADMIN_TOKEN>
+	# 页面把 token 存进本机浏览器 localStorage，之后每个 /admin/* 请求自动带，
+	# 由 C 类规则送进网关。不带 token 也能打开页面，但数据接口会 401。
+	# （?token= 是网关 index.html 原生支持的直登参数，登录后地址栏会被
+	#  replaceState 抹掉，不会留在浏览器历史里。）
+
+	# ---- A. 控制台 HTML 外壳（零数据，不校验）---------------------------
+	# /ui 与 /ui/* 是控制台的主地址（智能询价不占用 /ui，实测 404）。
+	@zkconsole_ui path /ui /ui/*
+	handle @zkconsole_ui {
+		reverse_proxy 127.0.0.1:8318 {
+			flush_interval -1
 		}
-		handle @console_xadm {
-			uri strip_prefix /zkconsole
+	}
+
+
+	# ---- B. 网关 API 与探活（必须带 API token）---------------------------
+	@zkai_bare path /v1 /v1/* /health
+	handle @zkai_bare {
+		@zkai_bare_auth header Authorization "Bearer {$ZKAI_PUBLIC_TOKEN}"
+		handle @zkai_bare_auth {
 			reverse_proxy 127.0.0.1:8318 {
 				flush_interval -1
 				transport http {
-					response_header_timeout 120s
+					response_header_timeout 600s
 				}
 			}
 		}
@@ -108,32 +119,31 @@ https://120.53.28.29 {
 		}
 	}
 
-	# 注意：/ui 与 /ui/ 都要接，但**不能**让网关自己发 307 —— strip 后路径
-	# 变成 /ui/ 而网关注册的是 /ui，FastAPI 的 redirect_slashes 会把它 307 到
-	# 站外的 /ui（落到智能询价）。所以两种写法都不 strip，改为在反代前把路径
-	# 规范成网关注册的那一个：带尾斜杠的 /zkconsole/ui/ 重写成 /zkconsole/ui，
-	# 再统一 strip 前缀，网关侧就只会看到 /ui。
-	@zkconsole_ui_slash path /zkconsole/ui/ /zkconsole/ /zkconsole/ui/report/ /zkconsole/ui/agent/
-	handle @zkconsole_ui_slash {
-		uri strip_suffix /
-		uri strip_prefix /zkconsole
-		reverse_proxy 127.0.0.1:8318 {
-			flush_interval -1
+	# ---- C. /admin/* 按 admin token 分流 ---------------------------------
+	handle /admin/* {
+		@zk_console_bearer header Authorization "Bearer {$ZKAI_ADMIN_TOKEN_PUBLIC}"
+		@zk_console_xadm header X-Admin-Token "{$ZKAI_ADMIN_TOKEN_PUBLIC}"
+		handle @zk_console_bearer {
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 120s
+				}
+			}
 		}
-	}
-	@zkconsole_ui path /zkconsole/ui /zkconsole/ui/* /zkconsole
-	handle @zkconsole_ui {
-		uri strip_prefix /zkconsole
-		reverse_proxy 127.0.0.1:8318 {
-			flush_interval -1
+		handle @zk_console_xadm {
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 120s
+				}
+			}
 		}
-	}
-
-	@zkconsole_health path /zkconsole/health
-	handle @zkconsole_health {
-		uri strip_prefix /zkconsole
-		reverse_proxy 127.0.0.1:8318 {
-			flush_interval -1
+		# 不带 token 或带错：保持智能询价原样
+		handle {
+			reverse_proxy 127.0.0.1:8001 {
+				flush_interval -1
+			}
 		}
 	}
 
