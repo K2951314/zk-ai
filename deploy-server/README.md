@@ -10,7 +10,8 @@
 |---|---|---|
 | 网关 `zkai` | `/opt/zkai`，systemd，`127.0.0.1:8318` | active，5/5 provider 可用 |
 | 消耗器 `zkai-burner` | systemd，账本 `/var/lib/zkai/burner/` | active，48 并发保守档 |
-| 公网入口 | Caddy `/zkai/*`，HTTPS 120.53.28.29 | 401/200 鉴权符合预期 |
+| 公网入口 `zkai` | Caddy `/zkai/v1/*` + `/zkai/health` | 401/200 鉴权符合预期 |
+| 公网控制台 `zkconsole` | Caddy `/zkconsole/ui/*` + `/zkconsole/admin/*` | 界面 200，管理接口四种鉴权组合全部符合预期 |
 | 技能仓库 | `/opt/my-skills`，软链到 `~/.agents|.codex|.workbuddy-ai/skills` | 三个技能生效 |
 | 其他在跑 | `sq`（智能询价，335MB RSS）/ `tandian` / `postgres` / `caddy` | 未受影响 |
 
@@ -36,24 +37,53 @@ curl https://120.53.28.29/zkai/v1/chat/completions \
   -d '{"model":"zk-auto","messages":[{"role":"user","content":"你好"}],"max_tokens":256}'
 ```
 
+**控制台（浏览器打开）**：
+
+```
+https://120.53.28.29/zkconsole/ui/?token=<ZKAI_ADMIN_TOKEN>
+```
+
+- `/zkconsole/ui/` 控制台总览，`/zkconsole/ui/report/` 体检报告，
+  `/zkconsole/ui/agent/` Agent 任务台。
+- `?token=` 是网关 `index.html` 原生支持的直登参数，登入后地址栏会被
+  `history.replaceState` 抹掉，不会留在浏览器历史里。
+- 也可以不带 `?token=` 打开，然后在页面右上角「🔑 令牌」里粘一次，
+  凭据只存在这台浏览器的 localStorage。
+- 控制台能改的东西：供应商 / 凭据 / 配额 / 模型与别名 / burner 配置。
+  改 `models.yaml`、`providers.yaml` 支持热加载，不用重启网关。
+
+
+
 - base_url 填 `https://120.53.28.29/zkai/v1`（OpenAI SDK 用 `base_url`，路径别带 `/zkai/v1` 之外的前缀）。
 - PowerShell：`-TimeoutSec 420`，网关整条链预算 300s，客户端必须比它大。
 - token 就是 `/etc/zkai.env` 的 `ZKAI_API_TOKEN`（与本机 `.env` 同一份值）。
 
 ### 暴露面（重要）
 
-只放行两个前缀，其余一律反代到智能询价：
+一共三个前缀，各自独立鉴权，其余一律反代到智能询价：
 
-- `GET/zkai/health` 健康检查
-- `/zkai/v1/*` OpenAI 兼容接口
+| 前缀 | 内容 | 鉴权 |
+|---|---|---|
+| `/zkai/v1/*` | OpenAI 兼容接口 | `Authorization: Bearer <ZKAI_API_TOKEN>`，Caddy 精确比对 |
+| `/zkai/health` | 健康检查 | 同上（不含敏感信息，但也不白送） |
+| `/zkconsole/ui/*` | 控制台 HTML 外壳 | **不校验**（外壳零数据，见下） |
+| `/zkconsole/admin/*` | 管理接口 | `Authorization: Bearer` 或 `X-Admin-Token` 带 `<ZKAI_ADMIN_TOKEN>`，Caddy + 网关双重校验 |
+| `/zkconsole/health` | 控制台探活 | 不校验 |
 
 `/zkai/admin/*`、`/zkai/ui/*`、`/zkai/web` **永不暴露**（实测 404）。
 
-**为什么在 Caddy 层就拦 token**：网关自身只对 `/v1/chat/completions` 校验 token，
+**为什么控制台 HTML 不校验 token**：`app/web/index.html` 是纯静态外壳，
+每个数值都由 `/admin/*` 现取（见 `app/api/ui.py` 的模块 docstring）。
+如果给 HTML 也加 token 门槛，浏览器首次打开时没有任何请求能带上 token，
+页面会直接白屏。所以外壳放行、数据层校验——登录是控制台右上角「🔑 令牌」
+或 URL 带 `?token=`，凭据只存浏览器 localStorage，不发往第三方。
+
+**为什么在 Caddy 层就拦**：网关自身只对 `/v1/chat/completions` 校验 token，
 `/v1/models` 和 `/health` 是裸的——本机部署假定，所以无 token 也返回 200。
 一旦暴露到公网，「列模型 / 探活 / 拿路由拓扑」就变成免费信息。
-Caddy 这里用 `{$ZKAI_PUBLIC_TOKEN}` **精确比对**，不是 `Bearer *` 通配：通配匹配等于
-任何非空串都能过，拦不住扫描器（实测 wrong / near-miss token 都是 401）。
+`/admin/*` 虽然网关侧有 `require_admin`，但那是唯一一道闸，补一道 Caddy
+更稳。两处都用**精确比对**，不是 `Bearer *` 通配：通配匹配等于任何非空串
+都能过，拦不住扫描器（实测 wrong / near-miss token 都是 401）。
 
 ## 为什么 burner 是保守档
 
@@ -128,7 +158,8 @@ ssh ubuntu@120.53.28.29 'systemctl show zkai-burner -p MemoryCurrent -p CPUUsage
 | `sync-server.sh` | 一键部署/同步脚本（幂等） |
 | `burner.yaml` | 服务器保守档 burner 配置 |
 | `zkai-burner.service` | burner 的 systemd 单元（限额+优先级） |
-| `Caddyfile` | Caddy 配置（新增 `/zkai/*` 子路径 + Bearer 鉴权） |
+| `Caddyfile` | Caddy 配置（`/zkai/*` 网关 API + `/zkconsole/*` 控制台） |
 
 密钥一律不进这三个文件：SENSENOVA key 走 scp 到服务器 `.env`，
-token 从 `/opt/zkai/.env` 现取写进 `/etc/caddy/zkai.env`（root:caddy 640）。
+token 从 `/opt/zkai/.env` 现取写进 `/etc/caddy/zkai.env`（root:caddy 640）；
+admin token 同样从 `.env` 现取写同一份文件，供控制台管理接口双保险用。

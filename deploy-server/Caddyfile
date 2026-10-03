@@ -1,7 +1,10 @@
 # ── 大众点评评价助手（tandian）─────────────────────────
 # 与智能询价共用 https://<IP>，用子路径 + handle 块区分：
 #   /tandian/* 与 /api/*  → 反代到 手机端.py（127.0.0.1:<PORT>）
-#   /zkai/v1/* 与 /zkai/health → ZK-AI 网关（127.0.0.1:8318）
+#   /zkai/v1/*            → ZK-AI 网关 API（127.0.0.1:8318，Bearer 精确比对）
+#   /zkconsole/ui/*       → ZK-AI 控制台界面（HTML 外壳）
+#   /zkconsole/admin/*    → ZK-AI 管理接口（admin token 精确比对）
+#   /zkconsole/health     → 控制台探活
 # 其余（/、/apps、/admin...）一律反代 8001 智能询价，行为不变。
 # 还原智能询价独占：sudo cp /etc/caddy/Caddyfile.sq /etc/caddy/Caddyfile && sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
 {
@@ -38,6 +41,8 @@ https://120.53.28.29 {
 	#     -H "Authorization: Bearer <ZKAI_API_TOKEN>" \
 	#     -H "Content-Type: application/json" \
 	#     -d '{"model":"zk-auto","messages":[{"role":"user","content":"hi"}]}'
+	# ── ZK-AI 网关 API（公网入口）────────────────────────
+	# 只放行 /v1/*（OpenAI 兼容接口）与 /health。/admin/* 不走这里，见下面的控制台块。
 	@zkai path /zkai/health /zkai/v1 /zkai/v1/*
 	handle @zkai {
 		@zkai_auth header Authorization "Bearer {$ZKAI_PUBLIC_TOKEN}"
@@ -54,6 +59,81 @@ https://120.53.28.29 {
 		}
 		handle {
 			respond "Unauthorized" 401
+		}
+	}
+
+	# ── ZK-AI 控制台（公网入口）──────────────────────────
+	# 专属前缀 /zkconsole，与网关 API 的 /zkai 分开，也和智能询价的 /admin、
+	# /apps 零重叠（那些是它自己的路由，且 /ui 在它上面是 404）。
+	#
+	# 分三层，越往内越严：
+	#   1. /zkconsole/ui/*   → 控制台 HTML 外壳。外壳本身零数据（每个值都由
+	#      /admin/* 现取），所以这一层只做 IP 来源提示，不做 token 校验——
+	#      否则浏览器首次打开时没有任何请求能带上 token，页面会白屏。
+	#      真正的鉴权在第二层。
+	#   2. /zkconsole/admin/* → 管理接口。网关侧 require_admin 校验
+	#      ZKAI_ADMIN_TOKEN（X-Admin-Token 或 Bearer）；这里再加一道 Caddy
+	#      精确比对，双保险。**任何写操作都经过这里。**
+	#   3. /zkconsole/health  → 只读探活，放行不校验（与 /zkai/health 一致，
+	#      不含敏感信息）。
+	#
+	# 用法：打开 https://120.53.28.29/zkconsole/ui/?token=<ZKAI_ADMIN_TOKEN>
+	#       页面会把 token 存进本机浏览器 localStorage，之后自动带。
+	#       （?token= 是网关 index.html 原生支持的直登参数，登录后地址栏会被
+	#         replaceState 抹掉，不会留在历史里。）
+	@zkconsole_admin path /zkconsole/admin /zkconsole/admin/*
+	handle @zkconsole_admin {
+		@console_bearer header Authorization "Bearer {$ZKAI_ADMIN_TOKEN_PUBLIC}"
+		@console_xadm header X-Admin-Token "{$ZKAI_ADMIN_TOKEN_PUBLIC}"
+		handle @console_bearer {
+			uri strip_prefix /zkconsole
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 120s
+				}
+			}
+		}
+		handle @console_xadm {
+			uri strip_prefix /zkconsole
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 120s
+				}
+			}
+		}
+		handle {
+			respond "Unauthorized" 401
+		}
+	}
+
+	# 注意：/ui 与 /ui/ 都要接，但**不能**让网关自己发 307 —— strip 后路径
+	# 变成 /ui/ 而网关注册的是 /ui，FastAPI 的 redirect_slashes 会把它 307 到
+	# 站外的 /ui（落到智能询价）。所以两种写法都不 strip，改为在反代前把路径
+	# 规范成网关注册的那一个：带尾斜杠的 /zkconsole/ui/ 重写成 /zkconsole/ui，
+	# 再统一 strip 前缀，网关侧就只会看到 /ui。
+	@zkconsole_ui_slash path /zkconsole/ui/ /zkconsole/ /zkconsole/ui/report/ /zkconsole/ui/agent/
+	handle @zkconsole_ui_slash {
+		uri strip_suffix /
+		uri strip_prefix /zkconsole
+		reverse_proxy 127.0.0.1:8318 {
+			flush_interval -1
+		}
+	}
+	@zkconsole_ui path /zkconsole/ui /zkconsole/ui/* /zkconsole
+	handle @zkconsole_ui {
+		uri strip_prefix /zkconsole
+		reverse_proxy 127.0.0.1:8318 {
+			flush_interval -1
+		}
+	}
+
+	@zkconsole_health path /zkconsole/health
+	handle @zkconsole_health {
+		uri strip_prefix /zkconsole
+		reverse_proxy 127.0.0.1:8318 {
+			flush_interval -1
 		}
 	}
 

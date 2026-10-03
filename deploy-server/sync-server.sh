@@ -10,9 +10,11 @@
 # 2. Burner: install the conservative profile (48 concurrency / per_account 8)
 #    + zkai-burner.service (MemoryMax=400M / CPUQuota=50%, protecting sq and
 #    tandian), enable + start.
-# 3. Public entry: Caddyfile exposing only /zkai/v1/* and /zkai/health, with an
-#    exact Bearer comparison in Caddy (the gateway itself only authenticates
-#    /v1/chat/completions; /v1/models and /health are unauthenticated).
+# 3. Public entry: Caddyfile exposing /zkai/v1/* + /zkai/health (gateway API)
+#    and /zkconsole/ui/* + /zkconsole/admin/* (operator console), with exact
+#    Bearer comparisons in Caddy. The gateway itself only authenticates
+#    /v1/chat/completions; /v1/models, /health and /admin/* are either open or
+#    guarded by a single check, so Caddy adds the second one.
 #
 # Keys travel over scp/SSH only. This directory holds no secrets; the three
 # committed files are burner.yaml, zkai-burner.service, Caddyfile.
@@ -40,7 +42,7 @@ grep -E '^[[:space:]]*SENSENOVA_API_KEY(_[0-9]+)?=' "$REPO/.env" > "$STAGED" || 
 [ -s "$STAGED" ] || { echo "ERROR: no SENSENOVA_API_KEY in .env"; exit 1; }
 echo "==> $(wc -l < "$STAGED") SENSENOVA_API_KEY staged"
 
-echo "==> 1/3 gateway"
+echo "==> 1/3 gateway (keys + provider health)"
 scp "$STAGED" "$TARGET:/tmp/zkai-sensenova.env" >/dev/null
 STEP1="set -e
 if grep -q '^SENSENOVA_API_KEY' /opt/zkai/.env 2>/dev/null; then
@@ -83,7 +85,8 @@ if [ "${SKIP_CADDY:-0}" != "1" ]; then
   STEP3="set -e
 install -o root -g root -m 644 /tmp/zkai-Caddyfile /etc/caddy/Caddyfile
 T=\$(grep '^ZKAI_API_TOKEN=' /opt/zkai/.env | cut -d= -f2-)
-printf 'ZKAI_PUBLIC_TOKEN=%s\n' \"\$T\" > /etc/caddy/zkai.env
+A=\$(grep '^ZKAI_ADMIN_TOKEN=' /opt/zkai/.env | cut -d= -f2-)
+printf 'ZKAI_PUBLIC_TOKEN=%s\nZKAI_ADMIN_TOKEN_PUBLIC=%s\n' \"\$T\" \"\$A\" > /etc/caddy/zkai.env
 chown root:caddy /etc/caddy/zkai.env; chmod 640 /etc/caddy/zkai.env
 mkdir -p /etc/systemd/system/caddy.service.d
 printf '[Service]\\nEnvironmentFile=/etc/caddy/zkai.env\\n' > /etc/systemd/system/caddy.service.d/zkai-token.conf
@@ -92,13 +95,18 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | tail -1
 systemctl daemon-reload
 systemctl reload caddy
 sleep 3
-echo -n 'no-token:  '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkai/health
-echo -n 'bad-token: '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' -H 'Authorization: Bearer wrong' https://120.53.28.29/zkai/health
-echo -n 'tandian:   '; curl -sS --max-time 20 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/tandian/"
+A2=\$(grep '^ZKAI_ADMIN_TOKEN=' /opt/zkai/.env | cut -d= -f2-)
+echo -n 'console ui:       '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkconsole/ui/
+echo -n 'api no-token:     '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkai/health
+echo -n 'api bad-token:    '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' -H 'Authorization: Bearer wrong' https://120.53.28.29/zkai/health
+echo -n 'admin no-token:   '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/zkconsole/admin/providers
+echo -n 'admin good-token: '; curl -sS --max-time 15 -o /dev/null -w '%{http_code}\\n' -H "Authorization: Bearer \"\$A2\"" https://120.53.28.29/zkconsole/admin/providers
+echo -n 'tandian:          '; curl -sS --max-time 20 -o /dev/null -w '%{http_code}\\n' https://120.53.28.29/tandian/"
   remote "$(printf '%s' "$STEP3" | base64 -w0)"
 fi
 
 echo ""
-echo "Done. Public endpoint:"
+echo "Done. Public endpoints:"
 echo "  POST https://120.53.28.29/zkai/v1/chat/completions"
 echo "  Header: Authorization: Bearer <ZKAI_API_TOKEN>"
+echo "  Console: https://120.53.28.29/zkconsole/ui/?token=<ZKAI_ADMIN_TOKEN>"
