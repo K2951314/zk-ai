@@ -102,9 +102,9 @@ https://120.53.28.29 {
 	}
 
 
-	# ---- B. 网关 API 与探活（必须带 API token）---------------------------
-	@zkai_bare path /v1 /v1/* /health
-	handle @zkai_bare {
+	# ---- B. 网关 API /v1/*（必须带 API token）-----------------------------
+	@zkai_bare_v1 path /v1 /v1/*
+	handle @zkai_bare_v1 {
 		@zkai_bare_auth header Authorization "Bearer {$ZKAI_PUBLIC_TOKEN}"
 		handle @zkai_bare_auth {
 			reverse_proxy 127.0.0.1:8318 {
@@ -112,6 +112,37 @@ https://120.53.28.29 {
 				transport http {
 					response_header_timeout 600s
 				}
+			}
+		}
+		handle {
+			respond "Unauthorized" 401
+		}
+	}
+
+	# ---- B2. /health：控制台主页要裸 fetch 它 ---------------------------------
+	# index.html 的 loadOverview() 有 fetch("/health").then(r => r.json())，
+	# **不带任何凭据**（这是它本来的写法，本地网关 /health 也一直不鉴权）。
+	# 给这里加 Bearer 门槛会让它收到 401 纯文本，.json() 抛出
+	# "Unexpected token 'U', \"Unauthorized\" is not valid JSON"。
+	#
+	# 而 /health 又不能完全放行：它带 provider 清单、credential 各状态计数、
+	# 模型数、别名、配置告警与 env gap 里的环境变量名，裸奔等于白送拓扑。
+	#
+	# 折中：带正确 API token，或请求来自控制台页面（Referer/Sec-Fetch 指向
+	# /ui），二者其一即放行。Referer 可伪造，但这里只读、无写操作，且拿到
+	# 的只是探活快照 —— 真正敏感的数据在 /admin/* 与 /v1/*，那两层不松。
+	handle /health {
+		@health_tok header Authorization "Bearer {$ZKAI_PUBLIC_TOKEN}"
+		@health_from_ui header_regexp Referer ^https?://[^/]+/ui(/|$|\?)
+		@health_fetch_ui header Sec-Fetch-Site same-origin
+		handle @health_tok {
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
+			}
+		}
+		handle @health_from_ui {
+			reverse_proxy 127.0.0.1:8318 {
+				flush_interval -1
 			}
 		}
 		handle {

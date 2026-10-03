@@ -67,7 +67,7 @@ https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>
 | `/v1/*`、`/health` | 同上（裸路径形式） | 同上 |
 | `/ui` `/ui/report` `/ui/agent` | 控制台 HTML 外壳 | 不校验（外壳零数据，见下） |
 | `/admin/*` | 管理接口 | 带正确 `<ZKAI_ADMIN_TOKEN>` 进网关；不带或带错回落智能询价 |
-| `/zkai/health` | 健康检查 | 同 `/zkai/v1/*` |
+| `/health` | 探活 | 正确 API token，或 Referer 指向 `/ui`（见下） |
 
 `/zkai/admin/*`、`/zkai/ui/*`、`/zkai/web` **永不暴露**（实测 404）。
 智能询价的 `/`、`/apps/*`、`/api/*`、以及不带 token 的 `/admin/*` 行为不变
@@ -78,6 +78,17 @@ https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>
 原话是 Serving the shell without a token therefore leaks nothing）。
 如果给 HTML 也加 token 门槛，浏览器首次打开时没有任何请求能带上 token，
 页面会白屏。所以外壳放行、数据层校验。
+
+**`/health` 是特例，不能完全放行也不能完全拦**：`index.html` 的
+`loadOverview()` 有 `fetch("/health").then(r => r.json())`，不带任何凭据
+（本地网关 `/health` 一直不鉴权，所以这不是服务器引入的问题）。完全拦住会让
+它收到 401 纯文本，`.json()` 抛出
+`Unexpected token 'U', "Unauthorized" is not valid JSON` —— 这就是外网控制台
+打不开的根因。但 `/health` 返回的内容比「探活」多：provider 清单、credential
+各状态计数、模型数、别名、配置告警，以及 env gap 里的环境变量名，裸奔等于白送
+拓扑。折中方案是「正确 API token **或** Referer 指向 `/ui`」二者其一放行。
+Referer 可伪造，但这里只读、无写操作；真正敏感的数据在 `/v1/*` 与 `/admin/*`，
+那两层不松。
 
 **为什么 `/admin/*` 要按 token 分流**：控制台 `index.html` 的 `api()` 用
 **绝对路径** `fetch("/admin/providers")`，而 `<base href>` 对 JS 里的
