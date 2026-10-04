@@ -177,6 +177,75 @@ ssh ubuntu@120.53.28.29 'systemctl show zkai-burner -p MemoryCurrent -p CPUUsage
 
 ## 换机 / 迁移边界
 
+**谁是现役运行时**：服务器（`/opt/zkai` + `zkai` / `zkai-burner` systemd）
+是公网入口与消耗器的现役副本；本地（`D:\zhangkun\AI\ZK-AI`）保留一份同等配置，
+用于开发、离线测试与「本地也跑一个网关」的场景。两边**账本互不共享**：本地
+`data/burn_state.json`，服务器 `/var/lib/zkai/burner/`，各自独立记账（本地账本的
+费率是按本机 96 并发校出来的，照搬会失真）。
+
+### 换服务器
+
+```bash
+# 新服务器上先有：git clone + uv sync + .env（含 SENSENOVA_API_KEY_*）
+ZKAI_TARGET=ubuntu@<新IP> bash deploy-server/sync-server.sh
+```
+
+然后把 `.env` 里的 `ZKAI_PUBLIC_BASE_URL` 改成新前缀（`https://<新IP>/zkai`）——
+**这一步不能省**：控制台「🌐 客户端接入」面板与 `/health` 的 `deploy` 块都按它生成
+客户端要抄的地址，改错了运营者会把打不开的 base_url 分发出去。验证：
+
+```bash
+curl https://<新IP>/zkai/v1/chat/completions \
+  -H "Authorization: Bearer $ZKAI_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"zk-auto","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### 电脑 ↔ 服务器
+
+迁移包（一键换机 Skill）现在也带 `deploy-server/` 三个文件，导入任一台新电脑后
+都能直接同步回服务器。导入后两件事要手工做（Skill 不碰 `~/.codex` 也不碰用户
+环境变量）：
+
+1. 控制台「🌐 客户端接入」→「保存并写入」把 `config/chatgpt.yaml` 写进本机
+   `~/.codex/config.toml`（面板会自己判断网关在哪：服务器上时这块整块隐藏，
+   改为给公网片段）。
+2. `setx ZKAI_API_TOKEN "<与 .env 同值>"`，然后重启桌面版。
+
+### `ZKAI_BURNER_DIR`：burner 的账本比网关 data_dir 深一层
+
+`zkai-burner.service` 的 ExecStart 把账本与日志指到 `/var/lib/zkai/burner/`，
+而网关的 `ZKAI_DATA_DIR` 是 `/var/lib/zkai`。两边**必须对齐**，否则控制台的
+「账号核对」会去读写另一个账本——运营者填了后台真实消耗、点了保存、看到
+「已应用」，真正的 burner 什么都没看到。
+
+```bash
+# 网关侧（.env）
+ZKAI_BURNER_DIR=/var/lib/zkai/burner
+
+# systemd 侧（unit 里的 Environment=，与 ExecStart 的 --state-file 同目录）
+Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner
+```
+
+自检：`curl -sS http://127.0.0.1:8318/health` 的 `deploy.burner_state_path`
+应该是 `/var/lib/zkai/burner/burn_state.json`；不是就说明两边没对齐。
+本机部署不需要这一项（默认与 `ZKAI_DATA_DIR` 同目录）。
+
+### 两个副本各自的独有数据
+
+| 数据 | 本地 | 服务器 |
+|---|---|---|
+| 网关数据库 | `data/zkai.db` | `/var/lib/zkai/zkai.db` |
+| 消耗器账本 | `data/burn_state.json` | `/var/lib/zkai/burner/burn_state.json` |
+| 消耗器日志 | `data/burn_sensenova.log` | `/var/lib/zkai/burner/burn_sensenova.log` |
+
+日志现在可以**在控制台直接看**：「🔥 积分消耗器」页的「实时日志」卡片走
+`/admin/burner/log/stream`（SSE），不必再 `journalctl -u zkai-burner -f`。
+账号核对与费率校准也在同一页：从商汤后台看回真实用量 → 填表 → 预演 diff →
+确认落盘并自动重启（服务器上走 `systemctl restart zkai-burner`）。
+
+
+
 - `/opt/my-skills` 是技能仓库的**服务器副本**（git clone 自 GitHub），
   新技能/改 SKILL.md 后本机 `git push`，服务器 `cd /opt/my-skills && git pull` 即可。
   软链已挂在 `~/.agents/skills`、`~/.codex/skills`、`~/.workbuddy-ai/skills` 三处。

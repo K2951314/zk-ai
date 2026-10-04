@@ -62,6 +62,10 @@ ALLOWED_SNIPPETS = (
     "Kimi K3", "Step 5", "DeepSeek V4",
     "Step / DeepSeek", "Step 5 / DeepSeek",
     "GLM-5.3 / Step 5 / DeepSeek",
+    # 产品名（不是英文句子）：接入面板的客户端清单 + 周锚点格式示例
+    "Claude Code",
+    "Method POST",
+    "Wed 18:10",
 )
 
 _STYLE_RE = re.compile(r"<style>.*?</style>", re.DOTALL)
@@ -177,6 +181,122 @@ def test_console_keeps_untouched_dom_contract() -> None:
     for hook in ("server-dot", "server-line", "btn-token", "btn-chatgpt",
                  "btn-refresh", "btn-theme", "auto-interval", "drawer", "toasts"):
         assert f'id="{hook}"' in text, f"钩子 {hook} 必须保留"
+
+
+def test_client_access_panel_covers_both_deployment_shapes() -> None:
+    """接入面板必须同时会渲染「公网调用」和「本机写入」两块。
+
+    只做一边的另一半是静默失效：远程部署时仍显示写 config.toml（服务器的
+    文件系统，不是打开控制台那台电脑的），或本机部署时反而让人去抄一个
+    打不开的公网地址。判据就是 deploy 块的 is_remote / can_write_local。
+    """
+    html = _html("index.html")
+    assert "cgPublicUrl()" in html
+    assert "cgTokenName()" in html
+    # 三种客户端的可复制片段（OpenAI SDK / curl / ZCode / Claude / ChatGPT 桌面版）
+    for client in ("openai", "curl", "zcode", "claude", "chatgpt"):
+        assert f'case "{client}":' in html, f"{client} 的配置片段不能少"
+    # 远程时本机那段要整块隐藏，而不是留一个必然失败的按钮
+    assert "cg-local-zone" in html
+    assert 'localZone.style.display = "none"' in html
+    assert "can_write_local" in html
+    # 超时这个「抄错就打不开」的点必须出现在片段里（上游最坏跑几百秒）
+    assert "TimeoutSec 420" in html
+
+
+def test_server_status_line_does_not_depend_on_admin_calls() -> None:
+    """/health 通了就必须显示连接状态，不能因为 /admin/* 401 就停在「未连接」。
+
+    /health 不带 token 也能过（Caddy 对它有 Referer/Sec-Fetch-Site 白名单），
+    而 /admin/* 要令牌。合成一个 Promise.all 的话，未登录时两个 admin 调用
+    401 抛出，整段都不执行，状态行停在初始的「未连接」——运营者以为服务器挂了，
+    其实只是没填令牌。2026-10-03 线上实测过这个表现。
+    """
+    html = _html("index.html")
+    assert "renderServerLine(health)" in html
+    assert "function renderServerLine(" in html
+    # 部署形态要说出来：运营者第一件事就是确认该押哪个 base_url
+    assert "服务器模式" in html
+    assert "本机模式" in html
+    # /health 失败时给明确原因，而不是留一句无信息的「未连接」
+    assert "网关连不上" in html
+
+
+def test_burner_view_has_log_and_reconcile_cards() -> None:
+    """消耗器页必须同时有实时日志与账号核对两块，且都有 DOM 挂点。"""
+    html = _html("index.html")
+    for hook in ("bl-log", "bl-state", "bl-follow", "bl-copy", "bl-clear",
+                 "rec-table", "rec-btn-diff", "rec-btn-apply", "rec-only",
+                 "cal-actual", "cal-account", "cal-btn", "cal-adopt"):
+        assert f'id="{hook}"' in html, f"挂点 {hook} 必须保留"
+    # SSE + 降级：EventSource 断了要能自动重连，且轮询兜底
+    assert "EventSource" in html
+    assert "/admin/burner/log/stream" in html
+    assert "/admin/burner/log/tail" in html
+    # 核对走「预演 -> 确认 -> 落盘」三步，不能让一次手滑直接写账本
+    assert "/admin/burner/reconcile" in html
+    assert "/admin/burner/calibrate" in html
+
+
+def test_mobile_layout_has_a_real_information_architecture() -> None:
+    """手机上不能只是「桌面仪表盘被撞窄」。
+
+    改造前的实测（iPhone 390px）：侧边导航变成顶部横滑、凭证池表格 1171px 宽、
+    消耗器页 4331px 高。所以要求三件事同时成立：底部 Tab（挤指可及）、
+    表格卡片化（不再横拖）、长页面手风琴（一次只展开一节）。
+    """
+    html = _html("index.html")
+    assert 'id="mnav"' in html, "底部 Tab 栏必须存在"
+    # 底部 Tab 由 JS 从现有导航派生，不另写一份清单
+    assert "function mnavBuild(" in html
+    assert "MNAV = [" in html
+    # 表格卡片化：通过 data-label 让 CSS 把列名显示在值前面
+    assert "function tableCards(" in html
+    assert "dataset.label" in html
+    # 手风琴
+    assert "function accordionSections(" in html
+    assert '"msec"' in html
+    # 底部 Tab 要四个（总览 / 模型 / 消耗器 / 更多），其余收进抽屉
+    assert '{ view: "more"' in html, "\u5176\u4f59\u5165\u53e3\u6536\u8fdb\u62bd\u5c49\uff08more\uff09"
+
+
+def test_desktop_keeps_the_sidebar_and_plain_tables() -> None:
+    """手机化不能扫待桌面。
+
+    实测（三个断点）：1440px 侧边导航可见、表格还是 table-row、没有手风琴、
+    底部 Tab 隐藏；820px 与 390px 切换到手机版。这里把那套断路固化下来。
+    """
+    html = _html("index.html")
+    # 底部 Tab 默认隐藏，只在窄屏媒体查询里打开
+    assert "  #mnav { display: none; }" in html
+    # 手风琴样式写在窄屏块里，不能漏到桌面
+    css = _STYLE_RE.search(html).group(0)
+    mobile_start = css.index("@media (max-width: 860px)")
+    mobile_css = css[mobile_start:]
+    assert ".msec {" in mobile_css
+    assert ".msec {" not in css[:mobile_start]
+
+
+def test_mobile_css_never_lets_content_widen_the_viewport() -> None:
+    """哪个子元素写死宽度都不能把视口撑开。
+
+    2026-10-04 改造时实测到：`#mnav` 被一个 392px 的 td 子元素带到 869px，
+    固定定位的底部 Tab 就飘到屏幕外了。根节点要截断，所有 flex 子项要能收缩。
+    """
+    html = _html("index.html")
+    assert "overflow-x: hidden" in html
+    assert ".tablewrap tbody td > * { min-width: 0; }" in html
+    # 进度条的内联 px 宽度在手机上要改流式
+    assert "width: auto !important" in html
+    # 长串（部署链 / 解析结果）必须能断行
+    assert "word-break: break-all" in html
+
+
+def test_mobile_time_shows_the_date_when_it_is_not_today() -> None:
+    """只显示 10:44:41 让运营者无法判断请求是否过期。"""
+    html = _html("index.html")
+    assert "sameDay" in html
+    assert "opts.month" in html and "sameDay" in html
 
 
 def test_agent_page_keeps_untouched_dom_contract() -> None:

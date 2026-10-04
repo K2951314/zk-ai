@@ -32,6 +32,21 @@ async def health(container: ContainerDep) -> dict:
         "version": container.settings.version,
         "environment": container.settings.environment,
         "uptime_seconds": round(container.uptime(), 2),
+        # 部署形态：客户端接入面板与消耗器页都按这一块分流（本机写入 vs 公网调用、
+        # 日志落在哪个盘上）。is_remote 是核心判据——控制台据此决定要不要把
+        # 127.0.0.1 的配置抄给用户。
+        "deploy": {
+            "is_remote": container.settings.is_remote_deploy,
+            "exposure": container.settings.exposure or (
+                "server" if container.settings.is_remote_deploy else "local"),
+            "public_base_url": container.settings.public_base_url_effective,
+            "client_base_url": container.settings.client_base_url,
+            "listen": f"{container.settings.host}:{container.settings.port}",
+            "burner_log_path": str(container.settings.burner_log_path),
+            "burner_state_path": str(container.settings.burner_state_path),
+            "config_dir": str(container.settings.resolved_config_dir),
+            "data_dir": str(container.settings.resolved_data_dir),
+        },
         "database": {"ok": database_ok, "dialect": container.database.url.split(":")[0]},
         "providers": {
             "total": len(container.config.providers),

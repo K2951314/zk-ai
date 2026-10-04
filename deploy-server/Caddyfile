@@ -171,6 +171,9 @@ https://120.53.28.29 {
 	# JS fetch()/XHR 是 cors（同源）或 no-cors。curl 请求两个头都不带，
 	# 归到 navigate 分支，对运维排查友好（看到的是智能询价的页面而不是 401）。
 	handle /admin/* {
+		# flush_interval -1 每个分支都要有：/admin/burner/log/stream 是 SSE
+		# （消耗器实时日志），漏一个分支，那条认证路径下的 SSE 就会被 Caddy
+		# 缓冲成一次性返回，「实时」变成「日志滚完才给你」。
 		@zk_console_bearer header Authorization "Bearer {$ZKAI_ADMIN_TOKEN_PUBLIC}"
 		@zk_console_xadm header X-Admin-Token "{$ZKAI_ADMIN_TOKEN_PUBLIC}"
 		@zk_console_xhr header Sec-Fetch-Mode cors

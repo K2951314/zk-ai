@@ -137,12 +137,32 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8317
     root_path: str = ""
+    #: 公网入口（客户端真正用来调用的那个地址）。留空 = 本机部署，此时
+    #: 控制台显示的 base_url 回落 http://<host>:<port>。
+    #:
+    #: **为什么不能由 host:port 推导**：跳反代部署时代理路径带前缀
+    #: （Caddy 的 /zkai/v1），而网关只听得到自己的 loopback 地址，前缀对它完全不可见。
+    #: 写错不会报错，只会让运营者把 http://<ip>:8318/v1 这种打不开的地址抄给客户端
+    #: —— 所以必须显式配置。
+    public_base_url: str = ""
+    #: 部署形态标签，仅用于控制台展示与文案分流（local / server）。
+    #: 留空时由 is_remote_deploy 自动判定。
+    exposure: str = ""
 
     log_level: str = "INFO"
     log_json: bool = False
 
     config_dir: Path = Path("config")
     data_dir: Path = Path("data")
+    #: 消耗器账本与明细日志的位置。默认与网关数据目录同层（本机部署、
+    #: 托盘启动时 burn_sensenova.py 就写在那里）。
+    #:
+    #: **服务器上必须显式配**：zkai-burner.service 的 ExecStart 用
+    #: --state-file/--log-file 把两者指到 /var/lib/zkai/burner/，比网关的
+    #: ZKAI_DATA_DIR 深一层。不配的话控制台的「账号核对」会去读写一个不存在
+    #: 的文件——运营者以为校准生效了，真正的 burner 却什么都没看到，比没有
+    #: 这个功能更糟。
+    burner_dir: Path | None = None
     database_url: str | None = None
     db_echo: bool = False
 
@@ -256,6 +276,59 @@ class Settings(BaseSettings):
     #: 角色 -> alias 覆盖，JSON 字符串（坏 JSON 静默按默认表走）。
     #: 例：{"vision": "zk-vision", "coder": "zk-auto"}
     agent_role_aliases: str = ""
+
+    @property
+    def resolved_burner_dir(self) -> Path:
+        """消耗器的账本 + 日志目录（ZKAI_BURNER_DIR 覆盖，测试用 tmp_path 隔离）。"""
+        if self.burner_dir is not None:
+            path = Path(self.burner_dir)
+            return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+        return self.resolved_data_dir
+
+    @property
+    def burner_state_path(self) -> Path:
+        return self.resolved_burner_dir / "burn_state.json"
+
+    @property
+    def burner_log_path(self) -> Path:
+        return self.resolved_burner_dir / "burn_sensenova.log"
+
+    # ------------------------------------------------------------------ #
+    # 部署形态（公网入口 / 本机 vs 服务器）
+    # ------------------------------------------------------------------ #
+    @property
+    def public_base_url_effective(self) -> str:
+        """客户端该用的公网入口；未配置时回落 http://<host>:<port>。
+
+        三处消费者共用同一个值（/health 的 deploy 块、控制台接入面板、
+        chatgpt_service 的 base_url 校验），所以必须是单一事实来源。
+        """
+        raw = (self.public_base_url or "").strip().rstrip("/")
+        if raw:
+            return raw
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def client_base_url(self) -> str:
+        """OpenAI 兼容的 /v1 地址（连接口带不带 /v1 都在这里统一）。"""
+        base = self.public_base_url_effective
+        return base if base.endswith("/v1") else base + "/v1"
+
+    @property
+    def is_remote_deploy(self) -> bool:
+        """是否「部署在服务器上」：听了非回环地址，或显式配了公网入口。
+
+        判据刻意宽松：配了公网入口即算远程（反代后面 bind 回环也常见），
+        这样控制台才会走「公网调用」那条路，而不是让运营者抄一个
+        只在服务器本机能用的 127.0.0.1。
+        """
+        if (self.exposure or "").strip().lower() in {"server", "remote", "public"}:
+            return True
+        if (self.exposure or "").strip().lower() == "local":
+            return False
+        if (self.public_base_url or "").strip():
+            return True
+        return self.host.strip() not in {"127.0.0.1", "localhost", "::1", ""}
 
     @property
     def resolved_config_dir(self) -> Path:
@@ -480,6 +553,9 @@ _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     "health_check.on_startup": ("health_check", "health_check_on_startup"),
     "health_check.timeout": ("health_check", "health_check_timeout"),
     "security.allow_inline_secrets": ("security", "allow_inline_secrets"),
+    # 部署形态：公网入口 + 形态标签。缺失 = 本机部署，回落到 host:port。
+    "deploy.public_base_url": ("deploy", "public_base_url"),
+    "deploy.exposure": ("deploy", "exposure"),
 }
 
 

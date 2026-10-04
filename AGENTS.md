@@ -428,6 +428,46 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `tests/test_tray_launcher.py`（argv 里不许带控制字符，且要过 `getaddrinfo`）。
   换机前值得先验一遍 `.env` 换行——现在启动日志会替你把关
 
+## 服务器化改造的坑（2026-10-03）
+
+- **公网入口只能靠 `ZKAI_PUBLIC_BASE_URL` 显式配置，别用 host:port 猜**：网关只听得到
+  自己的 host:port，看不到 Caddy 加的 `/zkai` 前缀。猜出来的地址在公网上打不开，
+  而运营者会把它抄给客户端——这种错误静默且难查。判据集中在
+  `Settings.public_base_url_effective` / `client_base_url` / `is_remote_deploy` 三个
+  属性上，`/health` 的 `deploy` 块与控制台接入面板共用同一份，别在第二处再判一次。
+  未配置时回落 `http://<host>:<port>`，本机零配置可用。
+
+- **消耗器账本校准必须注入事件，不能覆盖 burned**：`apply_reconcile()` 写回 burned 时
+  是往 `events` 里追加一个差值事件（负数 = 账本多记了），不是改 burned 值——
+  burner 重启后按「最近 5h 的 events」重算，直接覆盖会让新旧口径在窗口边界上跳变，
+  运营者看到的数字和消耗器实际用的从此对不上。回归测试
+  `tests/test_burner_reconcile.py::TestApplyReconcile::
+  test_calibration_event_shifts_the_window_without_rebuilding_it`。
+
+- **消耗器重启是双形态，别默认托盘**：`request_restart_ex()` 检测到 systemd 有
+  `zkai-burner` unit 就 `systemctl restart`，否则走托盘的 restart.request 文件，
+  两者都没有才回 `manual` + 手动命令。服务器上托盘不存在，沿用旧的
+  「写文件等托盘看」会永远不生效。响应带 `restart_mode`
+  （`tray` / `systemd` / `manual`），界面据此提示。
+
+- **消耗器日志 SSE 的 `flush_interval -1` 四个分支都要有**：`/admin/*` 按认证分了
+  四个 `reverse_proxy` 块，漏一个该路径下的 SSE 就被 Caddy 缓冲成一次性返回，
+  「实时」变「日志滚完才给你」。另外 `_follow()` 的预热底料和游标必须同一次算出来
+  （`_warm_up()` 返回 `(text, offset)`）——分开算的话两者之间新追加的内容会被游标
+  跳过，半行测试盯的就是这条。
+
+- **burner 的账本/日志目录可以和网关 `data_dir` 不是同一层，别拼 `data_dir`**（2026-10-03
+  上线时才踩到）：服务器上 `zkai-burner.service` 的 ExecStart 用
+  `--state-file/--log-file /var/lib/zkai/burner/`，比网关的 `ZKAI_DATA_DIR`
+  （`/var/lib/zkai`）深一层。网关侧的 `_burner_paths()` 原来拼
+  `resolved_data_dir / burn_state.json`，控制台的「账号核对」于是去读写一个
+  **不存在的账本**——运营者填了后台真实消耗、点了保存、看到「已应用」，
+  而真正的 burner 什么都没看到。比没有这个功能更糟：它让运营者以为校准生效了。
+  现在走 `Settings.burner_state_path` / `burner_log_path`（`ZKAI_BURNER_DIR`
+  覆盖，默认仍与 data_dir 同目录，本机行为不变），systemd unit 里用
+  `Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner` 与 ExecStart 对齐。
+  `/health` 的 `deploy.burner_state_path` / `burner_log_path` 把真实路径暴露出来，
+  两边不一致时一眼能看到。回归测试 `tests/test_deploy_config.py::TestBurnerDir`。
 ## Agent 工作方式（2026-09-23，防半途而废）
 - **本机 shell 是 PowerShell，here-string 会把中文和转义写坏**：写含中文的临时脚本时
   先用 Python 以 ASCII + `chr()` / `\uXXXX` 生成文件再执行，别直接把 here-string

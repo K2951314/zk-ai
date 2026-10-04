@@ -8,6 +8,12 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/zkai
+# 消耗器的账本与日志从 ZKAI_BURNER_DIR 推导（Settings.resolved_burner_dir）。
+# 必须与下面的 --state-file/--log-file 指向同一层：不一致的话控制台的
+# 「账号核对」会去读写另一个账本——运营者以为校准生效了，真正的 burner
+# 什么都没看到。默认是网关的 ZKAI_DATA_DIR（本机部署即如此），服务器上
+# 由这一行显式对齐。
+Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner
 # 密钥走 /opt/zkai/.env（burn_sensenova.py 自己 load_dotenv）。systemd 的
 # EnvironmentFile 不读 .env，但这里仍然给一份，便于被 zkai-burner 派生的环境一致。
 EnvironmentFile=/etc/zkai.env

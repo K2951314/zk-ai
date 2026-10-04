@@ -20,7 +20,17 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError, StarletteHTTPException
 from fastapi.responses import JSONResponse, Response
 
-from app.api import admin, agent, chat, health, messages, models, responses, ui
+from app.api import (
+    admin,
+    agent,
+    burner_log,
+    chat,
+    health,
+    messages,
+    models,
+    responses,
+    ui,
+)
 from app.core.config import Settings, get_app_config, reset_config_cache
 from app.core.container import Container, build_container
 from app.core.errors import ZKAIError
@@ -113,10 +123,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(messages.router)
     app.include_router(responses.router)
+    app.include_router(burner_log.router)
     app.include_router(ui.router)
     # /admin/agent/*: routes internally 404 when ZKAI_AGENT_ENABLED=false, and
     # require_admin already 404s when the admin surface is off.
     app.include_router(agent.router)
+    # 消耗器日志 SSE 挂在 /admin/burner/log/* 上，必须与 admin 同一个开关：
+    # 这个面关掉时它不该还能读到服务器上的日志文件。
     if settings.admin_enabled:
         app.include_router(admin.router)
 

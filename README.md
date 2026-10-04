@@ -311,6 +311,45 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
 
 ---
 
+### 3.6.4 服务器部署（公网入口 / 三种调用形态）
+
+网关也可以固化在服务器上（阿里云 2C2G，`deploy-server/` 三个文件 + `sync-server.sh`
+一键同步）。**客户端要抄的地址由谁决定**是这里的核心问题：网关只听得到自己的
+`host:port`，看不到 Caddy 加的 `/zkai` 前缀——用 `host:port` 猜出来的公网地址
+打不开，而运营者会把它抄给客户端。所以必须显式配置：
+
+```bash
+# .env 或 config/config.yaml 的 deploy 段
+ZKAI_PUBLIC_BASE_URL=https://120.53.28.29/zkai
+```
+
+留空 = 本机部署，回落到 `http://<ZKAI_HOST>:<ZKAI_PORT>`；配了 = 远程，控制台
+「🌐 客户端接入」面板按公网地址生成各客户端片段，并**把「写入本机
+config.toml」整块隐藏**（那是服务器的文件系统，不是打开控制台那台电脑的）。
+
+| 入口 | base_url | 说明 |
+|---|---|---|
+| 本机回环 | `http://127.0.0.1:8317/v1` | 网关与客户端同一台机器；可写 `~/.codex/config.toml` |
+| 服务器回环 | `http://127.0.0.1:8318/v1` | SSH 进服务器后本地调用（`sq` / `tandian` 走这条，不过 Caddy、不耗公网带宽） |
+| 公网 | `https://120.53.28.29/zkai/v1` | 任何地方；必须带 `Bearer <ZKAI_API_TOKEN>` |
+
+要点：
+
+- **token 从 `/etc/zkai.env` 的 `ZKAI_API_TOKEN` 取**（与本地 `.env` 同一份值）；
+  客户端侧任意非空即可，真正的凭据在服务端按供应商轮换。
+- **`-TimeoutSec 420`**（PowerShell）：网关单次上游最坏 300s，且同一请求内会沿
+  候选链重试；默认 100s 的客户端会把一次还在正常跑的慢请求自己掐断。
+- **`/health` 暴露 `deploy` 块**（`is_remote` / `public_base_url` / `client_base_url` /
+  `burner_log_path` / `burner_state_path` / `config_dir`），控制台状态行与接入面板
+  都按它分流——单一事实来源，不在两处各判一次。
+- **消耗器日志走 `/admin/burner/log/stream`（SSE）**：Caddy 的 `/admin/*` 四个
+  认证分支都已配 `flush_interval -1`，漏一个该路径下的 SSE 就会被缓冲成一次性
+  返回。EventSource 断了指数退避重连，两次不成自动降级成 2 秒轮询 tail。
+- **账号核对与费率校准**：控制台「🔥 积分消耗器」页新增两块。运营者从商汤后台
+  看回真实用量 → 填进表格 → 预演 diff → 确认落盘并重启。改 `only` / `anchors` /
+  `week_anchors` 走 `burner.yaml`，改 burned/credits/锚点走账本； burned 的修正
+  **注入校准事件而不是覆盖 events**，否则重启后窗口口径在边界上跳变。
+
 ## 3.5 接入真实供应商（商汤日日新 / NVIDIA / Kimi）
 
 仓库里已带两份**可直接复制**的真实配置模板：
@@ -610,7 +649,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 33 个测试模块，798 个用例，全部 Mock
+├── tests/                # conftest + 35 个测试模块，870 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -618,8 +657,8 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 71 个文件约 21,400 行，`tests/` 33 个测试模块 798 个用例（约 15,700 行），
-`scripts/` 18 个文件约 5,500 行。**测试/产品代码 = 73%**。
+规模：`app/` 74 个文件约 19,800 行，`tests/` 35 个测试模块 870 个用例（约 15,755 行），
+`scripts/` 18 个文件约 4,724 行。**测试/产品代码 = 73%**。
 （这两个数字上一次更新是 2026-09-19 的 15,400/7,300/3,600——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
@@ -1289,7 +1328,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**798 个用例，全部通过，零网络、零真实配额。**
+**870 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
@@ -1307,6 +1346,9 @@ uv run pytest --cov=app --cov-report=term-missing  # 覆盖率
 | `tests/test_api.py` | 全部 HTTP 端点、SSE 形状、流式预检状态码、admin 鉴权、断开连接 |
 | `tests/test_config.py` | `.env` 注入进程环境、`${VAR}` 插值与默认值、env 优先于 YAML、三文件端到端加载、`*.example.yaml` 兜底、凭证配置告警 |
 | `tests/test_adapters.py` | **只在真实端点上才会暴露的形状**：推理模型只回思考内容、`base_url` 尾斜杠、带厂商前缀的模型名 |
+| `tests/test_deploy_config.py` | 部署形态：公网入口显式配置 / 回落 host:port / remote 判定、`config.yaml` 的 `deploy` 段桥接、`/health` 的 deploy 块 |
+| `tests/test_burner_log.py` | 消耗器日志：增量游标、半行不拆条、文件缺失不断流、截断后重置、降级 tail |
+| `tests/test_burner_reconcile.py` | 账号核对：anchors 序列化往返、逐账号 diff、校准事件注入（窗口口径连续）、停靠、费率反推、重启三形态 |
 所有测试都用 `FakeAdapter`，**不会**发出任何真实请求。
 
 ### 开发过程中被测试/冒烟测出来的 11 个真实缺陷

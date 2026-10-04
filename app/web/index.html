@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZK-AI 控制台</title>
 <style>
   /* ==========================================================================
@@ -128,6 +128,11 @@
   :root[data-theme="dark"] .nav-item.active { background: var(--accent-soft); }
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
+  /* 根节点水平禁止滚动：否则任何一处超宽都会把视口撑开（
+     innerWidth 翻到 869），固定定位的底部 Tab 就会飘到屏幕外。 */
+  html, body { max-width: 100%; overflow-x: hidden; }
+  html { overflow-x: hidden; }
+
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 13px/1.6 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
@@ -448,6 +453,9 @@
   .tag.is-err { color: var(--err); border-color: var(--err-border, var(--border)); background: var(--err-soft); }
 
   /* ---------- 抽屉 ---------- */
+  /* 底部 Tab 只属于手机：桌面上侧边导航才是主导航，这个要隐藏。 */
+  #mnav { display: none; }
+
   #drawer {
     position: fixed; top: 0; right: 0; height: 100vh; width: min(700px, 94vw);
     background: var(--surface); border-left: 1px solid var(--border);
@@ -592,23 +600,203 @@
   }
   hr.sep { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 
-  /* ---------- 窄屏：侧栏降级为顶部横滑 ---------- */
+  /* ================================================================
+     窄屏（手机）信息架构
+
+    案例展示：左侧导航 + 001/003/005 三列卡片，手机上每个卡片仍然一行三个。
+     只有 390px 的屏幕：内容区一屏一个视图，底部是四个指纹可及的 Tab；
+     表格全部变成卡片堆叠（每行一张卡，字段名显示在值的左侧），
+     所以不再需要横向拖动。
+     ================================================================ */
   @media (max-width: 860px) {
+    /* ---- 1. 框架：侧栏隐藏，底部 Tab 接管 ---- */
     .app { flex-direction: column; }
-    .sidebar {
-      width: 100%; height: auto; position: static;
-      flex-direction: row; align-items: center; overflow-x: auto;
-      border-right: none; border-bottom: 1px solid var(--border);
+    .sidebar { display: none !important; }
+    .content { min-width: 0; }
+    main { padding: 12px 12px 76px; }
+    section.view { max-width: none; }
+    .topbar {
+      position: sticky; top: 0; z-index: 40;
+      padding: 8px 12px; gap: 6px; flex-wrap: wrap;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
     }
-    .brand { border-bottom: none; border-right: 1px solid var(--border); padding: 10px 14px; }
-    .brand .sub { display: none; }
-    .nav { flex-direction: row; padding: 8px; gap: 4px; }
-    .nav-label { display: none; }
-    .nav-item { white-space: nowrap; width: auto; }
-    .sidebar-foot { display: none; }
-    main { padding: 14px 12px 48px; }
-    .topbar { padding: 9px 12px; }
+    .topbar .conn { order: -1; flex: 1 1 100%; }
+    .topbar #quarantine-banner { flex: 1 1 100%; }
+    .topbar label.field-label { display: none; }
+    .topbar .grow { display: none; }
+    /* 按钮改成四个":名称 + 图标仍然在，但占据更小可点 */
+    .topbar button { flex: 1 1 auto; min-width: 0;
+      padding: 6px 8px; font-size: var(--fs-12); }
+
+    /* ---- 2. 底部 Tab 栏 ---- */
+    #mnav {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 45;
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+    #mnav a {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      padding: 7px 2px 6px; font-size: 11px; color: var(--muted);
+      text-decoration: none; border-radius: 0;
+    }
+    #mnav a .ico { font-size: 17px; line-height: 1; }
+    #mnav a.on { color: var(--accent-ink); background: var(--accent-soft); }
+
+
+    /* ---- 3. 卡片合并：多列 KPI → 两列，配置表单 → 单列 ---- */
+    .grid.kpis, .cfg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .formgrid { grid-template-columns: minmax(0, 1fr); }
+    .grid.kpis .kpi, .cfg-grid .field { min-width: 0; }
+    .kpi .k-value { font-size: var(--fs-15); overflow-wrap: anywhere; }
+    .kpi .k-sub { font-size: var(--fs-11); overflow-wrap: anywhere; }
+
+    /* ---- 4. 表格 → 卡片堆叠（核心） ---- */
+    /* 表格卡片化后不应该再横向滚动，但要截断子元素的溢出——
+       否则一个写死宽度的 td 依然会把视图撑开。 */
+    .tablewrap { overflow: hidden; border: none; }
+    .tablewrap table, .tablewrap table.small { display: block; width: 100%; }
+    .tablewrap thead { display: none; }
+    .tablewrap tbody { display: block; }
+    .tablewrap tbody tr {
+      display: grid; grid-template-columns: minmax(0, 1fr);
+      gap: 1px; padding: 10px 11px;
+      border: 1px solid var(--border); border-radius: 12px;
+      background: var(--panel); margin-bottom: 9px;
+      box-shadow: var(--shadow-sm);
+    }
+    .tablewrap tbody td {
+      display: flex; align-items: baseline; gap: 9px;
+      padding: 2px 0; border: none; min-width: 0;
+      font-size: var(--fs-13); text-align: left;
+    }
+    /* td 是 flex 容器，子元素默认不会收缩到小于 min-content（
+       那个 392px 的 modelscope → deepseek-ai/... 块就是这样把视图撑开的）。
+       所有 flex 子项都要 min-width: 0 + 允许断行。 */
+    .tablewrap tbody td > * { min-width: 0; }
+    .tablewrap tbody td > div { flex: 1 1 auto; }
+    .tablewrap tbody td .chip { white-space: normal; }
+    /* 字段名自动插在值前面 */
+    .tablewrap tbody td::before {
+      content: attr(data-label);
+      flex: none; width: 4.9em;
+      color: var(--muted); font-size: var(--fs-11);
+      line-height: 1.6; text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .tablewrap tbody td[data-label=""]::before { display: none; }    /* 每张卡的第一个字段（通常是身份：凭证 / 模型 / 别名）要突出，
+       否则 16 张卡看起来全一样，运营者得一行行扫。 */
+    .tablewrap tbody td:first-child {
+      font-size: var(--fs-13); padding-bottom: 4px; margin-bottom: 3px;
+      border-bottom: 1px dashed var(--border);
+    }
+    .tablewrap tbody td:first-child::before {
+      width: 4.9em; color: var(--text-2); font-weight: 600;
+    }
+
+    /* 进度条：Sketch绘制时用的内联 px 宽度在手机上会把单元格撑开，
+       这里改为流式（占满剩余空间，长度由 i 的宽度表达）。 */
+    .tablewrap tbody td .bar { width: auto !important; flex: 1 1 auto; min-width: 0; }
+    /* 部署链、链路这类“modelscope → deepseek-ai/...”的长串：
+       箭头和 / 不产生断行机会，手机上会把单元格撑开 400+px。
+       这里允许在任意字符之间断行（只影响手机）。 */
+    /* 长串（部署链 / 解析结果 / 链路）在手机上必须能断行，
+       否则一个单词就把整个视图撑开几百 px。
+       break-all 而不是 break-word：后者在“modelscope → deepseek-ai/...”
+       这种没有空格的长串上仍然不断行。 */
+    .tablewrap tbody td { overflow-wrap: anywhere; word-break: break-all; }
+    .tablewrap tbody td * { overflow-wrap: anywhere; word-break: break-all; }
+    .tablewrap table { table-layout: fixed; }
+
+    .row-flex { flex-wrap: wrap; min-width: 0; }
+    .row-flex > .small { white-space: nowrap; }
+
+    .ell { max-width: none; }
+    td.cell-sub { max-width: none; }
+    /* 操作列：一字排开，不要一堆小按钮挤在一行 */
+    .tablewrap tbody td.acts { padding-top: 6px; margin-top: 4px;
+      border-top: 1px dashed var(--border); flex-wrap: wrap; gap: 6px; }
+    .tablewrap tbody td.acts::before { width: 100%; }
+    .tablewrap tbody td.acts button { flex: 1 1 auto; min-width: 72px; }
+
+    /* 校验与输入的单元格不要被 5.6em 标签挤缩 */
+    .tablewrap tbody td:has(input, select, textarea, button:only-child) {
+      display: block;
+    }
+    .tablewrap tbody td:has(input, select, textarea, button:only-child)::before {
+      display: inline-block; width: auto; margin-right: 6px;
+    }
+    .tablewrap tbody td:has(input, select, textarea) input,
+    .tablewrap tbody td:has(input, select, textarea) select { width: 100%; }
+
+
+    /* ---- 5. 对话框抽屉：成为全屏 ---- */
+    .modal-mask { padding: 0; align-items: stretch; }
+    .modal-mask .card, .modal-mask .card.wide {
+      width: 100%; min-height: 100%; border-radius: 0;
+      border: none; padding: 14px 14px 20px;
+    }
+    .modal-mask .card.wide { width: 100%; }
+    #auth .card { width: 100%; max-width: none; }
+    #toasts { left: 12px; right: 12px; align-items: stretch; }
+    .toast { max-width: none; }
+    #drawer { width: 100vw; max-width: 100vw; }
+    #mnav { max-width: 100vw; }
+    #toasts { max-width: calc(100vw - 24px); }
+    .modal-mask { max-width: 100vw; overflow: auto; }
+    .modal-mask .card, .modal-mask .card.wide { max-width: 100vw; }
+
+    /* ---- 6. 日志、预览与字体 ---- */
+    #bl-log { height: 220px; font-size: 11px; }
+    .note { font-size: var(--fs-12); }
+    .view-head h2 { font-size: var(--fs-16); }
+    .view-head .desc { font-size: var(--fs-12); }
+    h4.sec { font-size: var(--fs-13); margin-top: 18px; }
+    pre { font-size: 11px; }
+    /* 默认字体去限，防止 iOS 自动放大 */
+    body { -webkit-text-size-adjust: 100%; }
+
+    /* ============================================================
+       手机上把长页面改成「手风琴」：一次只展开一个片段。
+       消耗器页 3500+px，全展开时运营者得滚半天才找得到想要的那一节。
+       ============================================================ */
+    .msec { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); margin-bottom: 9px; overflow: hidden; }
+    .msec > .msec-head {
+      display: flex; align-items: center; gap: 9px; width: 100%;
+      padding: 12px 13px; background: none; border: none; text-align: left;
+      font: inherit; color: var(--text); cursor: pointer;
+    }
+    .msec > .msec-head .msec-ico { font-size: 16px; flex: none; }
+    .msec > .msec-head .msec-title {
+      font-weight: 600; font-size: var(--fs-13);
+      flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .msec > .msec-head .msec-hint { margin-left: auto; color: var(--muted); font-size: var(--fs-11); flex: none; }
+    .msec > .msec-head .msec-arrow { color: var(--muted); font-size: 11px; flex: none; transition: transform .15s; }
+    .msec.open > .msec-head .msec-arrow { transform: rotate(90deg); }
+    .msec > .msec-body { display: none; padding: 0 12px 13px; }
+    .msec.open > .msec-body { display: block; }
+    /* 手风琴里的 h4 不再需要那么多上边距 */
+    .msec > .msec-body h4.sec:first-child { margin-top: 4px; }
+    .msec > .msec-body h4.sec { margin-top: 16px; }
+
+    .mnav-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .mnav-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 11px 12px; border: 1px solid var(--border);
+      border-radius: 10px; background: var(--panel);
+      color: var(--text); text-decoration: none; font-size: var(--fs-13);
+    }
+    .mnav-row .ico { font-size: 17px; }
+    .mnav-row:active { background: var(--accent-soft); }
+
+    /* 点击区域不小于 34px */
+    button, .nav-item, #mnav a, select, input, textarea { min-height: 34px; }
   }
+
 </style>
 </head>
 <body>
@@ -656,7 +844,7 @@
       <button id="btn-theme" class="ghost" title="切换浅色 / 暗色">🌙</button>
       <button id="btn-refresh">⟳ 刷新</button>
       <button id="btn-token">🔑 令牌</button>
-      <button id="btn-chatgpt" title="ChatGPT / Codex 桌面版配置">🤖 ChatGPT</button>
+      <button id="btn-chatgpt" title="客户端接入：base_url、令牌、各客户端配置片段">🌏 客户端接入</button>
     </header>
 
     <main>
@@ -670,6 +858,7 @@
   </div>
 </div>
 
+<nav id="mnav" aria-label="主要视图"></nav>
 <aside id="drawer"></aside>
 <div id="toasts"></div>
 <div class="modal-mask" id="model-modal"></div>
@@ -694,6 +883,132 @@
 const $ = sel => document.querySelector(sel);
 const esc = v => String(v ?? "").replace(/[&<>"']/g, c => (
   {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+/* ================= 手机版 Tab 栅 + 抽屉 =================
+ * 手机上靠下面四个指可及的 Tab + 抽屉（“更多”）转站；
+ * Tab 由 JS 从现有导航派生，不另写一份清单。
+ * 表格里每个 td 打上 data-label 后交给 CSS 排版，JS 只负责打标签。
+ * ==================================================================== */
+const MNAV = [
+  { view: "overview", ico: "📊", label: "总览" },
+  { view: "models",   ico: "🧩", label: "模型" },
+  { view: "burner",   ico: "🔥", label: "消耗器" },
+  { view: "more",     ico: "•••", label: "更多" },
+];
+
+function mnavBuild() {
+  const bar = $("#mnav");
+  if (!bar) return;
+  bar.innerHTML = MNAV.map(m =>
+    `<a href="javascript:void 0" data-mnav="${m.view}"><span class="ico">${m.ico}</span>${m.label}</a>`
+  ).join("");
+  bar.querySelectorAll("a[data-mnav]").forEach(a => {
+    a.onclick = () => {
+      const v = a.dataset.mnav;
+      if (v === "more") { mnavMore(); return; }
+      switchView(v);
+    };
+  });
+}
+
+function mnavPanel(html) {
+  const d = $("#drawer");
+  if (!d) return;
+  d.innerHTML = html;
+  d.classList.add("open");
+}
+
+function mnavClose() {
+  const d = $("#drawer");
+  if (d) d.classList.remove("open");
+}
+
+function mnavMore() {
+  // 「更多」抽：桌面侧栏的其余入口，一行一个，挤指够得到
+  const items = [
+    { view: "pool", ico: "🔑", label: "凭证池" },
+    { view: "requests", ico: "📨", label: "请求记录" },
+    { view: "usage", ico: "📈", label: "用量统计" },
+    { href: "/ui/report", ico: "🏥", label: "健康报告" },
+    { href: "/ui/agent", ico: "🤖", label: "Agent 任务台" },
+  ];
+  const rows = items.map(m => {
+    const attrs = m.href ? `href="${m.href}"` : `href="javascript:void 0" data-go="${m.view}"`;
+    return `<a class="mnav-row" ${attrs}><span class="ico">${m.ico}</span>`
+      + `<span class="grow" style="text-align:left">${m.label}</span><span class="muted">›</span></a>`;
+  }).join("");
+  mnavPanel(`<div class="dr-head"><h2 class="grow">更多</h2>`
+    + `<button class="mini" id="mnav-close">✕ 关闭</button></div>`
+    + `<div class="mnav-list">${rows}</div>`);
+  const closeBtn = $("#mnav-close");
+  if (closeBtn) closeBtn.onclick = mnavClose;
+  document.querySelectorAll("#drawer a[data-go]").forEach(a => {
+    a.onclick = () => { mnavClose(); switchView(a.dataset.go); };
+  });
+}
+
+function mnavSync() {
+  const bar = $("#mnav");
+  if (!bar) return;
+  bar.querySelectorAll("a[data-mnav]").forEach(a => {
+    a.classList.toggle("on", a.dataset.mnav === state.view);
+  });
+}
+
+/** 手机上把长页面改成手风琴：每个 h4.sec 开头的片段包成可折叠的一块。
+
+    消耗器页 3500+px，全展开时运营者得滚半天才找得到想要的那一节。
+    默认展开第一个（通常是状态/总览），其余折起来。
+*/
+function accordionSections(root) {
+  if (!window.matchMedia("(max-width: 860px)").matches) return;
+  const scope = root || document;
+  scope.querySelectorAll("section.view h4.sec").forEach((h) => {
+    if (h.dataset.acc === "1") return;
+    h.dataset.acc = "1";
+    // 默认展开「这个视图里的第一个」而不是全站第一个：
+    // forEach 索引跨所有 section，用它判断会让后面几个视图永远折起。
+    const view = h.closest("section.view");
+    const isFirst = view && view.querySelector("h4.sec") === h;
+    // 收集这个 h 之后、下一个 h4.sec 之前的所有兄彆
+    const body = [];
+    let n = h.nextElementSibling;
+    while (n && !(n.tagName === "H4" && n.classList.contains("sec"))) {
+      body.push(n);
+      n = n.nextElementSibling;
+    }
+    if (!body.length) return;
+    const sec = document.createElement("div");
+    sec.className = "msec" + (isFirst ? " open" : "");
+    h.parentNode.insertBefore(sec, h);
+    sec.innerHTML = `<button class="msec-head" type="button">
+        <span class="msec-ico">📎</span>
+        <span class="msec-title">${esc(h.textContent || "")}</span>
+        <span class="msec-arrow">›</span>
+      </button><div class="msec-body"></div>`;
+    const hold = sec.querySelector(".msec-body");
+    body.forEach(el => hold.appendChild(el));
+    sec.querySelector(".msec-head").onclick = () => sec.classList.toggle("open");
+  });
+}
+
+/** 给表格里每个 td 打上 data-label（取自 thead 的 th）。
+ *  已经有的不覆盖：那些是 JS 自己写好的更明确的名字。 */
+function tableCards() {
+  if (window.matchMedia("(max-width: 860px)").matches === false) return;
+  document.querySelectorAll(".tablewrap table").forEach(table => {
+    const heads = [...table.querySelectorAll("thead th")].map(th =>
+      (th.textContent || "").trim());
+    if (!heads.length) return;
+    [...table.querySelectorAll("tbody tr")].forEach(tr => {
+      [...tr.children].forEach((td, i) => {
+        if (!(td instanceof HTMLTableCellElement)) return;
+        if (td.dataset.label !== undefined) return;
+        td.dataset.label = heads[i] || "";
+      });
+    });
+  });
+}
+
 const state = {
   view: "overview",
   token: localStorage.getItem("zkai_admin_token") || "",
@@ -718,7 +1033,16 @@ function fmtTime(iso) {
   let s = String(iso);
   if (s.includes("T") && !/([Zz]|[+-]\d\d:?\d\d)$/.test(s)) s += "Z";
   const d = new Date(s);
-  return isNaN(d) ? s : d.toLocaleString("zh-CN", { hour12: false });
+  if (isNaN(d)) return s;
+  // 今天以内只显小时分秒（省空间），超过就带日期——
+  // 否则手机上看到一个 10:44:41 完全无法判断是否过期。
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const opts = {
+    hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+  };
+  if (!sameDay) { opts.month = "numeric"; opts.day = "numeric"; }
+  return d.toLocaleString("zh-CN", opts);
 }
 function fmtEpoch(ts) {
   if (!ts) return "-";
@@ -833,6 +1157,7 @@ const LOADERS = {
   usage: loadUsage, models: loadModels, burner: loadBurner,
 };
 function switchView(name) {
+  if (state.view === "burner" && name !== "burner") blStop();
   state.view = name;
   document.querySelectorAll("nav button").forEach(b =>
     b.classList.toggle("active", b.dataset.view === name));
@@ -845,6 +1170,10 @@ async function refresh() {
   if (!fn) return;
   try { await fn(); }
   catch (err) { toast(err.message, "err"); }
+  // 手机上把表格变卡片：每次重绘后表格都是新的，标签要重打
+  tableCards();
+  accordionSections();
+  mnavSync();
 }
 function setupTimer() {
   clearInterval(state.timer);
@@ -946,21 +1275,56 @@ function attentionPanel(providers, warnings, config) {
   </div>`;
 }
 
+function renderServerLine(health) {
+  const dep = health.deploy || {};
+  const bits = [
+    `${health.app} v${health.version}`,
+    `数据库 ${health.database.ok ? "正常" : "异常"}`,
+    `已运行 ${dur(health.uptime_seconds)}`,
+  ];
+  // 部署在服务器上时把入口形态说出来：运营者第一件事就是确认该抄哪个 base_url
+  if (dep.is_remote) {
+    bits.push(`服务器模式（入口 ${dep.public_base_url || "?"}）`);
+  } else {
+    bits.push("本机模式");
+  }
+  // 改完 YAML 会不会自己生效，是运营者最该知道的一条状态：
+  // 关着的时候他每改一次配置都得记得去点「重载配置」，而他不会记得。
+  bits.push(health.config_watch
+    ? `配置自动生效${health.config_watch.reload_count ? `（已自动 reload ${health.config_watch.reload_count} 次）` : ""}`
+    : "配置需手动重载");
+  $("#server-line").textContent = bits.join(" · ");
+  // 小圆点也在这里一并给：它以前在 /admin/* 之后才赋值，
+  // 未登录时会一直停在红点——而那并不表示网关挂了。
+  const dot = $("#server-dot");
+  if (dot) dot.className = "dot " + (health.status === "healthy" ? "on" : "off");
+}
+
+
 async function loadOverview() {
-  const [health, stats, providers] = await Promise.all([
-    fetch("/health").then(r => r.json()),
+  // /health 不带 token 也能通（Caddy 对它有 Referer/Sec-Fetch-Site 白名单），
+  // 而 /admin/* 要令牌。所以「网关活着吗」必须与「数据取到了吗」分开渲染：
+  // 合成一个 Promise.all 的话，未登录时两个 admin 调用 401 抛出，下面整段
+  // 都不执行，状态行停在初始的「未连接」——运营者以为服务器挂了，
+  // 其实只是没填令牌。这就是「访问服务器显示未连接」的根因。
+  let health;
+  try {
+    health = await fetch("/health").then(r => r.json());
+  } catch (err) {
+    $("#server-dot").className = "dot off";
+    $("#server-line").textContent = "网关连不上（" + err.message + "）";
+    throw err;
+  }
+  renderServerLine(health);
+
+  // 数据区：401 时 api() 已经弹过登录框，这里只把错误带到页面底部
+  const [stats, providers] = await Promise.all([
     api("/admin/stats?days=7&recent=10"),
     api("/admin/providers"),
   ]);
   state.providers = providers.data;
   $("#server-dot").className = "dot " + (health.status === "healthy" ? "on" : "off");
-  $("#server-line").textContent =
-    `${health.app} v${health.version} · 数据库 ${health.database.ok ? "正常" : "异常"} · 已运行 ${dur(health.uptime_seconds)}` +
-    // 改完 YAML 会不会自己生效，是运营者最该知道的一条状态：
-    // 关着的时候他每改一次配置都得记得去点「重载配置」，而他不会记得。
-    (health.config_watch
-      ? ` · 配置自动生效${health.config_watch.reload_count ? `（已自动 reload ${health.config_watch.reload_count} 次）` : ""}`
-      : " · 配置需手动重载");
+
   const sideVer = $("#side-version");
   const sideUp = $("#side-uptime");
   if (sideVer) sideVer.textContent = `v${health.version}`;
@@ -2280,14 +2644,206 @@ async function deleteAlias(name) {
   } catch (err) { toast(err.message, "err"); }
 }
 
-/* ================= ChatGPT / Codex 桌面版 ================= */
+/* ================= 客户端接入（本机 config.toml / 公网调用） =================
+ * 一个面板两种形态：
+ *   - 网关在服务器上：看不到本机 ~/.codex，写 config.toml 没有意义。面板默认
+ *     渲染「公网调用」——base_url、令牌取值命令、五种客户端的可复制片段；
+ *     本机那段整块隐藏（不是禁用：禁用的按钮仍会让人以为点一下就能成）。
+ *   - 网关在本机：保持原来的「写入 ~/.codex/config.toml」为主。
+ * ==================================================================== */
 let cgState = null; // GET /admin/chatgpt 的快照
 
+const CG_CLIENTS = [
+  { id: "openai", name: "OpenAI SDK / LangChain" },
+  { id: "curl", name: "curl / PowerShell" },
+  { id: "zcode", name: "ZCode（openai-compatible）" },
+  { id: "claude", name: "Claude Code（Anthropic 协议）" },
+  { id: "chatgpt", name: "ChatGPT / Codex 桌面版" },
+];
+
+function cgDeploy() { return (cgState && cgState.deploy) || {}; }
+
+function cgPublicUrl() {
+  const d = cgDeploy();
+  if (d.client_base_url) return d.client_base_url;
+  const port = (cgState && cgState.gateway && cgState.gateway.port) || 8317;
+  return "http://127.0.0.1:" + port + "/v1";
+}
+
+function cgTokenName() {
+  return (cgState && cgState.env_key_name) || "ZKAI_API_TOKEN";
+}
+
+function cgTokenValueHint() {
+  return "<与服务器 /opt/zkai/.env 里的 ZKAI_API_TOKEN 同值>";
+}
+
+function cgModel() {
+  return (cgState && cgState.desired && cgState.desired.model) || "zk-auto";
+}
+function cgCatalogueRows() {
+  const list = (cgState && cgState.catalogue) || [];
+  if (!list.length) return '<tr><td colspan="2" class="muted">暂无可用模型</td></tr>';
+  return list.map(m => {
+    const ctx = m.context_window ? " · " + Math.round(m.context_window / 1024) + "K 上下文" : "";
+    return `<tr><td><code>${esc(m.name)}</code></td>`
+      + `<td class="muted small">${esc(m.resolves_to)}${ctx}</td></tr>`;
+  }).join("");
+}
+
+function cgSnippet(client) {
+  const url = cgPublicUrl();
+  const host = url.replace(/\/v1\/?$/, "");
+  const model = cgModel();
+  const tkn = cgTokenName();
+  const env = "$" + tkn;
+  switch (client) {
+    case "openai":
+      return [
+        "from openai import OpenAI",
+        "import os",
+        "",
+        "client = OpenAI(",
+        `    base_url="${url}",`,
+        `    api_key=os.environ["${tkn}"],  # 网关只校验非空，真实凭据在服务端`,
+        ")",
+        "",
+        "resp = client.chat.completions.create(",
+        `    model="${model}",`,
+        '    messages=[{"role": "user", "content": "你好"}],',
+        "    max_tokens=512,",
+        ")",
+        "print(resp.choices[0].message.content)",
+      ].join("\n");
+    case "curl":
+      return [
+        `curl ${url}/chat/completions \\`,
+        `  -H "Authorization: Bearer ${env}" \\`,
+        '  -H "Content-Type: application/json" \\',
+        "  -d '{",
+        `    "model": "${model}",`,
+        '    "messages": [{"role": "user", "content": "你好"}],',
+        '    "max_tokens": 512',
+        "  }'",
+        "",
+        "# PowerShell 等价（-TimeoutSec 420：网关单次最坏要跑几百秒）",
+        `Invoke-RestMethod "${url}/chat/completions" -Method POST \\`,
+        `  -Headers @{ Authorization = "Bearer ${env}" } \\`,
+        '  -ContentType "application/json; charset=utf-8" \\',
+        `  -Body '{"model":"${model}","messages":[{"role":"user","content":"你好"}]}' \\`,
+        "  -TimeoutSec 420",
+      ].join("\n");
+    case "zcode":
+      return [
+        "# ~/.zcode/v2/config.json 的 provider 键下加这一段（kind 固定 openai-compatible）",
+        "# apiKey 随便填：网关不校客户端 Key，只校服务端。下面必须是合法 JSON:",
+        "{",
+        '  "name": "ZK-AI Gateway",',
+        '  "kind": "openai-compatible",',
+        '  "source": "custom",',
+        '  "options": {',
+        '    "apiKey": "any",',
+        `    "baseURL": "${url}",`,
+        '    "apiKeyRequired": true',
+        "  },",
+        '  "models": {',
+        `    "${model}": { "limit": { "context": 1000000, "output": 32768 },`,
+        '      "modalities": { "input": ["text"], "output": ["text"] } } }'
+        + "}",
+      ].join("\n");
+    
+    case "claude":
+      return [
+        "# 网关提供原生 Anthropic 协议端点，Claude Code 直接指过来",
+        `export ANTHROPIC_BASE_URL="${host}"`,
+        "export ANTHROPIC_AUTH_TOKEN=\"" + "<与服务器 .env 的 " + tkn + " 同值>" + "\"",
+        `export ANTHROPIC_MODEL="${model}"`,
+        `export ANTHROPIC_SMALL_FAST_MODEL="${model}"`,
+        "",
+        "claude   # 之后照常用",
+        "",
+        "# 请求走 /v1/messages：网关翻译成上游 OpenAI 方言，再把结果转回 Anthropic 事件流",
+      ].join("\n");
+    case "chatgpt":
+      return [
+        "# ~/.codex/config.toml（ChatGPT app 自己拥有的文件，只加一个 provider 表）",
+        `model                  = "${model}"`,
+        'model_provider         = "zkai"',
+        'model_reasoning_effort = "max"',
+        "",
+        "[model_providers.zkai]",
+        'name       = "ZK-AI"',
+        `base_url   = "${url}"`,
+        'wire_api   = "responses"',
+        `env_key    = "${tkn}"`,
+        "",
+        "# Key 走环境变量，不写进 config.toml（桌面版从 explorer 启动，读不到 shell 变量）：",
+        `setx ${tkn} "与服务器 .env 同值"   # 然后重启桌面版（含托盘退出）`,
+      ].join("\n");
+    default:
+      return "";
+  }
+}
+
+async function cgCopy(text, okMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMsg, "ok");
+  } catch {
+    const w = window.open("", "_blank");
+    if (w) { w.document.write("<pre>" + esc(text) + "</pre>"); w.document.close(); }
+    toast("浏览器不允许自动复制，已弹出内容供手动全选", "err");
+  }
+}
+
+function cgRenderSnippet() {
+  const box = $("#cg-snippet");
+  if (box) box.textContent = cgSnippet($("#cg-client").value);
+}
+function cgToggleMode() {
+  const official = $("#cg-mode").value === "official";
+  $("#cg-official-model").closest("label").style.display = official ? "" : "none";
+  $("#cg-official-note").style.display = official ? "" : "none";
+}
+
+function cgFormValues() {
+  return {
+    mode: $("#cg-mode").value,
+    model: $("#cg-model").value.trim(),
+    model_provider: $("#cg-provider").value.trim(),
+    provider_display: $("#cg-display").value.trim(),
+    base_url: $("#cg-baseurl").value.trim(),
+    wire_api: $("#cg-wire").value,
+    env_key: $("#cg-envkey").value.trim(),
+    model_reasoning_effort: $("#cg-effort").value,
+    official_model: $("#cg-official-model").value.trim(),
+  };
+}
+
+function cgDiff(v) {
+  const d = cgState.desired || {};
+  const disk = cgState.disk || {};
+  const rows = [];
+  const cmp = (label, key, want) => {
+    const cur = String(d[key] ?? disk[key] ?? "");
+    if ((want || "") !== cur) rows.push({ label, old: cur || "（空）", new: want || "（删除该行）" });
+  };
+  cmp("model", "model", v.model);
+  cmp("model_provider", "model_provider", v.mode === "official" ? "" : v.model_provider);
+  cmp("provider_display", "provider_display", v.provider_display);
+  cmp("base_url", "base_url", v.base_url);
+  cmp("wire_api", "wire_api", v.wire_api);
+  cmp("env_key", "env_key", v.env_key);
+  cmp("model_reasoning_effort", "model_reasoning_effort", v.model_reasoning_effort);
+  if (v.mode === "official") cmp("official_model", "official_model", v.official_model);
+  return rows;
+}
 async function openChatGptModal() {
   const modal = $("#chatgpt-modal");
   modal.innerHTML = `<div class="card wide">
-    <h3>🤖 ChatGPT / Codex 桌面版</h3>
-    <div class="modal-sub">维护 <code>~/.codex/config.toml</code>：改接入方式、模型、接入地址、思考强度，或一键切回官方。写入前自动备份。</div>
+    <h3>🌐 客户端接入</h3>
+    <div class="modal-sub">网关现在跑在服务器上：把 <b>base_url</b> 和 <b>令牌</b> 交给客户端就能调。
+      本机 <code>~/.codex/config.toml</code> 的改写只在网关就在这台机器上跑时才可用。</div>
     <div id="cg-loading" class="small muted">读取中…</div>
     <div id="cg-body" style="display:none">
       <div class="card" style="padding:12px 14px;margin-bottom:14px">
@@ -2295,55 +2851,86 @@ async function openChatGptModal() {
         <div class="small muted" id="cg-path" style="margin-top:4px;word-break:break-all"></div>
       </div>
 
-      <h4 class="sec">客户端配置（写入 ~/.codex/config.toml，写入前自动备份）</h4>
+      <h4 class="sec">公网调用（复制即用）</h4>
       <div class="formgrid">
-        <label>接入方式
-          <select id="cg-mode">
-            <option value="zk-ai">走 ZK-AI 网关</option>
-            <option value="official">切回 ChatGPT 官方</option>
-          </select>
-        </label>
-        <label>模型 <input id="cg-model" list="cg-model-list" placeholder="zk-auto"></label>
-        <datalist id="cg-model-list"></datalist>
-        <label>官方模型名<input id="cg-official-model" placeholder="gpt-5.6-terra"></label>
-        <label>provider 表名<input id="cg-provider" placeholder="zkai"></label>
-        <label>表内显示名<input id="cg-display" placeholder="ZK-AI"></label>
-        <label>base_url<input id="cg-baseurl" placeholder="http://127.0.0.1:8317/v1"></label>
-        <label>wire_api
-          <select id="cg-wire"><option value="responses">responses</option><option value="chat">chat</option></select>
-        </label>
-        <label>env_key<input id="cg-envkey" placeholder="ZKAI_API_TOKEN"></label>
-        <label>思考强度
-          <select id="cg-effort">
-            <option value="">（不写这一行）</option>
-            <option>minimal</option><option>low</option><option>medium</option><option>high</option><option>max</option>
-          </select>
-        </label>
+        <label class="wide">base_url<input id="cg-pub-base" readonly></label>
+        <label class="wide">令牌（环境变量名 = 值）<input id="cg-pub-token" readonly></label>
       </div>
-      <div id="cg-official-note" class="small muted" style="display:none;margin-top:8px">
-        切回官方 = 删掉 config.toml 里的 <code>model_provider</code> 行、把 <code>model</code> 改成官方模型名；
-        provider 表保留不删，随时可以切回网关。
+      <div class="modal-actions" style="margin-top:0">
+        <button id="cg-btn-copyurl">📋 复制 base_url</button>
+        <button id="cg-btn-copytoken">📋 复制取值命令</button>
+        <span class="small muted" id="cg-token-note"></span>
       </div>
 
-      <div id="cg-preview" style="display:none;margin-top:12px"></div>
+      <h4 class="sec">客户端配置片段</h4>
+      <div class="formgrid">
+        <label class="wide">客户端<select id="cg-client"></select></label>
+      </div>
+      <div class="card" style="padding:0;margin-top:8px;position:relative">
+        <button class="mini" id="cg-btn-copysnip" style="position:absolute;top:8px;right:8px;z-index:2">📋 复制</button>
+        <pre id="cg-snippet" style="margin:0;padding:14px;overflow:auto;max-height:280px;font-size:var(--fs-12);line-height:1.6"></pre>
+      </div>
 
-      <div class="modal-actions">
-        <button id="cg-btn-preview">🔍 预览变更</button>
-        <button class="primary" id="cg-btn-save">💾 保存并写入</button>
-        <button id="cg-btn-reapply" style="display:none">↻ 重新写入本机</button>
-        <button id="cg-btn-syncenv" style="display:none" title="把网关 .env 里的令牌写进 Windows 用户级环境变量（桌面版从 explorer 启动只认这个）">🔧 同步令牌到用户环境变量</button>
-        <span class="grow"></span>
-        <button id="cg-cancel">取消</button>
+      <h4 class="sec">可用模型（别名 → 实际模型）</h4>
+      <div class="tablewrap" style="max-height:200px;overflow:auto">
+        <table><thead><tr><th>名字</th><th>解析到</th></tr></thead>
+        <tbody id="cg-catalogue"></tbody></table>
+      </div>
+      <div class="small muted" style="margin-top:6px">
+        别名会自动挑模型、换 Key、失败自动转移；点名具体模型名则只用那一个。
+      </div>
+
+      <div id="cg-local-zone">
+        <hr class="sep">
+        <h4 class="sec">本机 config.toml（仅网关就在这台机器上时有效）</h4>
+        <div class="modal-sub" style="margin-bottom:12px" id="cg-local-note"></div>
+        <div class="formgrid">
+          <label>接入方式
+            <select id="cg-mode">
+              <option value="zk-ai">走 ZK-AI 网关</option>
+              <option value="official">切回 ChatGPT 官方</option>
+            </select>
+          </label>
+          <label>模型 <input id="cg-model" list="cg-model-list" placeholder="zk-auto"></label>
+          <datalist id="cg-model-list"></datalist>
+          <label>官方模型名 <input id="cg-official-model" placeholder="gpt-5.6-terra"></label>
+          <label>provider 表名 <input id="cg-provider" placeholder="zkai"></label>
+          <label>表内显示名 <input id="cg-display" placeholder="ZK-AI"></label>
+          <label>base_url <input id="cg-baseurl" placeholder="http://127.0.0.1:8317/v1"></label>
+          <label>wire_api
+            <select id="cg-wire"><option value="responses">responses</option><option value="chat">chat</option></select>
+          </label>
+          <label>env_key <input id="cg-envkey" placeholder="ZKAI_API_TOKEN"></label>
+          <label>推理强度
+            <select id="cg-effort">
+              <option value="">（不写这一行）</option>
+              <option>minimal</option><option>low</option><option>medium</option><option>high</option><option>max</option>
+            </select>
+          </label>
+        </div>
+        <div id="cg-official-note" class="small muted" style="display:none;margin-top:8px">
+          切回官方 = 删掉 config.toml 里的 <code>model_provider</code> 行、把 <code>model</code> 改成官方模型名；
+          provider 表保留不删，随时可以切回来。
+        </div>
+        <div id="cg-preview" style="display:none;margin-top:12px"></div>
+        <div class="modal-actions">
+          <button id="cg-btn-preview">🔍 预览变更</button>
+          <button class="primary" id="cg-btn-save">💾 保存并写入</button>
+          <button id="cg-btn-reapply" style="display:none">↻ 重新写入本机</button>
+          <button id="cg-btn-syncenv" style="display:none" title="把网关 .env 里的令牌写进 Windows 用户级环境变量（桌面版从 explorer 启动只认这个）">🔧 同步令牌到用户环境变量</button>
+          <span class="grow"></span>
+          <button id="cg-cancel">取消</button>
+        </div>
       </div>
 
       <hr class="sep">
       <h4 class="sec">热切换模型</h4>
       <div class="modal-sub" style="margin-bottom:12px">
         桌面版发的模型是 <code>zk-auto</code>；下面换模型 = 把所选模型提到 <code>zk-auto</code>
-        兜底链最前面，<strong>下一条消息立即生效</strong>，不用重启桌面版。
+        链路最前面，<strong>下一条消息立即生效</strong>，不用重启桌面版。远程调用方同样是下一个请求即生效。
       </div>
       <div class="formgrid">
-        <label class="wide">当前首选模型 <select id="cg-hot-model"></select></label>
+        <label class="wide">当前链首模型 <select id="cg-hot-model"></select></label>
       </div>
       <div class="modal-actions">
         <button class="primary" id="cg-hot-save">热切换</button>
@@ -2360,6 +2947,11 @@ async function openChatGptModal() {
   $("#cg-btn-reapply").onclick = cgReapply;
   $("#cg-btn-syncenv").onclick = cgSyncEnv;
   $("#cg-hot-save").onclick = cgHotSwap;
+  $("#cg-client").onchange = cgRenderSnippet;
+  $("#cg-btn-copyurl").onclick = () => cgCopy(cgPublicUrl(), "base_url 已复制");
+  $("#cg-btn-copytoken").onclick = () =>
+    cgCopy(`${cgTokenName()}="${cgTokenValueHint()}"`, "取值命令已复制");
+  $("#cg-btn-copysnip").onclick = () => cgCopy($("#cg-snippet").textContent, "配置片段已复制");
   try {
     const r = await api("/admin/chatgpt");
     cgState = r;
@@ -2370,12 +2962,12 @@ async function openChatGptModal() {
     $("#cg-loading").textContent = "读取失败: " + err.message;
   }
 }
-
 function cgFill(r) {
   const disk = r.disk || {};
   const d = r.desired || {};
   const gw = r.gateway || { port: 8317 };
-  // 优先用已保存的期望配置；没保存过就按磁盘现状预填（首次打开 = 当前工作状态）
+  const dep = r.deploy || {};
+  // 优先用已保存的期望配置；没保存过就按盘现状预填（首次打开 = 当前工作状态）
   const val = (want, fallback) => (want || fallback || "");
   $("#cg-mode").value = val(d.mode, "zk-ai");
   $("#cg-model").value = val(d.model, disk.model || "zk-auto");
@@ -2390,105 +2982,84 @@ function cgFill(r) {
 
   $("#cg-model-list").innerHTML = (r.choices || []).map(c =>
     `<option value="${esc(c)}">`).join("");
+  $("#cg-catalogue").innerHTML = cgCatalogueRows();
 
+  // ---- 公网区 ----
+  $("#cg-pub-base").value = cgPublicUrl();
+  $("#cg-pub-token").value = `${cgTokenName()}="${cgTokenValueHint()}"`;
+  $("#cg-token-note").textContent = dep.api_token_set
+    ? "网关已设 ZKAI_API_TOKEN，连接时用它；空 = 网关不校验（仅适合回环监听）。"
+    : "网关未设 ZKAI_API_TOKEN，当前不校验客户端令牌（仅适合回环监听）。";
+
+  // ---- 本机区：远程部署时整块隐藏 ----
+  const localZone = $("#cg-local-zone");
+  const localNote = $("#cg-local-note");
+  if (dep.is_remote || dep.can_write_local === false) {
+    localZone.style.display = "none";
+    localNote.innerHTML =
+      `网关在服务器上（监听 ${esc(dep.listen || "?")}），打不到这台电脑的 <code>~/.codex/config.toml</code>，`
+      + `所以「写入本机」不可用。要在桌面版接入，请在<b>你自己的电脑</b>上把「ChatGPT / Codex 桌面版」那段`
+      + `片段写进它的 config.toml，并 <code>setx ${esc(cgTokenName())} "同值"</code> 配好令牌。`;
+  } else {
+    localZone.style.display = "";
+    localNote.innerHTML =
+      "这一区写本机 <code>~/.codex/config.toml</code>（app 自己的文件，"
+      + "mcp_servers / plugins / projects 等段落原样保留）。";
+  }
+
+  $("#cg-client").innerHTML = CG_CLIENTS.map(c =>
+    `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  $("#cg-client").value = "openai";
+  cgRenderSnippet();
+
+  // ---- 状态行 ----
   const bits = [];
-  bits.push(r.config_exists ? "config.toml：存在" : "config.toml：不存在（保存后将新建）");
+  bits.push(r.config_exists ? "config.toml：存在" : "config.toml：不存在（保存后会新建）");
   bits.push(r.desired ? "期望配置：已保存" : "期望配置：未保存");
   const drift = (r.drift || []).length;
-  bits.push(drift ? `本机与期望配置有 <strong style="color:var(--err)">${drift}</strong> 处不一致` : "本机与期望配置一致");
-  if (r.config_parse_error) bits.push(`<span style="color:var(--err)">config.toml 解析失败：${esc(r.config_parse_error)}</span>`);
+  bits.push(drift ? `本机与期望配置有 <strong style="color:var(--err)">${drift}</strong> 处不一致`
+                  : "本机与期望配置一致");
+  if (r.config_parse_error) {
+    bits.push(`<span style="color:var(--err)">config.toml 解析失败：${esc(r.config_parse_error)}</span>`);
+  }
   const auth = r.auth || {};
-  bits.push(auth.exists ? "auth.json：存在（只读，不写）" : "auth.json：不存在");
-  // 桌面版从 explorer 启动，只认用户级环境变量——缺它就报 Missing environment variable
-  const envName = r.env_key_name || "ZKAI_API_TOKEN";
-  if (r.env_key_visible) {
-    bits.push(r.env_key_matches_gateway === false
-      ? `<span style="color:var(--err)">${esc(envName)}：已设置但与网关令牌不一致（桌面版会 401）</span>`
-      : `${esc(envName)}：桌面版可见`);
-  } else {
-    bits.push(`<span style="color:var(--err)">${esc(envName)}：桌面版读不到（打开 app 会报 Missing environment variable）</span>`);
+  if (auth.exists) {
+    bits.push(auth.has_openai_key ? "auth.json：有 OpenAI 登录态" : "auth.json：存在（无 OpenAI Key）");
   }
   $("#cg-status").innerHTML = bits.join(" · ");
-  $("#cg-path").textContent =
-    r.path + (r.desired_path ? ("    期望配置：" + r.desired_path) : "");
-  $("#cg-btn-reapply").style.display = (r.desired && drift) ? "" : "none";
+  $("#cg-path").textContent = dep.codex_config_path || r.path || "";
+
   $("#cg-btn-syncenv").style.display =
-    (r.env_key_visible && r.env_key_matches_gateway !== false) ? "none" : "";
-
-  // 热切换区
-  const current = r.effective_model || "";
-  const opts = (r.choices || []).map(c =>
-    `<option value="${esc(c)}" ${c === current ? "selected" : ""}>${esc(c)}</option>`).join("");
-  const cur = current && !(r.choices || []).includes(current)
-    ? `<option value="${esc(current)}" selected>${esc(current)} (当前)</option>` : "";
-  $("#cg-hot-model").innerHTML = cur + opts;
-  $("#cg-chain").textContent = "zk-auto 兜底链: " + (r.targets || []).join(" → ");
-}
-
-function cgToggleMode() {
-  const official = $("#cg-mode").value === "official";
-  $("#cg-official-note").style.display = official ? "" : "none";
-  for (const id of ["#cg-model", "#cg-provider", "#cg-display", "#cg-baseurl", "#cg-wire", "#cg-envkey", "#cg-effort"]) {
-    $(id).disabled = official;
+    (dep.is_remote || r.env_key_visible === false) ? "" : "none";
+  if (r.env_key_matches_gateway === false) {
+    $("#cg-status").innerHTML +=
+      ` · <span style="color:var(--err)">用户环境变量里的 ${esc(r.env_key_name || "")} 与网关令牌不一致</span>`;
   }
-  $("#cg-official-model").disabled = !official;
-  $("#cg-preview").style.display = "none";
-}
 
-function cgFormValues() {
-  if ($("#cg-mode").value === "official") {
-    return { mode: "official", model: $("#cg-official-model").value.trim() };
-  }
-  return {
-    mode: "zk-ai",
-    model: $("#cg-model").value.trim(),
-    model_provider: $("#cg-provider").value.trim() || "zkai",
-    provider_display: $("#cg-display").value.trim() || "ZK-AI",
-    base_url: $("#cg-baseurl").value.trim(),
-    wire_api: $("#cg-wire").value,
-    env_key: $("#cg-envkey").value.trim() || "ZKAI_API_TOKEN",
-    model_reasoning_effort: $("#cg-effort").value,
-    official_model: $("#cg-official-model").value.trim(),
-  };
+  // ---- 热切换 ----
+  const sel = $("#cg-hot-model");
+  sel.innerHTML = (r.choices || []).map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  const eff = r.effective_model || "zk-auto";
+  if (eff) sel.value = eff;
+  $("#cg-chain").textContent = `链路：${(r.targets || []).join(" → ") || "（无）"}`;
 }
-
-/** 表单值 vs 磁盘现状的键级差异（预览用；后端才是权威）。 */
-function cgDiff(v) {
-  const disk = (cgState && cgState.disk) || {};
-  const rows = [];
-  const cmp = (label, key, nv) => {
-    const ov = disk[key] || "";
-    if ((nv || "") !== ov) {
-      rows.push({ label, old: ov || "（无）", new: nv || "（删除该行）" });
-    }
-  };
-  cmp("model", "model", v.model);
-  cmp("model_provider", "model_provider", v.mode === "official" ? "" : v.model_provider);
-  if (v.mode !== "official") {
-    cmp("base_url", "base_url", v.base_url);
-    cmp("wire_api", "wire_api", v.wire_api);
-    cmp("env_key", "env_key", v.env_key);
-    cmp("model_reasoning_effort", "model_reasoning_effort", v.model_reasoning_effort);
-  }
-  return rows;
-}
-
 function cgPreview() {
   const v = cgFormValues();
   if (!v.model) { toast("模型不能为空", "err"); return; }
   const rows = cgDiff(v);
   const box = $("#cg-preview");
   let html = `<div class="card" style="padding:10px 12px;background:var(--bg)">
-    <div class="small" style="margin-bottom:6px"><strong>将要写入 ${esc(cgState ? cgState.path : "~/.codex/config.toml")}</strong>`
-    + `（旧文件先备份为 config.toml.bak-时间戳；mcp_servers / plugins / projects 等 app 自己的段落原样保留）</div>`;
+    <div class="small" style="margin-bottom:6px"><strong>将写入 ${esc(cgState ? cgState.path : "~/.codex/config.toml")}</strong>`
+    + `（旧文件先备份为 config.toml.bak-时间戳；mcp_servers / plugins / projects 等 app 自己的字段原样保留）</div>`;
   if (!rows.length) {
-    html += `<div class="small muted">与磁盘现状一致，写入是无变化（不会新建备份）。</div>`;
+    html += `<div class="small muted">与盘现状一致，写入是无变化（不会新建备份）。</div>`;
   } else {
     html += `<table style="width:100%;font-size:var(--fs-12);border-collapse:collapse">
       <tr class="small muted"><td style="padding:2px 8px 2px 0">键</td><td>现值</td><td>改成</td></tr>`
       + rows.map(r2 =>
         `<tr><td style="padding:2px 8px 2px 0"><code>${esc(r2.label)}</code></td>`
-        + `<td style="color:var(--muted)">${esc(r2.old)}</td><td><strong>${esc(r2.new)}</strong></td></tr>`).join("")
+        + `<td style="color:var(--muted)">${esc(r2.old)}</td>`
+        + `<td><strong>${esc(r2.new)}</strong></td></tr>`).join("")
       + `</table>`;
   }
   html += `</div>`;
@@ -2506,14 +3077,21 @@ async function cgRefresh() {
 async function cgSave() {
   const v = cgFormValues();
   if (!v.model) { toast("模型不能为空", "err"); return; }
+  const dep = cgDeploy();
+  if (dep.is_remote || dep.can_write_local === false) {
+    toast("网关在服务器上，写不到这台电脑的 config.toml——请按上面的片段在自己电脑上配置", "err");
+    return;
+  }
   const rows = cgDiff(v);
-  if (!confirm(`确认写入？\n\n${rows.length ? rows.map(r2 => `${r2.label}: ${r2.old} → ${r2.new}`).join("\n") : "（与磁盘一致，无变化）"}`)) return;
+  if (!confirm(`确认写入？\n${rows.length
+    ? rows.map(r2 => `${r2.label}: ${r2.old} → ${r2.new}`).join("\n")
+    : "（与盘一致，无变化）"}`)) return;
   try {
     const r = await api("/admin/chatgpt/client", { method: "PUT", json: { ...v, apply: true } });
-    const parts = [`期望配置已保存 ${r.saved}`];
+    const parts = [`期望配置已保存（${r.saved}）`];
     if (r.applied) {
-      parts.push(r.no_op ? "config.toml 无变化" :
-        `config.toml 已更新 ${r.apply_result.changes.length} 处（备份：${r.apply_result.backup || "无"}）`);
+      parts.push(r.no_op ? "config.toml 无变化"
+        : `config.toml 已更新 ${r.apply_result.changes.length} 处（备份：${r.apply_result.backup || "无"}）`);
     }
     toast(parts.join("；"), "ok");
     (r.warnings || []).forEach(w => toast("提醒：" + w, "err"));
@@ -2524,8 +3102,8 @@ async function cgSave() {
 async function cgReapply() {
   try {
     const r = await api("/admin/chatgpt/apply", { method: "POST" });
-    toast(r.no_op ? "config.toml 已是最新" :
-      `已按期望配置重写 config.toml（${r.apply_result.changes.length} 处）`, "ok");
+    toast(r.no_op ? "config.toml 已是最新"
+      : `已按期望配置重写 config.toml（${r.apply_result.changes.length} 处）`, "ok");
     await cgRefresh();
   } catch (err) { toast(err.message, "err"); }
 }
@@ -2546,9 +3124,7 @@ async function cgHotSwap() {
     toast(`已切换为 ${model}，下一条消息生效`, "ok");
     await cgRefresh();
   } catch (err) { toast(err.message, "err"); }
-}
-
-/* ================= 令牌 / 启动 ================= */
+}/* ================= 令牌 / 启动 ================= */
 function showAuth() { $("#auth").classList.add("show"); $("#auth-token").value = state.token; $("#auth-token").focus(); }
 $("#auth-save").onclick = () => {
   state.token = $("#auth-token").value.trim();
@@ -2570,7 +3146,20 @@ $("#btn-theme").onclick = () =>
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 applyTheme(localStorage.getItem("zkai_theme") || "light");
 document.querySelectorAll("#tabs button[data-view]").forEach(b => b.onclick = () => switchView(b.dataset.view));
+mnavBuild();
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("#drawer").classList.remove("open"); });
+// 窗口拉宽回桌面时把卡片标签拉回表格（避免留下永久的 data-label）
+let _mResize = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_mResize);
+  _mResize = setTimeout(() => {
+    if (!window.matchMedia("(max-width: 860px)").matches) {
+      document.querySelectorAll("[data-label]").forEach(el => { delete el.dataset.label; });
+    } else {
+      tableCards();
+    }
+  }, 150);
+});
 
 /* URL 参数：
  *   ?token=xxx   管理令牌（书签直达，自动记住，随后从地址栏抹掉）
@@ -2635,6 +3224,8 @@ function burnerField(key, value) {
     <input id="bf-${key}" type="${type}" ${step ? `step="${step}"` : ""} value="${esc(value ?? "")}"></label>`;
 }
 
+const burnLog = { es: null, follow: true, retries: 0, timer: null };
+
 async function loadBurner() {
   const d = await api("/admin/burner");
   const L = d.ledger || {};
@@ -2697,6 +3288,53 @@ async function loadBurner() {
     <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 窗口</th><th>本周</th>
       <th>下一边界</th><th>并发 / 结果</th><th>Tokens 入/出</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="6" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
+    <h4 class="sec">账号核对（拿商汤后台的真实消耗校正账本）</h4>
+    <div class="note">账本的「已烧」是按费率<b>估算</b>的，商汤后台的「实扣」才是真的。
+      现在填后台看到的数，保存后写回账本并按新口径继续烧。<b>改 only / anchors / week_anchors 会触发重启。</b></div>
+    <div id="rec-loading" class="small muted">读取账本…</div>
+    <div id="rec-body" style="display:none">
+      <div class="tablewrap"><table id="rec-table">
+        <thead><tr><th>账号</th><th>5h 已烧</th><th>本周已烧</th><th>累计积分</th>
+          <th>5h 锚点</th><th>周锚点</th><th>参与</th></tr></thead>
+        <tbody></tbody></table></div>
+      <div class="note" id="rec-diff" style="display:none"></div>
+      <details style="margin:10px 0"><summary class="small" style="cursor:pointer">只烧这些 Key（only）</summary>
+        <div id="rec-only" class="row-flex" style="flex-wrap:wrap;gap:8px;margin-top:8px"></div>
+      </details>
+      <div class="modal-actions">
+        <button id="rec-btn-diff">预演改动</button>
+        <button class="primary" id="rec-btn-apply">保存并重启</button>
+        <span class="muted small" id="rec-hint"></span>
+      </div>
+    </div>
+
+    <h4 class="sec">费率校准</h4>
+    <div class="note">把后台某段时段的实扣积分填进来，按账本同期 token 反推费率。
+      <b>时段必须对齐</b>：账本记的是「累计」，实扣也必须是同样范围的累计，否则算出来会偏高或偏低。</div>
+    <div class="formgrid">
+      <label>实扣积分（累计）<input id="cal-actual" type="number" step="any" min="0" placeholder="如 120000"></label>
+      <label>只算这个账号（可空）<input id="cal-account" placeholder="SENSENOVA_API_KEY_02"></label>
+    </div>
+    <div class="modal-actions">
+      <button id="cal-btn">算出建议费率</button>
+      <button class="primary" id="cal-adopt" style="display:none">采纳并重启</button>
+      <span class="muted small" id="cal-out"></span>
+    </div>
+    <h4 class="sec">实时日志</h4>
+    <div class="note">消耗器每分钟落一条汇总；异常与限流会立刻出现。
+      断线会自动重连（指数退避），你也可以暂停滚动去翻历史。</div>
+    <div class="card" style="padding:0">
+      <div class="row-flex" style="gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);align-items:center;flex-wrap:wrap">
+        <span class="dot off" id="bl-dot"></span>
+        <span class="small" id="bl-state">未连接</span>
+        <span class="grow"></span>
+        <button class="mini" id="bl-follow" title="关掉后新日志不会自动滚到底">⏸ 暂停滚动</button>
+        <button class="mini" id="bl-copy">📋 复制</button>
+        <button class="mini" id="bl-clear">🧹 清屏</button>
+      </div>
+      <pre id="bl-log" style="margin:0;padding:12px;height:280px;overflow:auto;font-size:var(--fs-12);line-height:1.55;white-space:pre-wrap;word-break:break-all"></pre>
+    </div>
+
     <h4 class="sec">配置</h4>
     <div class="card"><div class="cfg-grid">${fields}</div>
       <div class="modal-actions">
@@ -2704,8 +3342,279 @@ async function loadBurner() {
         <span class="muted small">写入 config/burner.yaml（保留注释），并让托盘重启消耗器使配置生效（约 3 秒）</span>
       </div></div>`;
   $("#bf-save").onclick = saveBurnerConfig;
+  $("#cal-btn").onclick = calRun;
+  // 日志 SSE 只连一次：loadBurner 会被自动刷新反复调用，每次重连会把
+  // 历史重发一遍并让滚动位置乱跳。
+  if (!burnLog.es && !burnLog.timer) blWire();
+  if (!recState) loadReconcile();
 }
 
+/* ================= 消耗器：实时日志（SSE + 降级轮询） ================= */
+
+function blSetState(text, ok) {
+  const dot = $("#bl-dot"), st = $("#bl-state");
+  if (!dot || !st) return;
+  dot.className = "dot " + (ok ? "on" : "off");
+  st.textContent = text;
+}
+
+function blAppend(line) {
+  const box = $("#bl-log");
+  if (!box) return;
+  box.textContent += (box.textContent ? "\n" : "") + line;
+  // 只保留尾部 2000 行：日志一晚上能长到几万行，全留着会把浏览器拖死
+  const lines = box.textContent.split("\n");
+  if (lines.length > 2000) box.textContent = lines.slice(-2000).join("\n");
+  if (burnLog.follow) box.scrollTop = box.scrollHeight;
+}
+
+function blConnect() {
+  if (burnLog.es) { burnLog.es.close(); burnLog.es = null; }
+  blSetState("连接中…", false);
+  // 退化路径：老浏览器没有 EventSource 时直接轮询，别让日志区永远空着
+  if (typeof EventSource === "undefined") { blFallback(); return; }
+  let es;
+  try {
+    es = new EventSource("/admin/burner/log/stream?lines=120&within_seconds=86400");
+  } catch {
+    blFallback();
+    return;
+  }
+  burnLog.es = es;
+  es.onopen = () => { burnLog.retries = 0; blSetState("实时跟随中", true); };
+  es.onmessage = ev => { if (ev.data) blAppend(ev.data); };
+  es.onerror = () => {
+    es.close();
+    burnLog.es = null;
+    // 指数退避重连：1s、2s、4s…封顶 30s。代理把 SSE 挡成一次性返回时
+    // onerror 会立刻触发，退避避免把服务器打到 100% CPU。
+    const wait = Math.min(30000, 1000 * 2 ** burnLog.retries);
+    burnLog.retries += 1;
+    // 同一地址重试两次仍失败：多半是代理不支持 SSE，转轮询而不是死磕
+    if (burnLog.retries >= 2) { blFallback(); return; }
+    blSetState(`已断开，${wait / 1000 | 0} 秒后重连（第 ${burnLog.retries} 次）`, false);
+    clearTimeout(burnLog.timer);
+    burnLog.timer = setTimeout(blConnect, wait);
+  };
+}
+
+function blFallback() {
+  // EventSource 整个不可用（老浏览器 / 代理把 SSE 挡死）：退回 2 秒轮询一次。
+  blSetState("SSE 不可用，降级轮询中", false);
+  clearInterval(burnLog.timer);
+  burnLog.timer = setInterval(async () => {
+    try {
+      const r = await fetch("/admin/burner/log/tail?lines=30", {
+        headers: state.token ? { "X-Admin-Token": state.token } : {},
+      });
+      if (!r.ok) { blSetState("日志读取失败 HTTP " + r.status, false); return; }
+      const text = await r.text();
+      const lines = text.trimEnd().split("\n");
+      const last = lines[lines.length - 1];
+      if (last && last !== blFallback.last) { blAppend(last); blFallback.last = last; }
+      blSetState("轮询中（最后一行）", true);
+    } catch { blSetState("读取失败，重试中", false); }
+  }, 2000);
+}
+
+function blStop() {
+  if (burnLog.es) { burnLog.es.close(); burnLog.es = null; }
+  clearTimeout(burnLog.timer);
+  clearInterval(burnLog.timer);
+  blSetState("已停止", false);
+}
+
+function blWire() {
+  const followBtn = $("#bl-follow");
+  if (followBtn) followBtn.onclick = () => {
+    burnLog.follow = !burnLog.follow;
+    followBtn.textContent = burnLog.follow ? "⏸ 暂停滚动" : "▶ 恢复滚动";
+    if (burnLog.follow) { const b = $("#bl-log"); if (b) b.scrollTop = b.scrollHeight; }
+  };
+  const copyBtn = $("#bl-copy");
+  if (copyBtn) copyBtn.onclick = () =>
+    cgCopy($("#bl-log").textContent, "日志已复制");
+  const clearBtn = $("#bl-clear");
+  if (clearBtn) clearBtn.onclick = () => { $("#bl-log").textContent = ""; };
+  blConnect();
+}
+/* ================= 消耗器：账号核对与费率校准 =================
+ * 表单值只在内存里；「预演」把表单 POST 给 /admin/burner/reconcile，
+ * 拿到逐账号 diff 后弹确认框，再 PUT 落盘并重启。
+ * 这样运营者改错一个数字能在写盘前看见后果——账本写错不会自愈。
+ * ==================================================================== */
+let recState = null;
+
+function recNum(v) { return v === null || v === undefined || v === "" ? "" : String(v); }
+
+function recRowHTML(a) {
+  const burning = a.parked ? "" : "checked";
+  return `<tr data-name="${esc(a.name)}">
+    <td><b>${esc(a.name)}</b>${a.parked ? '<div class="muted small">停靠中</div>' : ""}</td>
+    <td><input class="rec-in" data-f="burned_5h" type="number" step="any" min="0"
+        value="${recNum(a.burned_5h)}" title="账本估算 ${Math.round(a.burned_5h)} / 熔断 ${Math.round(a.cap_5h)}"></td>
+    <td><input class="rec-in" data-f="burned_week" type="number" step="any" min="0"
+        value="${recNum(a.burned_week)}" title="账本估算 ${Math.round(a.burned_week)} / 熔断 ${Math.round(a.cap_week)}"></td>
+    <td><input class="rec-in" data-f="credits_total" type="number" step="any" min="0"
+        value="${recNum(a.credits_total)}"></td>
+    <td><input class="rec-in" data-f="anchor" type="text" placeholder="（滚动）"
+        value="${esc(a.anchor || "")}" title="固定 5h 窗口的锚点 HH:MM，留空 = 滚动记账"></td>
+    <td><input class="rec-in" data-f="week_anchor" type="text" placeholder="（全局）"
+        value="${esc(a.week_anchor || "")}" title="周锚点 Wed 18:10 这种格式"></td>
+    <td><input type="checkbox" class="rec-in" data-f="burning" ${burning}
+        title="取消勾选 = 这个账号停靠一个窗口周期"></td>
+  </tr>`;
+}
+
+async function loadReconcile() {
+  const loading = $("#rec-loading"), body = $("#rec-body");
+  if (!loading) return;
+  try {
+    recState = await api("/admin/burner/reconcile");
+    loading.style.display = "none";
+    body.style.display = "";
+    const tbody = $("#rec-table tbody");
+    tbody.innerHTML = (recState.accounts || []).map(recRowHTML).join("") ||
+      '<tr><td colspan="7" class="muted">账本里还没有账号（消耗器可能没跑过）</td></tr>';
+    const only = recState.config || {};
+    $("#rec-only").innerHTML = (only.only || []).map(k =>
+      `<label class="row-flex small" style="gap:4px"><input type="checkbox" class="rec-only" value="${esc(k)}" checked> ${esc(k)}</label>`
+    ).join("") || '<span class="muted small">没有可选的 Key</span>';
+    $("#rec-hint").textContent = recState.ledger_saved_at
+      ? `账本更新于 ${recState.ledger_saved_at}`
+      : "账本还没有数据";
+    $("#rec-btn-diff").onclick = recDiff;
+    $("#rec-btn-apply").onclick = recApply;
+  } catch (err) {
+    loading.textContent = "读取失败: " + err.message;
+  }
+}
+
+function recCollect() {
+  const accounts = [];
+  document.querySelectorAll("#rec-table tbody tr[data-name]").forEach(tr => {
+    const item = { name: tr.dataset.name };
+    tr.querySelectorAll(".rec-in").forEach(el => {
+      const f = el.dataset.f;
+      if (el.type === "checkbox") item[f] = el.checked;
+      else item[f] = el.value.trim();
+    });
+    accounts.push(item);
+  });
+  const only = [];
+  document.querySelectorAll(".rec-only").forEach(el => { if (el.checked) only.push(el.value); });
+  const patch = { accounts };
+  if (only.length) patch.only = only;
+  return patch;
+}
+
+function recDiff() {
+  recPreview(recCollect());
+}
+
+async function recPreview(patch) {
+  try {
+    const d = await api("/admin/burner/reconcile", { method: "POST", json: patch });
+    const rows = (d.accounts || []).filter(a =>
+      ["credits_total", "burned_5h", "burned_week"].some(f => a[f] && a[f].delta !== null && a[f].delta !== undefined)
+      || (a.anchor && a.anchor.filled && a.anchor.filled !== a.anchor.current)
+      || (a.week_anchor && a.week_anchor.filled && a.week_anchor.filled !== a.week_anchor.current)
+      || a.burning === false);
+    let html = "";
+    if (!rows.length) {
+      html = '<div class="small muted">没有改动。</div>';
+    } else {
+      html = '<table style="width:100%;font-size:var(--fs-12);border-collapse:collapse"><tr class="small muted">'
+        + "<td>账号</td><td>字段</td><td>账本</td><td>你填的</td><td>差</td></tr>"
+        + rows.map(a => {
+          const cells = [];
+          const push = (label, o) => cells.push(`<tr><td>${esc(a.name)}</td><td>${label}</td>`
+            + `<td class="muted">${esc(String(o.current ?? ""))}</td>`
+            + `<td><strong>${esc(String(o.filled ?? o.current ?? ""))}</strong></td>`
+            + `<td style="color:${o.notable ? "var(--err)" : "inherit"}">${o.delta ?? ""}</td></tr>`);
+          ["credits_total", "burned_5h", "burned_week"].forEach(f => {
+            if (a[f] && a[f].delta !== null && a[f].delta !== undefined) push(f, a[f]);
+          });
+          if (a.anchor && a.anchor.filled && a.anchor.filled !== a.anchor.current) push("锚点", a.anchor);
+          if (a.week_anchor && a.week_anchor.filled && a.week_anchor.filled !== a.week_anchor.current) push("周锚点", a.week_anchor);
+          if (a.burning === false) cells.push(`<tr><td>${esc(a.name)}</td><td>参与</td><td class="muted">烧</td><td><strong>停靠</strong></td><td></td></tr>`);
+          return cells.join("");
+        }).join("") + "</table>";
+    }
+    const cfg = d.config_changes || {};
+    const cfgKeys = Object.keys(cfg);
+    if (cfgKeys.length) {
+      html += `<div class="small" style="margin-top:8px">配置改动：${cfgKeys.map(k =>
+        `<code>${esc(k)}</code>`).join("、")}`
+        + (d.restart_keys && d.restart_keys.length
+          ? `　<span style="color:var(--warn)">（${d.restart_keys.map(esc).join("、")} 需要重启才生效）</span>` : "") + "</div>";
+    }
+    $("#rec-diff").innerHTML = html;
+    $("#rec-diff").style.display = "";
+    return d;
+  } catch (err) { toast(err.message, "err"); return null; }
+}
+
+async function recApply() {
+  const patch = recCollect();
+  const d = await recPreview(patch);
+  if (!d) return;
+  const cfgKeys = Object.keys(d.config_changes || {});
+  const willRestart = cfgKeys.length > 0;
+  if (!confirm(`确认保存？\n`
+    + `将写入消耗器账本${cfgKeys.length ? "和 burner.yaml（" + cfgKeys.join("、") + "）" : ""}\n`
+    + (willRestart ? "改的是 only/anchors 这类键，保存后会自动重启消耗器（正在飞的两三秒请求会被断）。\n" : "")
+    + "\n按「确定」继续。")) return;
+  try {
+    const r = await api("/admin/burner/reconcile?restart=true", { method: "PUT", json: patch });
+    const n = (r.reconcile.ledger_written || []).length;
+    const m = (r.reconcile.config_written || []).length;
+    const rs = r.restart || {};
+    toast(`已保存：账本 ${n} 处、配置 ${m} 处；${rs.message || ""}`, rs.ok ? "ok" : "err");
+    if (!rs.ok && rs.command) toast("请手动执行：" + rs.command, "err");
+    await loadBurner();
+    setTimeout(loadBurner, 4000);
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function calRun() {
+  const actual = Number($("#cal-actual").value);
+  const account = $("#cal-account").value.trim();
+  if (!actual) { toast("先填实扣积分", "err"); return; }
+  $("#cal-out").textContent = "计算中…";
+  $("#cal-adopt").style.display = "none";
+  try {
+    const r = await api("/admin/burner/calibrate", {
+      method: "POST", json: { actual_credits: actual, account },
+    });
+    const c = r.calibration;
+    $("#cal-out").innerHTML =
+      `建议 <code>入 ${c.suggested.rate_in} / 出 ${c.suggested.rate_out}</code>`
+      + `　当前账本 <code>入 ${c.current.rate_in} / 出 ${c.current.rate_out}</code>`
+      + `　账本 token 入 ${Math.round(c.ledger_tokens.tokens_in / 1e3)}K / 出 ${Math.round(c.ledger_tokens.tokens_out / 1e3)}K`
+      + `<div class="muted small" style="margin-top:4px">${esc(c.caveat)}</div>`;
+    $("#cal-adopt").style.display = "";
+    $("#cal-adopt").onclick = () => calAdopt(actual, account);
+  } catch (err) {
+    $("#cal-out").textContent = "";
+    toast(err.message, "err");
+  }
+}
+
+async function calAdopt(actual, account) {
+  if (!confirm(`采纳建议费率并写入 burner.yaml + 账本，然后重启消耗器？\n`
+    + "重启只影响正在飞的两三秒请求。")) return;
+  try {
+    const r = await api("/admin/burner/calibrate", {
+      method: "POST", json: { actual_credits: actual, account, adopt: true },
+    });
+    const rs = r.calibration.restart || {};
+    toast(`已采纳：入 ${r.calibration.suggested.rate_in} / 出 ${r.calibration.suggested.rate_out}；${rs.message || ""}`,
+      rs.ok ? "ok" : "err");
+    await loadBurner();
+    setTimeout(loadBurner, 4000);
+  } catch (err) { toast(err.message, "err"); }
+}
 async function saveBurnerConfig() {
   const patch = {};
   document.querySelectorAll("#view-burner [id^='bf-']").forEach(el => {

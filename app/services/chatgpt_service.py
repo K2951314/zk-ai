@@ -123,37 +123,6 @@ _FIELD_ORDER = (
 )
 
 
-def validate(cfg: ChatGptConfig) -> list[str]:
-    """返回人类可读的错误列表（空 = 可以保存）。"""
-    errors: list[str] = []
-    if cfg.mode not in MODES:
-        errors.append(f"mode 只能是 {MODES} 之一")
-        return errors
-    if cfg.mode == "official":
-        if not cfg.official_model.strip():
-            errors.append("official 模式下 official_model 不能为空（要写回 config.toml 的官方模型名）")
-        return errors
-    if not cfg.model.strip():
-        errors.append("model 不能为空（别名 zk-auto 或具体模型名）")
-    if not _PROVIDER_NAME_RE.match(cfg.model_provider or ""):
-        errors.append("model_provider 只能是字母/数字/下划线/连字符（config.toml 表名）")
-    if not cfg.base_url or not _URL_RE.match(cfg.base_url):
-        errors.append("base_url 要以 http(s):// 开头，例如 http://127.0.0.1:8317/v1")
-    if cfg.wire_api not in WIRE_APIS:
-        errors.append(f"wire_api 只能是 {WIRE_APIS} 之一")
-    if not _ENV_NAME_RE.match(cfg.env_key or ""):
-        errors.append("env_key 要是合法的环境变量名，例如 ZKAI_API_TOKEN")
-    if cfg.model_reasoning_effort not in EFFORTS:
-        errors.append(f"思考强度只能是 {EFFORTS[1:]} 之一，或留空不写这一行")
-    if not cfg.provider_display.strip():
-        errors.append("provider_display（config.toml 里的显示名）不能为空")
-    # 换行会让写出的 TOML 直接非法——这些字段都是单行标量
-    for field in ("model", "official_model", "provider_display", "base_url"):
-        if "\n" in getattr(cfg, field) or "\r" in getattr(cfg, field):
-            errors.append(f"{field} 不能包含换行")
-    return errors
-
-
 def render_desired(cfg: ChatGptConfig) -> str:
     """序列化为带注释头的 YAML 文本（固定字段序）。"""
     values = asdict(cfg)
@@ -601,3 +570,86 @@ __all__ = [
     "validate",
     "write_user_env_var",
 ]
+
+# --------------------------------------------------------------------------- #
+# 部署形态：把「本机写入」与「公网调用」分开
+#
+# 桌面版 config.toml 那条路只在「网关与 ChatGPT app 在同一台机器」时才成立。
+# 部署到服务器之后它整段失效：127.0.0.1:8317 指向调用方自己的机器，那里什么
+# 都没有。所以面板需要知道自己处在哪种形态，据此决定渲染什么。
+#
+# 判据只有一条：``can_write_local`` = 网关进程能否看到 ~/.codex/config.toml
+# 的宿主。服务端无法直接探知（它只看到文件系统），所以由 Settings 的
+# ``is_remote_deploy`` 推导——配了公网入口或听了非回环地址即远程。
+# --------------------------------------------------------------------------- #
+def deploy_context(settings: Any) -> dict[str, Any]:
+    """控制台「客户端接入」面板需要的部署形态快照。
+
+    ``settings`` 是 pydantic-settings 的 ``Settings``（含 public_base_url /
+    client_base_url / is_remote_deploy 三个属性），不 import 它以保持本模块
+    只依赖 stdlib + pyyaml。
+    """
+    public_base = str(getattr(settings, "public_base_url_effective", "") or "")
+    is_remote = bool(getattr(settings, "is_remote_deploy", False))
+    return {
+        "is_remote": is_remote,
+        "exposure": str(getattr(settings, "exposure", "") or "")
+        or ("server" if is_remote else "local"),
+        "public_base_url": public_base,
+        "client_base_url": str(getattr(settings, "client_base_url", "") or ""),
+        "listen": f"{getattr(settings, 'host', '')}:{getattr(settings, 'port', '')}",
+        "api_token_set": bool(getattr(settings, "api_token", None)),
+        # 远程部署时写本机 config.toml 没有意义（那是服务器的文件系统，
+        # 不是打开控制台那台电脑的）。明确告诉界面：别渲染写入按钮。
+        "can_write_local": not is_remote,
+        "codex_config_path": str(config_toml_path()),
+    }
+
+
+def validate(desired: ChatGptConfig, settings: Any = None) -> list[str]:
+    """返回人类可读的错误列表（空 = 可以保存）。"""
+
+    errors: list[str] = []
+    if desired.mode not in MODES:
+        errors.append(f"mode 只能是 {MODES} 之一")
+        return errors
+    if desired.mode == "official":
+        if not desired.official_model.strip():
+            errors.append("official 模式下 official_model 不能为空（要写回 config.toml 的官方模型名）")
+        return errors
+    if not desired.model.strip():
+        errors.append("model 不能为空（别名 zk-auto 或具体模型名）")
+    if not _PROVIDER_NAME_RE.match(desired.model_provider or ""):
+        errors.append("model_provider 只能是字母/数字/下划线/连字符（config.toml 表名）")
+    if not desired.base_url or not _URL_RE.match(desired.base_url):
+        errors.append("base_url 要以 http(s):// 开头，例如 https://120.53.28.29/zkai/v1")
+    if desired.wire_api not in WIRE_APIS:
+        errors.append(f"wire_api 只能是 {WIRE_APIS} 之一")
+    if not _ENV_NAME_RE.match(desired.env_key or ""):
+        errors.append("env_key 要是合法的环境变量名，例如 ZKAI_API_TOKEN")
+    if desired.model_reasoning_effort not in EFFORTS:
+        errors.append(f"思考强度只能是 {EFFORTS[1:]} 之一，或留空不写这一行")
+    if not desired.provider_display.strip():
+        errors.append("provider_display（config.toml 里的显示名）不能为空")
+    for field in ("model", "official_model", "provider_display", "base_url"):
+        if "\n" in getattr(desired, field) or "\r" in getattr(desired, field):
+            errors.append(f"{field} 不能包含换行")
+    return errors
+
+
+def base_url_drift(desired: ChatGptConfig, settings: Any) -> list[str]:
+    """base_url 与网关自身公网入口不一致时的提醒（不阻塞保存）。
+
+    端口不匹配往往意味着「换过服务器但面板里还留着旧地址」——这种错误静默
+    且难查，所以要说出来；但它也可能是刻意为之（客户端走另一条链路），
+    所以是提醒而不是错误。
+    """
+    expected = str(getattr(settings, "client_base_url", "") or "").rstrip("/")
+    got = (desired.base_url or "").strip().rstrip("/")
+    if not expected or not got or expected == got:
+        return []
+    return [
+        f"base_url（{got}）与网关当前的客户端入口（{expected}）不一致——"
+        "换过服务器或改了 ZKAI_PUBLIC_BASE_URL 就会这样；先在「公网调用」"
+        "里确认该用哪个地址"
+    ]

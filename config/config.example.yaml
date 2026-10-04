@@ -172,3 +172,24 @@ security:
   # 为 false 时，providers.yaml 里直接写死的 value: 密钥会被拒绝加载。
   # 生产环境请保持 false；始终优先使用环境变量引用。
   allow_inline_secrets: true
+
+# ---------------------------------------------------------------------------
+# 部署形态：公网入口（客户端真正该用的地址）
+#
+# 留空 = 网关就在本机跑，控制台与文档里的 base_url 用 http://<host>:<port>。
+# 填了 = 部署在服务器上，控制台「客户端接入」面板会按公网地址生成各客户端配置。
+#
+# 为什么必须显式填：网关只听得到自己的 host:port，看不到反代加的前缀
+# （Caddy 的 /zkai）。用 host:port 猜出来的地址在公网上打不开，而运营者
+# 会把它抄给客户端——这种错误静默且难查。
+# ---------------------------------------------------------------------------
+deploy:
+  # 例：https://120.53.28.29/zkai   （注意不带 /v1，由网关自己补）
+  public_base_url: ${ZKAI_PUBLIC_BASE_URL:-}
+  # 形态标签：local / server。留空由「是否配了公网入口 + 听了哪个地址」自动判定。
+  exposure: ${ZKAI_EXPOSURE:-}
+  # 消耗器（scripts/burn_sensenova.py）的账本与日志目录。
+  # 留空 = 与 ZKAI_DATA_DIR 同目录（本机部署即如此）。
+  # 服务器上必须填成 burner unit 里 --state-file/--log-file 指向的那一层，
+  # 否则控制台「账号核对」会去读写另一个账本——详见 deploy-server/README.md。
+  burner_dir: ${ZKAI_BURNER_DIR:-}

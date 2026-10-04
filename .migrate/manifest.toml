@@ -77,6 +77,16 @@ sensitive = true
 note = "ChatGPT/Codex 桌面版期望配置（导入后由钩子写入 ~/.codex）"
 
 [[items]]
+id = "config-deploy-server"
+path = "deploy-server"
+class = "recommended"
+item_type = "dir"
+scope = "workspace"
+on_missing = "warn"
+sensitive = false
+note = "server 部署三件套：sync-server.sh（一键同步）、burner.yaml（保守档）、Caddyfile（公网入口）"
+
+[[items]]
 id = "config-burner"
 path = "config/burner.yaml"
 class = "recommended"
