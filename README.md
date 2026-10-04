@@ -657,8 +657,8 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 74 个文件约 19,800 行，`tests/` 35 个测试模块 870 个用例（约 15,755 行），
-`scripts/` 18 个文件约 4,724 行。**测试/产品代码 = 73%**。
+规模：`app/` 72 个文件约 22,496 行，`tests/` 35 个测试模块 870 个用例（约 15,787 行），
+`scripts/` 18 个文件约 4,724 行。**测试/产品代码 = 70%**。
 （这两个数字上一次更新是 2026-09-19 的 15,400/7,300/3,600——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
@@ -1175,6 +1175,14 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 | `POST` | `/admin/chatgpt/apply` | 按期望配置重写本机 `~/.codex/config.toml`（写前备份） |
 | `POST` | `/admin/chatgpt/sync-env` | 把网关令牌写进用户级环境变量（修桌面版「Missing environment variable」/ 令牌陈旧） |
 | `POST` | `/admin/chatgpt` | 热切换：把模型提到 `zk-auto` 链首（不重启桌面版） |
+| `GET` | `/admin/burner` | 消耗器现状快照（每账号窗口账 / 限流 / 停靠 / 费率） |
+| `PUT` | `/admin/burner/config` | 改 burner.yaml 的运营参数（并发 / 上下限 / only / 锚点），保存后重启 |
+| `GET` | `/admin/burner/reconcile` | 账号核对的当前快照（账本 + 配置，表单初值） |
+| `POST` | `/admin/burner/reconcile` | 核对预演（只读）：逐账号 diff，差值 >2000 且 >5% 标红 |
+| `PUT` | `/admin/burner/reconcile` | 核对落盘：burned/credits 写账本，only/anchors/week_anchors 写 burner.yaml |
+| `POST` | `/admin/burner/calibrate` | 按后台实扣积分反推费率（采纳后走 reconcile 通道落盘并重启） |
+| `GET` | `/admin/burner/log/stream` | SSE 实时日志（预热 40 行 + 字节偏移 tail，只输出完整行） |
+| `GET` | `/admin/burner/log/tail` | 日志尾部一次性文本（SSE 断了前端降级用的兜底） |
 
 **控制台的写操作都是「文件即真相」**：模型/别名/供应商/Key/限额的改动直接回写
 `config/*.yaml`（ruamel 保注释往返），删掉的条目重启/reload 不会复活；

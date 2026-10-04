@@ -468,6 +468,14 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner` 与 ExecStart 对齐。
   `/health` 的 `deploy.burner_state_path` / `burner_log_path` 把真实路径暴露出来，
   两边不一致时一眼能看到。回归测试 `tests/test_deploy_config.py::TestBurnerDir`。
+
+## 手机版控制台改造（2026-10-04）
+
+- **三件事同时成立，少一个就只是「桌面仪表盘被撞窄」**：底部四条挤指可及的 Tab（总览/模型/消耗器/更多，其余收进抽屉）、表格卡片化（`tbody td::before` + `data-label`，列名显示在值左侧）、长页面手风琴。前端只有一个断点：`@media (max-width: 860px)`，桌面端不变（`#mnav` 默认 `display: none`，只在媒体查询里打开）。
+- **固定定位的底部 Tab 会被子元素带飞**：实测到一个 392px 的 `modelscope → deepseek-ai/...` 把 `#mnav` 带到 869px，Tab 翻到屏幕外。所以三层都要：根节点 `overflow-x: hidden`、`td > * { min-width: 0 }`、长串 `word-break: break-all`（`break-word` 在没空格的链路上仍不断行）。
+- **账号核对表单的锚点列恒为空（2026-10-04 修）**：`GET /admin/burner/reconcile` 写死 `_fmt_hhmm(0.0)`，而它对 0 恒返回 `""`。运营者看到空表单会以为账号没配锚点，实际配了。现在走 `account_anchor_ts` / `account_week_anchor_ts`（按账号优先、回落全局、坏值不抛异常）。
+- **重启网关只能通过托盘**：gateway 是 `tray_launcher.py` spawn 的子进程，而 `RESTART_REQUEST` 邮箱**只对 burner 模式生效**（`_consume_restart_request` 只在 `self._mode == "burner"` 时调），且托盘不会自动拉起已退出的子进程。所以改代码后重启网关 = `python scripts/launch_hidden.py gateway`（它先杀同模式旧托盘，新托盘的 `_guard_port()` 再清旧 uvicorn）。看 `launch_hidden` 的 docstring 会以为它只防双弹托盘，其实它就是重启入口。
+
 ## Agent 工作方式（2026-09-23，防半途而废）
 - **本机 shell 是 PowerShell，here-string 会把中文和转义写坏**：写含中文的临时脚本时
   先用 Python 以 ASCII + `chr()` / `\uXXXX` 生成文件再执行，别直接把 here-string
@@ -476,7 +484,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   列为明确不满，动手写每句话前先确认这一点
 - 临时脚本统一放 `exports/_*.py`，跑完即删；不要把审计脚本留在工作区
 
-## 当前状态（2026-09-19）
+## 当前状态（持续整理：2026-10-04）
 
 - **`.env` 换行损坏只在换机后发生，共 1 次（2026-09-24）**：115 行全部
   `\r\r\n`，细节见上面「已知坑」里那条。**9-26 我曾把它写成「第二次复发」，
@@ -583,3 +591,4 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - ~~待办~~（已解决）：moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），
   `kimi-k3-moonshot` 部署不存在了。`kimi-k3-nvidia` 仍保留但靠自动隔离兜底
   （见上面「部署级自动隔离」那条）。
+
