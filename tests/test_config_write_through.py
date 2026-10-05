@@ -334,6 +334,29 @@ async def test_provider_models_notes_when_provider_disabled(write_api, config_di
     assert "禁用" in res.json()["note"]
 
 
+async def test_provider_models_falls_back_to_a_sibling_key(write_api, config_dir, monkeypatch) -> None:
+    """第一把 Key 缺值不该挡死目录探测——池里还有好 Key 就该用（2026-10-05 实测：
+    sensenova-01 是留空的网关独享位，_02~_09 都有值，整页却报「Key 没有实际值」）。"""
+    client, _, _ = write_api
+    (config_dir / "providers.yaml").write_text(
+        "providers:\n  - id: fake\n    type: openai\n    base_url: http://fake.test/v1\n"
+        "    credentials:\n"
+        "      - id: key-empty\n        env_var: NOT_A_REAL_VAR\n        priority: 100\n"
+        "      - id: key-good\n        env_var: A_REAL_VAR\n        priority: 90\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("NOT_A_REAL_VAR", raising=False)
+    monkeypatch.setenv("A_REAL_VAR", "sk-real")
+    reloaded = await client.post("/admin/config/reload", headers=ADMIN)
+    assert reloaded.status_code == 200, reloaded.text
+
+    res = await client.get("/admin/providers/fake/models", headers=ADMIN)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    # 不该再报「Key 没有实际值」——要么拿到目录，要么报探测失败（上游是假的）
+    assert "没有实际值" not in body.get("note", "")
+
+
 # --------------------------------------------------------------------------- #
 # Model marketplace: measured facts outrank the hand-written preset
 # --------------------------------------------------------------------------- #

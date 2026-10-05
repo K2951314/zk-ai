@@ -697,13 +697,24 @@ def test_every_modal_close_button_is_actually_bound() -> None:
     html = _html("index.html")
     js = _script(html)
     for btn in ("pv-close", "pf-cancel", "ak-cancel", "mm-cancel", "mk-close",
-                "am-cancel", "cg-cancel", "lm-close"):
+                "am-cancel", "cg-cancel", "cg-x", "lm-close"):
         assert f'id="{btn}"' in html, f"{btn} 按钮不在 HTML 里"
         assert f'$("#{btn}").onclick' in js, f"{btn} 没有 onclick 绑定（点了没反应）"
         assert f'$("{btn}").onclick' not in js, f"{btn} 的选择器少了 #"
 
     for btn in ("pf-save", "ak-save", "mm-save", "am-save"):
         assert f'$("#{btn}").onclick' in js, f"{btn} 保存按钮没有绑定"
+
+
+def test_chatgpt_modal_close_is_not_inside_the_local_zone() -> None:
+    """「客户端接入」的关闭路径不许再藏进 #cg-local-zone（2026-10-05 事故：
+    服务器部署会 display:none 整个本机区，唯一的「取消」按钮跟着消失，
+    面板上没有任何能关它的控件，只能刷新页面）。"""
+    html = _html("index.html")
+    zone = re.search(r'<div id="cg-local-zone">.*?(?=<hr class="sep">)', html, re.S)
+    assert zone, "找不到 #cg-local-zone 块"
+    assert 'id="cg-cancel"' not in zone.group(0), "关闭按钮又回到了本机区内部"
+    assert 'id="cg-x"' not in zone.group(0), "✕ 按钮不该放在本机区内部"
 
 
 # ---------------------------------------------------------------------------

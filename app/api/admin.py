@@ -367,15 +367,24 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
             "note": "该供应商还没有任何 Key——先去「凭据池 → ➕ 加 Key」",
         }
     if credential is not None and credential.secret_source == "missing":  # noqa: S105 - source label
-        return {
-            "object": "list",
-            "provider_id": provider_id,
-            "data": [],
-            "note": (
-                f"该供应商的 Key 没有实际值（{credential.secret_ref} 在 .env 里是空的）"
-                "——去「凭据池 → ➕ 加 Key」把值填上"
-            ),
-        }
+        # 第一把 Key 缺值不代表整池都缺（例如 sensenova-01 是留空的网关独享位，
+        # 而 _02~_09 都有值）——目录探测只需要任意一把有效 Key。
+        usable = next(
+            (c for c in container.pool.for_provider(provider_id)
+             if c.secret_source != "missing"),  # noqa: S105 - source label
+            None,
+        )
+        if usable is None:
+            return {
+                "object": "list",
+                "provider_id": provider_id,
+                "data": [],
+                "note": (
+                    f"该供应商的 Key 没有实际值（{credential.secret_ref} 在 .env 里是空的）"
+                    "——去「凭据池 → ➕ 加 Key」把值填上"
+                ),
+            }
+        credential = usable
     adapter = container.router.adapter(provider_id)
     try:
         catalogue = await adapter.model_catalogue(credential)

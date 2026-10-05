@@ -523,6 +523,8 @@
   .modal-mask h3 {
     font-size: var(--fs-15); margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
   }
+  /* 弹窗右上角关闭钮：标题是 flex 行，✕ 推到最右 */
+  .modal-mask h3 .modal-x { margin-left: auto; flex: none; }
   .modal-mask .modal-sub { font-size: var(--fs-12); color: var(--muted); margin-bottom: 14px; line-height: 1.7; }
   .formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 11px 14px; }
   .formgrid label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-12); color: var(--muted); }
@@ -739,6 +741,14 @@
       border: none; padding: 14px 14px 20px;
     }
     .modal-mask .card.wide { width: 100%; }
+    /* 弹窗标题吸顶：长表单滚动时 ✕ 关闭按钮始终可见 */
+    .modal-mask .card > h3 {
+      position: sticky; top: 0; z-index: 3;
+      background: var(--panel);
+      padding: 6px 0; margin-top: -6px;
+    }
+    /* 配置片段代码块：手机上别占 280px 满屏，长串允许断行不外溢 */
+    #cg-snippet { max-height: 180px; overflow-wrap: anywhere; word-break: break-all; white-space: pre-wrap; }
     #auth .card { width: 100%; max-width: none; }
     #toasts { left: 12px; right: 12px; align-items: stretch; }
     .toast { max-width: none; }
@@ -2841,7 +2851,7 @@ function cgDiff(v) {
 async function openChatGptModal() {
   const modal = $("#chatgpt-modal");
   modal.innerHTML = `<div class="card wide">
-    <h3>🌐 客户端接入</h3>
+    <h3>🌐 客户端接入 <button class="mini modal-x" id="cg-x" title="关闭">✕</button></h3>
     <div class="modal-sub">网关现在跑在服务器上：把 <b>base_url</b> 和 <b>令牌</b> 交给客户端就能调。
       本机 <code>~/.codex/config.toml</code> 的改写只在网关就在这台机器上跑时才可用。</div>
     <div id="cg-loading" class="small muted">读取中…</div>
@@ -2919,7 +2929,6 @@ async function openChatGptModal() {
           <button id="cg-btn-reapply" style="display:none">↻ 重新写入本机</button>
           <button id="cg-btn-syncenv" style="display:none" title="把网关 .env 里的令牌写进 Windows 用户级环境变量（桌面版从 explorer 启动只认这个）">🔧 同步令牌到用户环境变量</button>
           <span class="grow"></span>
-          <button id="cg-cancel">取消</button>
         </div>
       </div>
 
@@ -2937,9 +2946,14 @@ async function openChatGptModal() {
         <span class="grow"></span>
         <span class="small muted" id="cg-chain"></span>
       </div>
+      <div class="modal-actions" style="margin-top:14px">
+        <span class="grow"></span>
+        <button id="cg-cancel">关闭</button>
+      </div>
     </div>
   </div>`;
   openModal("#chatgpt-modal");
+  $("#cg-x").onclick = () => closeModal("#chatgpt-modal");
   $("#cg-cancel").onclick = () => closeModal("#chatgpt-modal");
   $("#cg-mode").onchange = cgToggleMode;
   $("#cg-btn-preview").onclick = cgPreview;
@@ -3147,7 +3161,17 @@ $("#btn-theme").onclick = () =>
 applyTheme(localStorage.getItem("zkai_theme") || "light");
 document.querySelectorAll("#tabs button[data-view]").forEach(b => b.onclick = () => switchView(b.dataset.view));
 mnavBuild();
-document.addEventListener("keydown", e => { if (e.key === "Escape") $("#drawer").classList.remove("open"); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  $("#drawer").classList.remove("open");
+  const open = MODAL_IDS.map(id => $(id)).find(el => el && el.classList.contains("show"));
+  if (open) open.classList.remove("show");
+});
+/* 点遮罩空白处关闭弹窗（点在卡片内部不触发） */
+MODAL_IDS.forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("click", e => { if (e.target === el) el.classList.remove("show"); });
+});
 // 窗口拉宽回桌面时把卡片标签拉回表格（避免留下永久的 data-label）
 let _mResize = null;
 window.addEventListener("resize", () => {
@@ -3212,6 +3236,19 @@ const BURNER_NUM = new Set(["concurrency","per_account_start","per_account_max",
   "summary_interval","max_seconds"]);
 const BURNER_WIDE = new Set(["only","anchors","week_anchors","account_groups"]);
 
+/* 配置表单分组（h5 小标题；别用 h4.sec——手机手风琴按它切片，会再切一刀）。
+   新增键没列入任何组时落到最后的「其它」。 */
+const BURNER_GROUPS = [
+  ["烧什么", ["model", "max_tokens", "filler_chars"]],
+  ["并发与限流", ["concurrency", "per_account_start", "per_account_max",
+    "starve_after", "starve_grace", "rate_park_after", "rate_park_seconds",
+    "cooldown_base", "cooldown_max"]],
+  ["预算与费率", ["rate_in", "rate_out", "safety_margin", "window_credits",
+    "weekly_credits", "pool_total_credits", "quota_park_hours"]],
+  ["账号与窗口", ["only", "account_groups", "anchors", "week_anchors", "week_anchor"]],
+  ["其它", ["connect_timeout", "read_timeout", "summary_interval", "max_seconds"]],
+];
+
 function burnerField(key, value) {
   const label = BURNER_LABELS[key] || key;
   if (BURNER_WIDE.has(key)) {
@@ -3222,6 +3259,31 @@ function burnerField(key, value) {
   const step = BURNER_NUM.has(key) ? "any" : null;
   return `<label class="field"><span>${esc(label)}</span>
     <input id="bf-${key}" type="${type}" ${step ? `step="${step}"` : ""} value="${esc(value ?? "")}"></label>`;
+}
+
+const BURNER_GROUPS = [
+  ["烧什么", ["model", "max_tokens", "filler_chars", "only", "account_groups"]],
+  ["烧多快", ["concurrency", "per_account_start", "per_account_max",
+    "starve_after", "starve_grace", "rate_park_after", "rate_park_seconds",
+    "cooldown_base", "cooldown_max", "connect_timeout", "read_timeout"]],
+  ["什么时候停", ["rate_in", "rate_out", "safety_margin", "window_credits",
+    "weekly_credits", "pool_total_credits", "quota_park_hours",
+    "anchors", "week_anchors", "week_anchor"]],
+  ["其他", ["summary_interval", "max_seconds"]],
+];
+function burnerFields(keys, cfg) {
+  const seen = new Set();
+  const parts = [];
+  for (const [title, members] of BURNER_GROUPS) {
+    const cells = members.filter(k => keys.includes(k));
+    if (!cells.length) continue;
+    cells.forEach(k => seen.add(k));
+    parts.push(`<h5 style="grid-column:1/-1;margin:14px 0 2px;font-size:var(--fs-12);color:var(--muted)">${esc(title)}</h5>`
+      + cells.map(k => burnerField(k, cfg[k])).join(""));
+  }
+  const rest = keys.filter(k => !seen.has(k));
+  if (rest.length) parts.push(rest.map(k => burnerField(k, cfg[k])).join(""));
+  return parts.join("");
 }
 
 const burnLog = { es: null, follow: true, retries: 0, timer: null };
@@ -3245,22 +3307,22 @@ async function loadBurner() {
       : a.anchored_5h ? `<span class="tag is-ok">锚点</span>`
       : `<span class="tag">滚动</span>`;
     return `<tr>
-      <td><b>${esc(a.name)}</b><div class="muted small">${tag}</div></td>
+      <td><b>${esc(a.name)}</b><div class="muted small">${tag}</div>
+        <div class="muted small">边界 ${b5} · 周 ${bW}</div></td>
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pct5 * 1.2)}px"><i></i></div>
         <span class="small">${num(Math.round(a.burned_5h))}/${num(Math.round(a.cap_5h))}</span></div>
         <div class="muted small">余 ${num(Math.round(a.left_5h))} ≈ ${num(a.requests_left_5h)} 条</div></td>
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pctW * 1.2)}px"><i></i></div>
         <span class="small">${num(Math.round(a.burned_week))}/${num(Math.round(a.cap_week))}</span></div>
         <div class="muted small">余 ${num(Math.round(a.left_week))}</div></td>
-      <td class="small">${b5}<div class="muted">周 ${bW}</div></td>
       <td class="small">目标 ${num(a.target)}<div class="muted">成功 ${num(a.ok)}
         · <span title="与同实例其他账号抢每分钟配额，窗口滑过就恢复">限流 ${num(a.freq_hits ?? 0)}</span>
         · <span title="专属池+通用池都扣完了，停靠到周刷新">额度用尽 ${num(a.quota_hits ?? 0)}</span>
         ${a.starved ? '<span class="tag is-warn">已救济</span>' : ''}
-        ${a.rate_parked ? `<span class="tag is-err" title="连续 ${a.rate_streak} 次 429，停手到 ${new Date(a.rate_park_until * 1000).toLocaleString('zh-CN', {hour12:false})}；不是号坏了，到期自动重试">限流停靠</span>` : ''}</div></td>
-      <td class="small">${fmtK(a.tokens_in)} / ${fmtK(a.tokens_out)}</td></tr>`;
+        ${a.rate_parked ? `<span class="tag is-err" title="连续 ${a.rate_streak} 次 429，停手到 ${new Date(a.rate_park_until * 1000).toLocaleString('zh-CN', {hour12:false})}；不是号坏了，到期自动重试">限流停靠</span>` : ''}</div>
+        <div class="muted small">tokens ${fmtK(a.tokens_in)} / ${fmtK(a.tokens_out)}</div></td></tr>`;
   }).join("");
-  const fields = (d.form_fields || []).map(k => burnerField(k, (d.config || {})[k])).join("");
+  const fields = burnerFields(d.form_fields || [], d.config || {});
   $("#view-burner").innerHTML = `
     <div class="view-head">
       <h2>积分消耗器</h2>
@@ -3278,17 +3340,23 @@ async function loadBurner() {
             d.flash_lite_ok ? "ok" : "err")}
     </div>
     <h4 class="sec">每账号窗口账</h4>
-    <div class="note">商汤把两种完全不同的情况都返回 <code>429</code>，下表已拆开：
-      <b>限流</b>＝<code>tpm exhausted</code>，跟同实例其他账号抢每分钟配额，窗口滑过去就自己恢复，
-      <b>不是号坏了</b>；<b>额度用尽</b>＝<code>entitlement exhausted</code>，专属池+通用池都扣完了，
-      会停靠到周刷新。看到某个号「一直限流」，是它在饿——网关会给饿超过 5 分钟的号临时借一点并发
-      （下表显示「已救济」），成功一次就收回。还有第三种「<b>限流停靠</b>」：连续撞 limit
-       满阈值后账号主动停手一段时间再试，省下每次冷却期满去撞一次的纯空转——
-       <b>不是号坏了</b>，到点自动重试。</div>
+    <div class="row-flex" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      <span class="tag">限流＝挤不进每分钟配额，窗口滑过自恢复</span>
+      <span class="tag is-warn">额度用尽＝积分烧完，停靠到周刷新</span>
+      <span class="tag is-err">限流停靠＝连续 429 主动停手，到点自动重试</span>
+      <details class="small" style="flex:1 1 100%"><summary style="cursor:pointer" class="muted">这三种状态详细说明</summary>
+        <div class="note" style="margin-top:6px">商汤把两种完全不同的情况都返回 <code>429</code>：
+          <b>限流</b>＝<code>tpm exhausted</code>，跟同实例其他账号抢每分钟配额，<b>不是号坏了</b>；
+          <b>额度用尽</b>＝<code>entitlement exhausted</code>，专属池+通用池都扣完了。
+          看到某个号「一直限流」，是它在饿——网关会给饿超过 5 分钟的号临时借一点并发
+          （显示「已救济」），成功一次就收回。「<b>限流停靠</b>」是连续撞 limit 满阈值后主动停手，
+          省下每次冷却期满去撞一次的纯空转。</div>
+      </details>
+    </div>
     <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 窗口</th><th>本周</th>
-      <th>下一边界</th><th>并发 / 结果</th><th>Tokens 入/出</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
-    <h4 class="sec">账号核对（拿商汤后台的真实消耗校正账本）</h4>
+      <th>并发 / 结果</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="4" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
+    <h4 class="sec">账本校准（账号核对 + 费率校准）</h4>
     <div class="note">账本的「已烧」是按费率<b>估算</b>的，商汤后台的「实扣」才是真的。
       现在填后台看到的数，保存后写回账本并按新口径继续烧。<b>改 only / anchors / week_anchors 会触发重启。</b></div>
     <div id="rec-loading" class="small muted">读取账本…</div>
@@ -3306,19 +3374,19 @@ async function loadBurner() {
         <button class="primary" id="rec-btn-apply">保存并重启</button>
         <span class="muted small" id="rec-hint"></span>
       </div>
-    </div>
-
-    <h4 class="sec">费率校准</h4>
-    <div class="note">把后台某段时段的实扣积分填进来，按账本同期 token 反推费率。
-      <b>时段必须对齐</b>：账本记的是「累计」，实扣也必须是同样范围的累计，否则算出来会偏高或偏低。</div>
-    <div class="formgrid">
-      <label>实扣积分（累计）<input id="cal-actual" type="number" step="any" min="0" placeholder="如 120000"></label>
-      <label>只算这个账号（可空）<input id="cal-account" placeholder="SENSENOVA_API_KEY_02"></label>
-    </div>
-    <div class="modal-actions">
-      <button id="cal-btn">算出建议费率</button>
-      <button class="primary" id="cal-adopt" style="display:none">采纳并重启</button>
-      <span class="muted small" id="cal-out"></span>
+      <details style="margin-top:12px"><summary class="small" style="cursor:pointer"><b>费率校准</b>（按实扣反推 rate_in / rate_out）</summary>
+        <div class="note" style="margin-top:8px">把后台某段时段的实扣积分填进来，按账本同期 token 反推费率。
+          <b>时段必须对齐</b>：账本记的是「累计」，实扣也必须是同样范围的累计，否则算出来会偏高或偏低。</div>
+        <div class="formgrid">
+          <label>实扣积分（累计）<input id="cal-actual" type="number" step="any" min="0" placeholder="如 120000"></label>
+          <label>只算这个账号（可空）<input id="cal-account" placeholder="SENSENOVA_API_KEY_02"></label>
+        </div>
+        <div class="modal-actions">
+          <button id="cal-btn">算出建议费率</button>
+          <button class="primary" id="cal-adopt" style="display:none">采纳并重启</button>
+          <span class="muted small" id="cal-out"></span>
+        </div>
+      </details>
     </div>
     <h4 class="sec">实时日志</h4>
     <div class="note">消耗器每分钟落一条汇总；异常与限流会立刻出现。
