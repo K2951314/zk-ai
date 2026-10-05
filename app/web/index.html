@@ -652,6 +652,8 @@
     .grid.kpis, .cfg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .formgrid { grid-template-columns: minmax(0, 1fr); }
     .grid.kpis .kpi, .cfg-grid .field { min-width: 0; }
+    /* 手机 KPI 只留前两个最关键的（账号数、目标池），其余次要指标折叠 */
+    .grid.kpis .kpi:nth-child(n+3) { display: none; }
     .kpi .k-value { font-size: var(--fs-15); overflow-wrap: anywhere; }
     .kpi .k-sub { font-size: var(--fs-11); overflow-wrap: anywhere; }
 
@@ -3321,13 +3323,13 @@ async function loadBurner() {
     </div>
     ${warn ? `<div class="attention">${warn}</div>` : ""}
     <div class="grid kpis">
-      ${kpi("单条请求", cost + " 积分", "按当前填充量与输出上限估算")}
-      ${kpi("费率", `入${num(L.rate_in)} / 出${num(L.rate_out)}`, "积分每百万 token；账本口径")}
-      ${kpi("安全系数", L.safety_margin, "熔断线 = 官方上限 × 该系数")}
       ${kpi("账号数", num((d.accounts || []).length), `账本更新于 ${esc(L.saved_at || "—")}`)}
       ${kpi("目标池", d.flash_lite_ok ? "Flash-Lite 专属池" : "⚠ 非 Flash-Lite",
             d.flash_lite_ok ? "只有它扣专属池、能折算回充" : "会直接扣 K3 的通用池积分",
             d.flash_lite_ok ? "ok" : "err")}
+      ${kpi("单条请求", cost + " 积分", "按当前填充量与输出上限估算")}
+      ${kpi("费率", `入${num(L.rate_in)} / 出${num(L.rate_out)}`, "积分每百万 token；账本口径")}
+      ${kpi("安全系数", L.safety_margin, "熔断线 = 官方上限 × 该系数")}
     </div>
     <h4 class="sec">每账号窗口账</h4>
     <div class="row-flex" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
