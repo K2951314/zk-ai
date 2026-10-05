@@ -238,6 +238,26 @@ def test_burner_view_has_log_and_reconcile_cards() -> None:
     assert "/admin/burner/calibrate" in html
 
 
+def test_console_js_has_no_duplicate_top_level_declarations() -> None:
+    """同一顶层 const/let/function 不许声明两次——重复声明会让整段脚本中止。
+
+    2026-10-05 真机翻车：我给消耗器页加 BURNER_GROUPS 分组时漏看了文件里
+    已有同名声明，`Identifier 'BURNER_GROUPS' has already been declared`
+    使整个 <script> 中止，控制台连接状态永远停在「未连接」、登录框也永不弹出。
+    **所有现役测试都没抓到它**——中文扫描只看文案，DOM 契约只看 id，
+    只有浏览器真跑 JS 才暴露。所以在这里用「顶层声明唯一性」静态兜住。
+    """
+    js = _script(_html("index.html"))
+    seen: dict[str, str] = {}
+    for decl in re.finditer(r"^(?:const|let|function)\s+([A-Za-z_$][\w$]*)", js, re.M):
+        name = decl.group(1)
+        assert name not in seen, (
+            f"顶层声明 {name} 重复了（第 {decl.start()} 与 {seen[name]} 字节处）"
+            "——重复声明会让整个脚本中止，页面静默失效"
+        )
+        seen[name] = str(decl.start())
+
+
 def test_mobile_layout_has_a_real_information_architecture() -> None:
     """手机上不能只是「桌面仪表盘被撞窄」。
 

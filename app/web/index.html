@@ -3261,16 +3261,6 @@ function burnerField(key, value) {
     <input id="bf-${key}" type="${type}" ${step ? `step="${step}"` : ""} value="${esc(value ?? "")}"></label>`;
 }
 
-const BURNER_GROUPS = [
-  ["烧什么", ["model", "max_tokens", "filler_chars", "only", "account_groups"]],
-  ["烧多快", ["concurrency", "per_account_start", "per_account_max",
-    "starve_after", "starve_grace", "rate_park_after", "rate_park_seconds",
-    "cooldown_base", "cooldown_max", "connect_timeout", "read_timeout"]],
-  ["什么时候停", ["rate_in", "rate_out", "safety_margin", "window_credits",
-    "weekly_credits", "pool_total_credits", "quota_park_hours",
-    "anchors", "week_anchors", "week_anchor"]],
-  ["其他", ["summary_interval", "max_seconds"]],
-];
 function burnerFields(keys, cfg) {
   const seen = new Set();
   const parts = [];
