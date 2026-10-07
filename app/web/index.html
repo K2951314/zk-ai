@@ -2687,7 +2687,15 @@ function cgTokenName() {
 }
 
 function cgTokenValueHint() {
+  // 占位提示：不把令牌写进页面 HTML（任何能打开 /ui 的人都能看源码）。
+  // 复制时从当前会话的管理令牌取真值（见 cgTokenValue）。
   return "<与服务器 /opt/zkai/.env 里的 ZKAI_API_TOKEN 同值>";
+}
+
+function cgTokenValue() {
+  // 当前会话的管理令牌就是 ZKAI_API_TOKEN 同值——登录时运营者已输入过，
+  // 这里直接复用，不用去服务器 .env 里读。
+  return state.token || "";
 }
 
 function cgModel() {
@@ -2965,8 +2973,11 @@ async function openChatGptModal() {
   $("#cg-hot-save").onclick = cgHotSwap;
   $("#cg-client").onchange = cgRenderSnippet;
   $("#cg-btn-copyurl").onclick = () => cgCopy(cgPublicUrl(), "base_url 已复制");
-  $("#cg-btn-copytoken").onclick = () =>
-    cgCopy(`${cgTokenName()}="${cgTokenValueHint()}"`, "取值命令已复制");
+  $("#cg-btn-copytoken").onclick = () => {
+    const tok = cgTokenValue();
+    if (!tok) { toast("当前会话没有管理令牌——先点右上角 🔑 登录", "err"); return; }
+    cgCopy(`${cgTokenName()}="${tok}"`, "令牌已复制（当前会话值）");
+  };
   $("#cg-btn-copysnip").onclick = () => cgCopy($("#cg-snippet").textContent, "配置片段已复制");
   try {
     const r = await api("/admin/chatgpt");
@@ -3004,7 +3015,7 @@ function cgFill(r) {
   $("#cg-pub-base").value = cgPublicUrl();
   $("#cg-pub-token").value = `${cgTokenName()}="${cgTokenValueHint()}"`;
   $("#cg-token-note").textContent = dep.api_token_set
-    ? "网关已设 ZKAI_API_TOKEN，连接时用它；空 = 网关不校验（仅适合回环监听）。"
+    ? "网关已设 ZKAI_API_TOKEN。点「📋 复制取值命令」复制的是当前会话的管理令牌（同值），可直接粘贴给客户端。"
     : "网关未设 ZKAI_API_TOKEN，当前不校验客户端令牌（仅适合回环监听）。";
 
   // ---- 本机区：远程部署时整块隐藏 ----
