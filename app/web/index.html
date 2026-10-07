@@ -3348,6 +3348,21 @@ async function loadBurner() {
     <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 窗口</th><th>本周</th>
       <th>并发 / 结果</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="4" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
+    <h4 class="sec">实时日志</h4>
+    <div class="note">消耗器每分钟落一条汇总；异常与限流会立刻出现。
+      断线会自动重连（指数退避），你也可以暂停滚动去翻历史。</div>
+    <div class="card" style="padding:0">
+      <div class="row-flex" style="gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);align-items:center;flex-wrap:wrap">
+        <span class="dot off" id="bl-dot"></span>
+        <span class="small" id="bl-state">未连接</span>
+        <span class="grow"></span>
+        <button class="mini" id="bl-follow" title="关掉后新日志不会自动滚到底">⏸ 暂停滚动</button>
+        <button class="mini" id="bl-copy">📋 复制</button>
+        <button class="mini" id="bl-clear">🧹 清屏</button>
+      </div>
+      <pre id="bl-log" style="margin:0;padding:12px;height:280px;overflow:auto;font-size:var(--fs-12);line-height:1.55;white-space:pre-wrap;word-break:break-all"></pre>
+    </div>
+
     <h4 class="sec">账本校准（账号核对 + 费率校准）</h4>
     <div class="note">账本的「已烧」是按费率<b>估算</b>的，商汤后台的「实扣」才是真的。
       现在填后台看到的数，保存后写回账本并按新口径继续烧。<b>改 only / anchors / week_anchors 会触发重启。</b></div>
@@ -3380,27 +3395,18 @@ async function loadBurner() {
         </div>
       </details>
     </div>
-    <h4 class="sec">实时日志</h4>
-    <div class="note">消耗器每分钟落一条汇总；异常与限流会立刻出现。
-      断线会自动重连（指数退避），你也可以暂停滚动去翻历史。</div>
-    <div class="card" style="padding:0">
-      <div class="row-flex" style="gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);align-items:center;flex-wrap:wrap">
-        <span class="dot off" id="bl-dot"></span>
-        <span class="small" id="bl-state">未连接</span>
-        <span class="grow"></span>
-        <button class="mini" id="bl-follow" title="关掉后新日志不会自动滚到底">⏸ 暂停滚动</button>
-        <button class="mini" id="bl-copy">📋 复制</button>
-        <button class="mini" id="bl-clear">🧹 清屏</button>
-      </div>
-      <pre id="bl-log" style="margin:0;padding:12px;height:280px;overflow:auto;font-size:var(--fs-12);line-height:1.55;white-space:pre-wrap;word-break:break-all"></pre>
-    </div>
 
-    <h4 class="sec">配置</h4>
-    <div class="card"><div class="cfg-grid">${fields}</div>
+    <details class="card" style="margin-top:14px">
+      <summary style="cursor:pointer;font-weight:600;padding:2px 0">⚙ 高级配置（27 项，默认收起）</summary>
+      <div class="note" style="margin-top:10px">改完点保存会写入 <code>config/burner.yaml</code> 并重启消耗器生效。
+        热更键（并发 / 费率 / 预算 / 锚点）立即生效，重启键（model / only / account_groups / 窗口锚点）要重启才生效——
+        页面里改这两者走的是「账号核对」流程，不是这里。</div>
+      <div class="cfg-grid" style="margin-top:12px">${fields}</div>
       <div class="modal-actions">
         <button id="bf-save" class="primary">保存并重启</button>
         <span class="muted small">写入 config/burner.yaml（保留注释），并让托盘重启消耗器使配置生效（约 3 秒）</span>
-      </div></div>`;
+      </div>
+    </details>`;
   $("#bf-save").onclick = saveBurnerConfig;
   $("#cal-btn").onclick = calRun;
   // 日志 SSE 只连一次：loadBurner 会被自动刷新反复调用，每次重连会把
