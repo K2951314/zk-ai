@@ -398,12 +398,74 @@ class TestAccountAnchorResolution:
         per = bs.account_week_anchor_ts(
             {"week_anchors": "2=Wed 18:10"}, "SENSENOVA_API_KEY_02", 0.0
         )
-        assert bs._fmt_weekday_hhmm(per) == "Wed 18:10"
+        # 显示格式 2026-10-07 改为 MM-DD HH:MM（照抄控制台「下次重置时间」，
+        # 不再要求运营者自己推星期几）。所以只断言「时刻对了」。
+        assert per > 0
+        lt = time.localtime(per)
+        assert (lt.tm_hour, lt.tm_min) == (18, 10)
+        assert lt.tm_wday == 2  # Wed
         glob = bs.account_week_anchor_ts(
             {"week_anchor": "Mon 00:00"}, "SENSENOVA_API_KEY_02", 0.0
         )
-        assert bs._fmt_weekday_hhmm(glob) == "Mon 00:00"
+        assert glob > 0
+        assert time.localtime(glob).tm_wday == 0  # Mon
+        assert time.localtime(glob).tm_hour == 0
 
     def test_broken_week_anchor_spec_does_not_raise(self) -> None:
         bad = {"week_anchors": "2=someday"}
         assert bs.account_week_anchor_ts(bad, "SENSENOVA_API_KEY_02", 0.0) == 0.0
+
+
+class TestWeekAnchorDateFormat:
+    """周锚点的日期格式（2026-10-07 加）：运营者照抄商汤控制台的「下次重置时间」。
+
+    旧格式 `Wed 18:10` 要求运营者自己从日期推星期几——用户明确反馈
+    「看不懂也不知道怎么调整」。新格式直接填 `10-09 18:10`。
+    """
+
+    def test_date_format_is_accepted(self) -> None:
+        ts = bs._parse_weekday_hhmm("10-09 18:10")
+        assert ts > 0
+        lt = time.localtime(ts)
+        assert (lt.tm_mon, lt.tm_mday) == (10, 9)
+        assert (lt.tm_hour, lt.tm_min) == (18, 10)
+
+    def test_date_without_time_midnight(self) -> None:
+        ts = bs._parse_weekday_hhmm("10-05")
+        assert ts > 0
+        lt = time.localtime(ts)
+        assert (lt.tm_hour, lt.tm_min) == (0, 0)
+
+    def test_date_always_resolves_to_the_future(self) -> None:
+        """填过去的日期 = 「那次重置已经过去了」，此时要推到下一个未来边界。
+
+        不是学术洁癖：向下取会把运营者填的日期当成上一轮窗口的延续，
+        凭空少算一个 7 天窗口的额度——那是真金白银。
+        """
+        now = time.time()
+        past = f"01-{time.localtime(now).tm_mday:02d} 12:00"
+        ts = bs._parse_weekday_hhmm(past)
+        assert ts > now, "过去的日期必须推到未来边界"
+
+    def test_weekday_format_still_works(self) -> None:
+        """旧格式不能因为加了新格式而失效（配置文件里有历史遗留）。"""
+        ts = bs._parse_weekday_hhmm("Wed 18:10")
+        assert ts > 0
+        assert time.localtime(ts).tm_hour == 18
+
+    def test_bad_date_format_raises_in_localized_text(self) -> None:
+        with pytest.raises(ValueError, match="周锚点"):
+            bs._parse_weekday_hhmm("someday")
+        with pytest.raises(ValueError, match="周锚点"):
+            bs._parse_weekday_hhmm("13-45 99:99")
+
+    def test_form_shows_a_date_not_a_weekday(self) -> None:
+        """表单要显示日期——运营者对着控制台照抄，星期几对不上。"""
+        shown = bs._fmt_weekday_hhmm(bs._parse_weekday_hhmm("10-09 18:10"))
+        assert shown.count("-") == 1
+        assert shown.startswith("10-09")
+
+    def test_console_hint_teaches_the_new_format(self) -> None:
+        html = (Path(__file__).resolve().parent.parent
+                / "app" / "web" / "index.html").read_text(encoding="utf-8")
+        assert "MM-DD HH:MM" in html, "输入框提示必须教新格式"

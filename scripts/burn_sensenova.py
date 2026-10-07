@@ -64,6 +64,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import sys
@@ -412,13 +413,43 @@ WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def parse_week_anchor(spec: str) -> float:
-    """解析 --week-anchor "Mon 00:00"，返回当前 7 天固定窗口的起点 epoch。
+    """解析周锚点，返回「下一个」7 天固定窗口的起点 epoch。
 
-    取「最近一个（含今天）该星期几的 HH:MM」；若该时刻在今天还没到，
-    则再往前推一周。确定性只依赖本地时钟，无需持久化。"""
-    m = re.fullmatch(r"([A-Za-z]{3})\s*(\d{1,2}):(\d{2})", spec.strip())
+    支持两种写法：
+      - "10-09 18:10" / "10-09"：月-日 + 可选 HH:MM（推荐）。直接照抄商汤
+        控制台的「下次重置时间」那一列，不用自己从日期推星期几。
+      - "Wed 18:10"：星期几缩写 + HH:MM（旧格式，兼容历史配置）。
+    新格式语义 = 运营者填的就是那次重置本身，之后每 7 天滚动一次；
+    填已过去的日期会向上取到下一个未来边界（向下取会凭空少算一个
+    7 天窗口的额度）。确定性只依赖本地时钟，无需持久化。"""
+    spec = spec.strip()
+    # 新格式：MM-DD [HH:MM]——照抄控制台「下次重置时间」，它就是锚点本身。
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", spec)
+    if m:
+        mon, day = int(m.group(1)), int(m.group(2))
+        hh = int(m.group(3)) if m.group(3) else 0
+        mm = int(m.group(4)) if m.group(4) else 0
+        lt = time.localtime()
+        if not 1 <= mon <= 12 or not 1 <= day <= 31 or hh > 23 or mm > 59:
+            raise ValueError(f"日期或时刻 {spec!r} 超出范围（月 1-12、日 1-31、时 0-23、分 0-59）")
+        try:
+            ts = time.mktime((lt.tm_year, mon, day, hh, mm, 0, 0, 0, -1))
+        except (OverflowError, ValueError):
+            raise ValueError(f"日期 {spec!r} 非法（这个月没有这一天？）") from None
+        # time.mktime 对越界值会静默溢出到相邻年/月（13-45 -> 次年 1 月），
+        # 所以回读校验月日，不一致就是运营者填错了。
+        back = time.localtime(ts)
+        if (back.tm_mon, back.tm_mday, back.tm_hour, back.tm_min) != (mon, day, hh, mm):
+            raise ValueError(f"日期 {spec!r} 不是真实存在的时刻")
+        # 该日期起每 7 天一个边界。控制台给的是「下次重置」= 未来时刻，
+        # 所以一律向上取：过去/正好现在的都推进到下一个未来边界。
+        # （向下取会把运营者填的 10-09 当成「10-02 那一轮的延续」，
+        #   凭空少算一个窗口的额度——那是真金白银。）
+        return ts + math.ceil((time.time() - ts) / WIN_WEEK) * WIN_WEEK
+    # 旧格式：Wed 18:10
+    m = re.fullmatch(r"([A-Za-z]{3})\s*(\d{1,2}):(\d{2})", spec)
     if not m or m.group(1).lower() not in WEEKDAY_NAMES:
-        raise ValueError('应为 "Mon 00:00" 形式（星期几缩写 + HH:MM）')
+        raise ValueError('应为 "10-09 18:10"（月-日 时刻）或 "Wed 18:10"（星期几 时刻）')
     wd = WEEKDAY_NAMES.index(m.group(1).lower())
     hh, mm = int(m.group(2)), int(m.group(3))
     if hh > 23 or mm > 59:
@@ -1630,9 +1661,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "账号每周白丢约 33 万回赠积分。0.9 = 熔断线 5.4万/54万，仍留 "
                         "10%% 缓冲带。若重新校准后发现费率又偏了，先改费率、再考虑降它")
     opt("--week-anchor", default="Mon 00:00",
-                   help="周固定窗口的起点（星期几缩写 + HH:MM，本地时区），如 "
-                        '"Mon 00:00"、"Wed 09:30"。自该时刻起累计周烧量，到线停靠'
-                        "至下周同一时刻。可对齐控制台「专属池」的重置时刻")
+                   help="周固定窗口的起点（本地时区）。推荐填月-日 + 时刻，直接照抄"
+                        "控制台的「周刷新」那一列，如 10-13 00:00；也兼容星期几"
+                        "缩写 + HH:MM（Mon 00:00、Wed 09:30）。"
+                        "自该时刻起每 7 天一个边界，累计周烧量，到线停靠到下一边界")
     opt("--pool-total-credits", type=float, default=0,
                    help="每账号累计烧量绝对上限（按持久化账本口径，到线永久停靠，"
                         "防赠送池过期后继续空转烧通用池）。0 = 关闭")
@@ -1651,9 +1683,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--account-groups", default="SENSENOVA_API_KEY,SENSENOVA_API_KEY_02",
                    help="同账号 Key 分组（分号分组、逗号分 Key）；组内共享一份预算与并发")
     opt("--week-anchors", default="",
-                   help="每账号的周窗口重置时刻（控制台显示的「周刷新」，本地时间）。"
-                        '格式：--week-anchors "2=Wed 18:10;10=Thu 09:36"（数字=Key '
-                        "序号，同 --anchors；星期几缩写 + HH:MM）。各账号周刷新时刻"
+                   help="每账号的周窗口重置时刻（对照商汤控制台「周刷新」那一列填）。"
+                        '格式：--week-anchors "2=10-15 18:10;10=10-09 09:36"'
+                        "（数字=Key 序号，同 --anchors；推荐 月-日 时刻，"
+                        '也兼容 "Wed 18:10"）。各账号周刷新时刻'
                         "不同（实测=创建时刻+N×7天），全局 --week-anchor 单值必然错配；"
                         "不填的账号回落到全局 --week-anchor")
     opt("--anchors", default="",

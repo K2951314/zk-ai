@@ -499,10 +499,13 @@ def _fmt_hhmm(ts: float) -> str:
 
 
 def _fmt_weekday_hhmm(ts: float) -> str:
+    """epoch -> 周锚点表单的显示值。默认给 MM-DD HH:MM（2026-10-07 改）：
+    运营者看到的是商汤控制台「下次重置时间」那一列，照抄即可；
+    星期几得自己推，是「看不懂怎么填」的直接原因。"""
     if not ts:
         return ""
     lt = time.localtime(ts)
-    return f"{_WEEKDAYS[lt.tm_wday]} {lt.tm_hour:02d}:{lt.tm_min:02d}"
+    return f"{lt.tm_mon:02d}-{lt.tm_mday:02d} {lt.tm_hour:02d}:{lt.tm_min:02d}"
 
 
 def _parse_hhmm(spec: str) -> float:
@@ -530,7 +533,9 @@ def _parse_weekday_hhmm(spec: str) -> float:
     try:
         return parse_week_anchor(text)
     except ValueError as exc:
-        raise ValueError(f"周锚点 {spec!r} 要是 'Wed 18:10' 这种格式") from exc
+        raise ValueError(
+            f"周锚点 {spec!r} 要是 '10-09 18:10'（月-日 时刻）或 'Wed 18:10'（星期几 时刻）"
+        ) from exc
 
 
 def _key_index(name: str) -> int | None:
