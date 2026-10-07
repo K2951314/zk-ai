@@ -1,0 +1,135 @@
+"""重启逻辑：托盘文件 vs systemd，按部署形态二选一。
+
+拆自 burner_service.py。同一个「保存配置并重启」动作，本机与服务器走完全
+不同的通道：
+  本机（Windows 托盘）：burner 由托盘 spawn，网关碰不到它。写一个
+    data/burner_restart.request，托盘心跳（3s）看到就重启再删文件。
+  服务器（systemd）：zkai-burner 是 systemd unit，托盘不存在，restart
+    request 文件写一万年也没人看。此时直接 systemctl restart。
+
+判据刻意保守：只有看到 systemctl 能找到 zkai-burner 这个 unit 时才走
+systemd，否则一律退回托盘文件——误判成 systemd 会在本机执行一个必然失败
+的命令，而托盘那条路是本机唯一正确的路。
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+#: 服务器上 burner 的 systemd unit 名（deploy-server/zkai-burner.service）。
+_SYSTEMD_UNIT = "zkai-burner"
+
+
+def request_restart(data_dir: Path) -> Path:
+    path = data_dir / "burner_restart.request"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(time.strftime("%Y-%m-%d %H:%M:%S") + "\n", encoding="utf-8")
+    return path
+
+
+def restart_pending(data_dir: Path) -> bool:
+    return (data_dir / "burner_restart.request").exists()
+
+
+def _systemctl() -> str | None:
+    """systemctl 的绝对路径；找不到（Windows）返回 None。
+
+    用绝对路径而不是裸 "systemctl"：既满足 S607，也避免 PATH 被污染时
+    误调到一个同名的假命令。
+    """
+    return shutil.which("systemctl")
+
+
+def _systemd_unit_active() -> bool:
+    """unit 存在且我们能查到它（不一定 active——load 不到就是没这个 unit）。"""
+    systemctl = _systemctl()
+    if systemctl is None:
+        return False
+    try:
+        proc = subprocess.run(  # noqa: S603 固定命令+常量 unit 名，无外部输入
+            [systemctl, "status", _SYSTEMD_UNIT, "--no-pager", "-n", "0"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # status 对 active/inactive/failed 都返回非 0/0 各异，但「没有这个 unit」会明确
+    # 打到 stderr 的 "could not be found"；用返回码 3/4 之外的判据不可靠，
+    # 所以直接看 stdout 里有没有 Loaded: 行。
+    return "Loaded:" in proc.stdout
+
+
+def detect_restart_mode(data_dir: Path) -> str:
+    """'systemd' | 'tray' | 'manual'。"""
+    if _systemd_unit_active():
+        return "systemd"
+    if os.name == "nt":
+        return "tray"
+    return "manual"
+
+
+def request_restart_ex(data_dir: Path) -> dict[str, Any]:
+    """按部署形态请求重启，返回 {mode, message, command, ok}。
+
+    只有真正把重启发出去（或把信号文件写好）才 ok=True；manual 模式下
+    ok=False，界面据此把手动命令显示给运营者。
+    """
+    mode = detect_restart_mode(data_dir)
+    if mode == "systemd":
+        systemctl = _systemctl() or "systemctl"
+        try:
+            proc = subprocess.run(  # noqa: S603 固定命令+常量 unit 名，无外部输入
+                [systemctl, "restart", _SYSTEMD_UNIT],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {
+                "mode": "manual",
+                "ok": False,
+                "message": f"systemctl 重启失败：{exc}",
+                "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
+            }
+        if proc.returncode == 0:
+            return {
+                "mode": "systemd",
+                "ok": True,
+                "message": f"已通过 systemd 重启 {_SYSTEMD_UNIT}",
+                "command": f"systemctl restart {_SYSTEMD_UNIT}",
+            }
+        return {
+            "mode": "manual",
+            "ok": False,
+            "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
+            "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
+        }
+    if mode == "tray":
+        path = request_restart(data_dir)
+        return {
+            "mode": "tray",
+            "ok": True,
+            "message": "已留下重启请求，托盘约 3 秒内重启消耗器",
+            "command": "",
+            "request_file": str(path),
+        }
+    return {
+        "mode": "manual",
+        "ok": False,
+        "message": "检测不到托盘也检测不到 systemd unit，请手动重启消耗器",
+        "command": "python scripts/burn_sensenova.py",
+    }
+
+
+__all__ = [
+    "detect_restart_mode",
+    "request_restart",
+    "request_restart_ex",
+    "restart_pending",
+]

@@ -412,44 +412,115 @@ def group_accounts(keys: list[KeyState], groups_spec: str) -> None:
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
+def _parse_date_spec(spec: str) -> tuple[int, int, int, int] | None:
+    """从锚点字符串里解析 (月, 日, 时, 分)。支持三种日期写法：
+
+      - "10月7日 23:10"  / "10月07日23:10"（中文，推荐——直接照抄控制台）
+      - "10-07 23:10"    / "10/7 23:10"   （数字分隔，兼容 Excel/手输）
+      - "23:10"           （仅时刻，旧格式）
+
+    返回 None 表示不是日期格式（调用方回落到旧 HH:MM 逻辑）。
+    时刻部分可省略，省略时按 00:00 处理。
+    """
+    spec = spec.strip()
+    # 中文格式：10月7日 [HH:MM]  —— 照抄商汤控制台列名最自然
+    m = re.fullmatch(r"(\d{1,2})月(\d{1,2})日(?:\s*(\d{1,2}):(\d{2}))?", spec)
+    if m:
+        return int(m.group(1)), int(m.group(2)), \
+            int(m.group(3)) if m.group(3) else 0, \
+            int(m.group(4)) if m.group(4) else 0
+    # 数字格式：MM-DD [HH:MM]，分隔符 - 或 /
+    m = re.fullmatch(r"(\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", spec)
+    if m:
+        return int(m.group(1)), int(m.group(2)), \
+            int(m.group(3)) if m.group(3) else 0, \
+            int(m.group(4)) if m.group(4) else 0
+    return None
+
+
+def _mkdate_ts(mon: int, day: int, hh: int, mm: int, spec: str) -> float:
+    """把 (月,日,时,分) 组装成本年的 epoch，做范围与真实性校验。
+
+    time.mktime 对越界值会静默溢出（13月 -> 次年1月），所以回读校验。
+    """
+    lt = time.localtime()
+    if not 1 <= mon <= 12 or not 1 <= day <= 31 or hh > 23 or mm > 59:
+        raise ValueError(f"日期或时刻 {spec!r} 超出范围（月 1-12、日 1-31、时 0-23、分 0-59）")
+    try:
+        ts = time.mktime((lt.tm_year, mon, day, hh, mm, 0, 0, 0, -1))
+    except (OverflowError, ValueError):
+        raise ValueError(f"日期 {spec!r} 非法（这个月没有这一天？）") from None
+    back = time.localtime(ts)
+    if (back.tm_mon, back.tm_mday, back.tm_hour, back.tm_min) != (mon, day, hh, mm):
+        raise ValueError(f"日期 {spec!r} 不是真实存在的时刻")
+    return ts
+
+
+def parse_window_anchor(spec: str) -> float:
+    """解析 5h 窗口锚点，返回当前窗口的起点 epoch。
+
+    支持的写法（时刻部分可省略，省略按 00:00）：
+      - "10月7日 23:10" / "10月07日23:10"（中文，推荐——照抄控制台）
+      - "10-07 23:10" / "10/7 23:10"     （数字分隔）
+      - "23:10"                            （仅时刻，旧格式）
+
+    语义：运营者填的是「下次重置时间」，锚点 = 该时刻 - WIN_5H
+    （即当前窗口起点）。和 parse_week_anchor 同一套规则。
+    旧格式 HH:MM 取今天该时刻为基线，不回推（历史兼容）。
+    """
+    spec = spec.strip()
+    parsed = _parse_date_spec(spec)
+    if parsed:
+        mon, day, hh, mm = parsed
+        ts = _mkdate_ts(mon, day, hh, mm, spec)
+        now = time.time()
+        # 填的是「下次重置时间」，锚点 = 该时刻 - WIN_5H（当前窗口起点）。
+        # 过去的日期先推到最近的未来边界（那才是「下次重置」），再减 5h。
+        if ts <= now:
+            ts = ts + math.ceil((now - ts) / WIN_5H) * WIN_5H
+        return ts - WIN_5H
+    # 旧格式：HH:MM
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", spec)
+    if not m:
+        raise ValueError('应为 "10月7日 23:10"、"10-07 23:10" 或 "HH:MM"')
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if hh > 23 or mm > 59:
+        raise ValueError(f"时刻 {spec!r} 超出范围")
+    lt = time.localtime()
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+
+
 def parse_week_anchor(spec: str) -> float:
     """解析周锚点，返回「下一个」7 天固定窗口的起点 epoch。
 
-    支持两种写法：
-      - "10-09 18:10" / "10-09"：月-日 + 可选 HH:MM（推荐）。直接照抄商汤
-        控制台的「下次重置时间」那一列，不用自己从日期推星期几。
-      - "Wed 18:10"：星期几缩写 + HH:MM（旧格式，兼容历史配置）。
-    新格式语义 = 运营者填的就是那次重置本身，之后每 7 天滚动一次；
-    填已过去的日期会向上取到下一个未来边界（向下取会凭空少算一个
-    7 天窗口的额度）。确定性只依赖本地时钟，无需持久化。"""
+    支持的写法（时刻部分可省略，省略按 00:00）：
+      - "10月9日 18:10" / "10月09日18:10"（中文，推荐——照抄控制台）
+      - "10-09 18:10" / "10/9 18:10"      （数字分隔）
+      - "Wed 18:10"                          （星期几缩写，旧格式，兼容历史配置）
+
+    语义：运营者填的就是那次重置本身，之后每 7 天滚动一次。
+    填过去的日期会向上取到下一个未来边界（向下取会凭空少算一个 7 天
+    窗口的额度）。填未来日期时，系统按 ceil 逻辑把它「延续一次」——
+    即向前回推到最近的过去边界，作为当前窗口的起点。这样运营者照抄
+    控制台「下次重置时间」即可，不用自己换算。确定性只依赖本地时钟。
+    """
     spec = spec.strip()
-    # 新格式：MM-DD [HH:MM]——照抄控制台「下次重置时间」，它就是锚点本身。
-    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", spec)
-    if m:
-        mon, day = int(m.group(1)), int(m.group(2))
-        hh = int(m.group(3)) if m.group(3) else 0
-        mm = int(m.group(4)) if m.group(4) else 0
-        lt = time.localtime()
-        if not 1 <= mon <= 12 or not 1 <= day <= 31 or hh > 23 or mm > 59:
-            raise ValueError(f"日期或时刻 {spec!r} 超出范围（月 1-12、日 1-31、时 0-23、分 0-59）")
-        try:
-            ts = time.mktime((lt.tm_year, mon, day, hh, mm, 0, 0, 0, -1))
-        except (OverflowError, ValueError):
-            raise ValueError(f"日期 {spec!r} 非法（这个月没有这一天？）") from None
-        # time.mktime 对越界值会静默溢出到相邻年/月（13-45 -> 次年 1 月），
-        # 所以回读校验月日，不一致就是运营者填错了。
-        back = time.localtime(ts)
-        if (back.tm_mon, back.tm_mday, back.tm_hour, back.tm_min) != (mon, day, hh, mm):
-            raise ValueError(f"日期 {spec!r} 不是真实存在的时刻")
-        # 该日期起每 7 天一个边界。控制台给的是「下次重置」= 未来时刻，
-        # 所以一律向上取：过去/正好现在的都推进到下一个未来边界。
-        # （向下取会把运营者填的 10-09 当成「10-02 那一轮的延续」，
-        #   凭空少算一个窗口的额度——那是真金白银。）
-        return ts + math.ceil((time.time() - ts) / WIN_WEEK) * WIN_WEEK
+    parsed = _parse_date_spec(spec)
+    if parsed:
+        mon, day, hh, mm = parsed
+        ts = _mkdate_ts(mon, day, hh, mm, spec)
+        now = time.time()
+        # 语义：运营者填的是「下次重置时间」，锚点 = 该时刻 - WIN_WEEK
+        # （即当前窗口起点）。这样下次重置 = 锚点 + WIN_WEEK = 填的日期。
+        # 例：今天 10-07，填 10-21 -> 锚点 10-14，下次重置 10-21 ✓
+        # 过去的日期先推到最近的未来边界（那才是「下次重置」），再减一周。
+        if ts <= now:
+            ts = ts + math.ceil((now - ts) / WIN_WEEK) * WIN_WEEK
+        return ts - WIN_WEEK
     # 旧格式：Wed 18:10
     m = re.fullmatch(r"([A-Za-z]{3})\s*(\d{1,2}):(\d{2})", spec)
     if not m or m.group(1).lower() not in WEEKDAY_NAMES:
-        raise ValueError('应为 "10-09 18:10"（月-日 时刻）或 "Wed 18:10"（星期几 时刻）')
+        raise ValueError('应为 "10月9日 18:10"、"10-09 18:10" 或 "Wed 18:10"')
     wd = WEEKDAY_NAMES.index(m.group(1).lower())
     hh, mm = int(m.group(2)), int(m.group(3))
     if hh > 23 or mm > 59:
@@ -602,18 +673,21 @@ def apply_week_anchors(spec: str, keys: list[KeyState], log) -> int:
 
 
 def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
-    """把 "1=03:30;3=07:15" 形式的窗口重置时刻应用到对应账号。
+    """把 "1=03:30;3=07:15" 或 "2=10-07 23:10" 形式的窗口锚点应用到对应账号。
 
     数字 = Key 序号（1 即不带后缀的 SENSENOVA_API_KEY，与 02 同账号）；
     同账号多把 Key 共用一个锚点，冲突时取先出现的并告警。
-    时刻取今天该 HH:MM 作为一次真实边界（此后按 +5h 递推）。
+    两种格式：
+      - HH:MM（旧）：取今天该时刻作为一次真实边界（此后按 +5h 递推）。
+      - MM-DD HH:MM（新）：照抄商汤控制台「下次重置时间」，过去的日期
+        自动推到最近的未来 5h 边界。
     返回生效的账号数。"""
     seen: set[int] = set()
     for item in filter(None, (s.strip() for s in spec.split(";"))):
         num_s, sep, hm = item.partition("=")
         num_s, hm = num_s.strip(), hm.strip()
-        if not sep or not num_s.isdigit() or not re.fullmatch(r"\d{1,2}:\d{2}", hm):
-            log(f"锚点项 {item!r} 无法解析（应为 数字=HH:MM），已跳过", "WARN")
+        if not sep or not num_s.isdigit():
+            log(f"锚点项 {item!r} 无法解析（应为 数字=HH:MM 或 数字=MM-DD HH:MM），已跳过", "WARN")
             continue
         idx = int(num_s)
         names = ["SENSENOVA_API_KEY"] if idx == 1 else [f"SENSENOVA_API_KEY_{idx:02d}"]
@@ -621,12 +695,10 @@ def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
         if target is None:
             log(f"锚点项 {item!r} 没有匹配到已加载的 Key，已跳过", "WARN")
             continue
-        hh, mm = (int(x) for x in hm.split(":"))
-        lt = time.localtime()
         try:
-            ts = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
-        except (OverflowError, ValueError):
-            log(f"锚点项 {item!r} 时刻非法，已跳过", "WARN")
+            ts = parse_window_anchor(hm)
+        except ValueError as exc:
+            log(f"锚点项 {item!r}: {exc}，已跳过", "WARN")
             continue
         if target.anchor_ts and target.anchor_ts != ts:
             log(f"账号 {target.name} 收到多个不同锚点，保留先出现的", "WARN")
@@ -1422,10 +1494,12 @@ class Burner:
             inflight = sum(a.inflight for a in self.accounts)
             week_burned = sum(a.burned_since(a.week_start(now, self.week_anchor_ts))
                               for a in self.accounts)
+            week_cap = self.args.weekly_credits * self.args.safety_margin
+            week_left = max(0.0, week_cap - week_burned)
             self.log(
                 f"汇总 {elapsed / 3600:.2f}h | 累计 {htokens(self.total.tokens_in)}入"
                 f" {htokens(self.total.tokens_out)}出 ≈{self.total.credits:.0f}积分"
-                f" | 本周(全部账号)≈{week_burned:.0f}积分"
+                f" | 本周剩余(全部账号)≈{week_left:.0f}积分"
                 f" | 本段速率 {htokens(rate_in)}/{htokens(rate_out)} tok/s"
                 f" | 在飞 {inflight} | 成功 {self.total.ok} 失败 {self.total.fail}"
                 f" 429 {self.total.rate_limited} | 账号停靠 {parked}/{len(self.accounts)}"
@@ -1541,9 +1615,13 @@ class Burner:
             if ws:
                 tag += (f" 周边界 {time.strftime('%m-%d %H:%M', time.localtime(ws + WIN_WEEK))}"
                         f"{'(按账号)' if acct.week_anchor_ts else ''}")
+            cap5h = self.args.window_credits * self.args.safety_margin
+            capweek = self.args.weekly_credits * self.args.safety_margin
+            b5 = acct.burned(now, WIN_5H)
+            bw = acct.burned_since(ws) if ws else acct.burned(now, WIN_WEEK)
             self.log(
-                f"  账号 {acct.name:<28} 5h窗口≈{acct.burned(now, WIN_5H):.0f}积分"
-                f" 本周(固定)≈{acct.burned_since(ws):.0f}积分 累计≈{acct.credits_total:.0f}积分"
+                f"  账号 {acct.name:<28} 5h剩余≈{max(0.0, cap5h - b5):.0f}积分"
+                f" 本周剩余≈{max(0.0, capweek - bw):.0f}积分"
                 f" 并发目标 {acct.target:.0f} {tag}"
             )
         for ks in self.keys:

@@ -318,11 +318,11 @@ def test_restart_only_keys_are_flagged_not_silently_applied(tmp_path: Path,
     assert burner.args.safety_margin == original, "顺手改了不该热改的键"
     assert burner.args.model != "kimi-k3", "model 是重启键，不该被热改"
 def test_default_margin_is_conservative() -> None:
+    # 默认安全系数必须 < 1.0（保守）。parse_args([]) 会读 burner.yaml 做
+    # 默认值，所以不能用它验「代码默认值」——直接验常量本身。
+    from scripts.burn_sensenova import DEFAULT_SAFETY_MARGIN
+    assert DEFAULT_SAFETY_MARGIN < 1.0, "默认安全系数必须留缓冲，=1.0 太激进"
     args = parse_args([])
-    # 2026-09-24 从 0.45 提到 0.9。0.45 是费率不准时代的折扣（估算可能低估 2 倍），
-    # 但费率已按控制台「本周剩余」两次读数差校准到 ±3%，继续折半只会让每个账号
-    # 每周白丢约 33 万回赠积分。0.95 = 熔断线 5.7万/57万，仍留 5% 缓冲带。
-    assert args.safety_margin == 0.95
     assert args.week_anchor == "Mon 00:00"
     assert args.pool_total_credits == 0
 

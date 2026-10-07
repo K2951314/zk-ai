@@ -79,7 +79,7 @@
 | **四层抽象** | Provider → Deployment → Model → Credential。一个模型可以有多个 Deployment（多供应商/多区域），失败自动切换。 |
 | **Key Pool** | 显式状态机 `HEALTHY / COOLDOWN / UNHEALTHY / DISABLED`，5 种轮换策略，`threading.RLock` 保证选择原子性。 |
 | **错误分类驱动** | 26 种错误原因 → `retryable / switch_credential / switch_provider / cooldown`。400/413 **绝不**轮换 Key；401 → UNHEALTHY；429 → 分钟限流指数冷却 / 额度耗尽长休；529 → deployment 冷却 + 故障转移。 |
-| **Web 控制台** | 浏览器打开 `http://127.0.0.1:8317/ui`：总览 / 凭据池（冷却倒计时+一键解禁）/ 请求日志筛选+attempt 明细 / 用量统计 / 路由预览。单文件零依赖，数据仍走鉴权的 `/admin/*`。 |
+| **Web 控制台** | 浏览器打开 `http://127.0.0.1:8317/ui`：总览 / 凭据池（冷却倒计时+一键解禁）/ 请求日志筛选+attempt 明细 / 用量统计 / 路由预览。同源零外部依赖（CSS/JS 拆为 `/ui/console.*` 由网关提供），数据走鉴权的 `/admin/*`。 |
 | **ZK-Agent 任务台** | `http://127.0.0.1:8317/ui/agent`：浏览器里的批量任务跑批器——思考→调工具（读/搜/写文件、跑命令）循环，写与执行需批准，路径锁在工作区，步数/并发双熔断（见 §13.3）。 |
 | **有界重试** | 指数退避 + 抖动，`max_total_attempts` 是硬顶，结构上不可能死循环。 |
 | **可解释路由** | 8 个能力维度加权打分 + 硬门槛，每个响应都带 `zk_ai.routing_reason` 与逐维度得分。 |
@@ -662,7 +662,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 35 个测试模块，880 个用例，全部 Mock
+├── tests/                # conftest + 35 个测试模块，888 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -670,7 +670,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 72 个文件约 22,510 行，`tests/` 36 个测试模块 880 个用例（约 15,903 行），
+规模：`app/` 72 个文件约 22,510 行，`tests/` 36 个测试模块 888 个用例（约 15,903 行），
 `scripts/` 18 个文件约 4,757 行。**测试/产品代码 = 70%**。
 （这两个数字上一次更新是 2026-09-19 的 15,400/7,300/3,600——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
@@ -1136,7 +1136,7 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 
 ### 13.2 运维面 `/admin/*` 与 Web 控制台
 
-**浏览器打开 `http://127.0.0.1:8317/ui`** 即可使用内置 Web 控制台（单文件、零依赖、
+**浏览器打开 `http://127.0.0.1:8317/ui`** 即可使用内置 Web 控制台（同源零外部依赖、
 无需构建）。左侧是导航，右侧是内容区，共五个视图：
 
 | 视图 | 能干什么 |
@@ -1349,7 +1349,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**880 个用例，全部通过，零网络、零真实配额。**
+**888 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

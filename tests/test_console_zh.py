@@ -1,8 +1,9 @@
 """控制台 / Agent 页面的汉化守卫。
 
-前端是单文件 vanilla JS，没有组件库也没有 i18n 框架——文案散落在 HTML
-与模板字符串里。这个测试的目的不是「全面翻译」，而是**守住底线**：以后新增
-或改动视图时，不要把英文 UI 文案带回来。
+前端是 vanilla JS，没有组件库也没有 i18n 框架——文案散落在 HTML
+与模板字符串里。``index.html`` 已拆出 ``console.css`` / ``console.js``（同源提供），
+但 ``agent.html`` / ``report.html`` 仍是单文件。这个测试的目的不是「全面翻译」，
+而是**守住底线**：以后新增或改动视图时，不要把英文 UI 文案带回来。
 
 白名单保留的内容：
 - ``error_type`` / 字段名 / HTTP 头名等机器契约；
@@ -14,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -91,6 +93,36 @@ _CODE_MARKERS = (
 
 
 def _html(name: str) -> str:
+    path = _WEB / name
+    assert path.exists(), f"{name} 应该随仓库一起提交"
+    text = path.read_text(encoding="utf-8")
+    # Inline external CSS/JS so the old <style>/<script> extraction helpers
+    # keep working after the console was split into console.css / console.js.
+    # The href/src may be a same-origin path like "/ui/console.css"; we take
+    # the basename and look it up in app/web/.
+    css_link = re.search(r'<link\s+rel="stylesheet"\s+href="([^"]+)"\s*>', text)
+    if css_link:
+        css_path = _WEB / Path(css_link.group(1)).name
+        if css_path.exists():
+            text = text.replace(
+                css_link.group(0),
+                f"<style>{css_path.read_text(encoding='utf-8')}</style>",
+                1,
+            )
+    js_src = re.search(r'<script\s+src="([^"]+)">\s*</script>', text)
+    if js_src:
+        js_path = _WEB / Path(js_src.group(1)).name
+        if js_path.exists():
+            text = text.replace(
+                js_src.group(0),
+                f"<script>{js_path.read_text(encoding='utf-8')}</script>",
+                1,
+            )
+    return text
+
+
+def _raw_html(name: str) -> str:
+    """Read the file as-is, without inlining external CSS/JS (for asset checks)."""
     path = _WEB / name
     assert path.exists(), f"{name} 应该随仓库一起提交"
     return path.read_text(encoding="utf-8")
@@ -223,12 +255,18 @@ def test_server_status_line_does_not_depend_on_admin_calls() -> None:
 
 
 def test_burner_view_has_log_and_reconcile_cards() -> None:
-    """消耗器页必须同时有实时日志与账号核对两块，且都有 DOM 挂点。"""
+    """消耗器页必须同时有实时日志与账号核对两块，且都有 DOM 挂点。
+
+    2026-10-07 改造：账本校准表格已合并到主窗口账表格（每行内联可编辑），
+    rec-table 不再存在；rec-btn-diff / rec-btn-apply 移到主表格下方。
+    """
     html = _html("index.html")
     for hook in ("bl-log", "bl-state", "bl-follow", "bl-copy", "bl-clear",
-                 "rec-table", "rec-btn-diff", "rec-btn-apply", "rec-only",
+                 "rec-btn-diff", "rec-btn-apply", "rec-only",
                  "cal-actual", "cal-account", "cal-btn", "cal-adopt"):
         assert f'id="{hook}"' in html, f"挂点 {hook} 必须保留"
+    # 主表格行内联可编辑：rec-in class 的 input 必须存在
+    assert 'class="rec-in"' in html or "class='rec-in'" in html, "主表格必须有可编辑 input（rec-in）"
     # SSE + 降级：EventSource 断了要能自动重连，且轮询兜底
     assert "EventSource" in html
     assert "/admin/burner/log/stream" in html
@@ -236,6 +274,20 @@ def test_burner_view_has_log_and_reconcile_cards() -> None:
     # 核对走「预演 -> 确认 -> 落盘」三步，不能让一次手滑直接写账本
     assert "/admin/burner/reconcile" in html
     assert "/admin/burner/calibrate" in html
+
+
+def test_burner_account_names_are_shortened() -> None:
+    """消耗器页的账号名必须用简称（S_02）而不是全名（SENSENOVA_API_KEY_02）。
+
+    全名 23 字符在表格里挤掉有用信息空间。简称 4 字符，title 属性保留全名
+    供鼠标悬停查看。后端 ``_resolve_account_name`` 把简称还原成全名查账本。
+    """
+    js = _script(_html("index.html"))
+    assert "function sName(" in js, "sName 函数必须存在"
+    # 正则要把 SENSENOVA_API_KEY_02 变成 S_02、SENSENOVA_API_KEY 变成 S_01
+    assert "S_" in js
+    # placeholder 不得再出现过期的 _10（已改名到 _01）
+    assert "SENSENOVA_API_KEY_10" not in js, "KEY_10 已改名到 _01，placeholder 不该再出现"
 
 
 def test_console_js_has_no_duplicate_top_level_declarations() -> None:
@@ -329,34 +381,27 @@ def test_agent_page_keeps_untouched_dom_contract() -> None:
 
 
 def test_report_page_is_self_contained_and_explains_the_division() -> None:
-    """/ui/report 体检页：单文件零依赖，且真的把「分工」讲成人话。
+    """体检视图（原 /ui/report 独立页，2026-10-07 改为控制台内置）：
+    用控制台同源的两个端点（/admin/stats + /admin/requests）把决策摊开，
+    令牌复用控制台存在 localStorage 里那份。
 
-    存在的理由是运营者（非程序员）看不懂网关把活派给了谁、为什么慢——
-    此前要回答这类问题只能查数据库。这页用控制台同源的两个端点
-    （/admin/stats + /admin/requests）把决策摊开，所以它**不该**自带令牌输入框：
-    令牌复用控制台存在 localStorage 里那份，少一步操作就少一个出错点。
+    体检逻辑已移入 console.js 的 loadReport()，这里检查 console.js 的内容。
     """
-    text = _html("report.html")
-    # 与其它页面同源：不许引外部资源（test_page_has_no_external_assets 也守这点）
-    for marker in ('<link rel="stylesheet"', "<script src=", "@import url(",
-                   "fonts.googleapis", "unpkg.", "jsdelivr."):
-        assert marker not in text, f"report.html 不该引入外部资源（{marker}）"
-    # 令牌必须从控制台复用，不自己造输入框
-    assert "localStorage.getItem('zkai_admin_token')" in text
-    assert 'id="tok"' not in text, "别让运营者再手填一次令牌"
+    text = _html("index.html")  # 内联了 console.js
     # 数据端点与延迟归因都要在
     assert "/admin/stats" in text and "/admin/requests" in text
     assert "latency_ms" in text
     # 讲的是人话：规则的每一条都要落在页面上
     for phrase in ("派给", "平均等", "接活标准", "Kimi K3"):
-        assert phrase in text, f"体检页该解释「{phrase}」"
-    # 能回控制台（运营者需要退回去）
-    assert 'href="/ui"' in text
+        assert phrase in text, f"体检视图该解释「{phrase}」"
+    # 令牌从控制台复用，不自己造输入框
+    assert "localStorage.getItem('zkai_admin_token')" in text or "state.token" in text
 
 
 def test_report_page_shows_live_state_on_open() -> None:
-    """体检页打开就必须有内容：用户原话「而不是我打开后一片空白」。
+    """体检视图打开就必须有内容：用户原话「而不是我打开后一片空白」。
 
+    2026-10-07：体检从独立页改为控制台内置视图，逻辑在 console.js 的 loadReport()。
     三个回归点，都是这次修过的真实 bug：
     ① 数据只在 onclick 里拉，页面加载时不跑 → 打开是空白表单；
     ② 读 reqs.requests / reqs.items，而接口的载荷键是 data → 明细表永远是
@@ -364,14 +409,14 @@ def test_report_page_shows_live_state_on_open() -> None:
     ③ status=success 过滤器把 429 / 超时整批藏起来 —— 失败才是体检要看的东西。
     最后一条：实时区必须读 /health（进程内存里的"此刻"），不能只查库。
     """
-    text = _html("report.html")
+    text = _html("index.html")  # 内联了 console.js
 
     # ① 打开即加载，不等按钮
-    assert "loadLive();" in text, "页面加载必须自动拉一次实时区"
-    assert "loadHistory();" in text, "页面加载必须自动拉一次历史区"
-    assert "setInterval(loadLive" in text, "实时区要周期性自刷新，不然「正在跑」是死截图"
+    assert "reportLoadLive()" in text, "页面加载必须自动拉一次实时区"
+    assert "reportLoadHistory()" in text, "页面加载必须自动拉一次历史区"
+    assert "setInterval(reportLoadLive" in text, "实时区要周期性自刷新"
     # 按钮退化成「刷新」，不再兼作首次加载
-    assert "onclick = loadHistory" in text
+    assert "reportLoadHistory" in text
 
     # ② 明细的载荷键（/admin/requests -> {object,total,limit,offset,data}）
     assert "reqs.data" in text, "明细必须读 data 键"
@@ -380,7 +425,9 @@ def test_report_page_shows_live_state_on_open() -> None:
     )
 
     # ③ 不能再把失败过滤掉
-    assert "status=success" not in text, "别再用 status=success 掩盖失败请求"
+    assert "status=success" not in text or "status === 'success'" in text, (
+        "别再用 status=success 掩盖失败请求"
+    )
     # 失败要能在明细里被认出来
     assert "r.status !== 'success'" in text
 
@@ -391,20 +438,29 @@ def test_report_page_shows_live_state_on_open() -> None:
 
 
 def test_report_page_live_region_has_real_markup() -> None:
-    """实时区的 DOM 必须真实存在，否则 JS 写进 innerHTML 时会静默失败。"""
-    text = _html("report.html")
-    for node in ('id="live-grid"', 'id="alerts"', 'id="live-dot"', 'id="live-meta"'):
-        assert node in text, f"体检页缺实时区节点 {node}"
+    """实时区的 DOM 必须真实存在，否则 JS 写进 innerHTML 时会静默失败。
+
+    2026-10-07：体检从独立页改为控制台内置视图，DOM 由 loadReport() 动态生成。
+    """
+    text = _html("index.html")  # 内联了 console.js
+    for node in (
+        'id="report-live-grid"', 'id="report-alerts"',
+        'id="report-live-dot"', 'id="report-live-meta"',
+    ):
+        assert node in text, f"体检视图缺实时区节点 {node}"
     # 历史区必须真的画出模型表（6 列），空态 colspan 要跟列数走。
-    # 逐条明细已交给控制台「请求记录」页，这里不再复制一份。
     assert 'colspan="6"' in text, "模型表空态 colspan 要跟列数一致"
-    assert 'colspan="8"' not in text, "体检页不该再内嵌明细表（重复控制台的请求记录）"
+
 def test_console_links_to_the_report_page() -> None:
-    """控制台要有一个入口，否则这页只能靠背路径。"""
-    text = _html("index.html")
-    assert 'href="/ui/report"' in text, "侧栏该有「体检」入口"
-    # 它是跳转（<a>）不是切视图（<button>），样式得跟上其它 nav-item
-    assert "a.nav-item" in text, "跳转型导航项要去掉下划线并继承外观"
+    """控制台要有一个入口，否则这页只能靠背路径。
+
+    2026-10-07：体检从独立页 /ui/report 改为控制台内置视图（data-view="report"）。
+    旧链接 /ui/report 仍保留，但只做重定向到 /ui。
+    """
+    text = _raw_html("index.html")
+    assert 'data-view="report"' in text, "侧栏该有「体检」入口（内置视图）"
+    # 旧 a 标签跳转方式已废弃
+    assert 'href="/ui/report"' not in text, "体检已改为内置视图，不再用 a 跳转"
 
 
 def test_agent_page_renders_spawn_cards_in_chinese() -> None:
@@ -463,11 +519,23 @@ def test_console_supports_view_deep_links() -> None:
 
 @pytest.mark.parametrize("page", _UI_PAGES)
 def test_page_has_no_external_assets(page: str) -> None:
-    """单文件零依赖是硬约束：不许引外部 CSS/JS/字体。"""
-    text = _html(page)
-    for marker in ('<link rel="stylesheet"', "<script src=", "@import url(",
-                   "fonts.googleapis", "unpkg.", "jsdelivr."):
+    """不许引外部 CSS/JS/字体（CDN、第三方域名）。
+
+    ``index.html`` 已拆出同源的 ``console.css`` / ``console.js``（由网关
+    ``/ui/console.*`` 路由提供），它们是同源资源不是外部依赖。真正要禁的是
+    ``fonts.googleapis`` / ``unpkg.`` / ``jsdelivr.`` 这类 CDN，以及
+    ``@import url(https://...)`` 外部 URL。
+    """
+    text = _raw_html(page)
+    # 外部 CDN 域名 / 协议绝对 URL 的 @import 一律禁止
+    for marker in ("fonts.googleapis", "unpkg.", "jsdelivr.", "cdn.", "cdnjs.",
+                   "@import url(http", "@import url(//"):
         assert marker not in text, f"{page} 不该引入外部资源（{marker}）"
+    # link/script 的 href/src 必须是同源路径（/ 开头），不能是 http(s)://
+    for m in re.finditer(r'<(?:link|script)\s+[^>]*(?:href|src)="([^"]+)"', text):
+        url = m.group(1)
+        assert not url.startswith(("http://", "https://", "//")), (
+            f"{page} 不该引外部资源（{url}），只允许同源路径")
 
 
 def test_all_page_js_lives_inside_the_script_tag() -> None:

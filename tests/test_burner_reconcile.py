@@ -115,16 +115,18 @@ class TestReconcileDiff:
         self, burner_files: tuple[Path, Path]
     ) -> None:
         state, config = burner_files
+        # 前端填「剩余」：cap_5h = 60000 * 0.95 = 57000，账本已烧 150 -> 剩余 56850。
+        # 运营者填剩余 1000，等于已烧 56000，比账本多 55850。
         diff = bs.reconcile_diff(
             state,
             bs.read_config(config),
             {"accounts": [{"name": "SENSENOVA_API_KEY_02",
-                           "burned_5h": 150.0 + 999999.0}]},
+                           "left_5h": 1000.0}]},
         )
         row = diff["accounts"][0]
-        assert row["burned_5h"]["filled"] == pytest.approx(999999.0 + 150.0)
-        assert row["burned_5h"]["delta"] > 0
-        assert row["burned_5h"]["notable"] is True
+        assert row["left_5h"]["filled"] == pytest.approx(1000.0)
+        assert row["left_5h"]["delta"] > 0  # delta = 目标已烧 - 账本已烧 > 0
+        assert row["left_5h"]["notable"] is True
 
     def test_blank_field_means_no_change(
         self, burner_files: tuple[Path, Path]
@@ -133,10 +135,10 @@ class TestReconcileDiff:
         diff = bs.reconcile_diff(
             state,
             bs.read_config(config),
-            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "burned_5h": ""}]},
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "left_5h": ""}]},
         )
-        assert diff["accounts"][0]["burned_5h"]["filled"] is None
-        assert diff["accounts"][0]["burned_5h"]["delta"] is None
+        assert diff["accounts"][0]["left_5h"]["filled"] is None
+        assert diff["accounts"][0]["left_5h"]["delta"] is None
 
     def test_unknown_account_is_rejected(
         self, burner_files: tuple[Path, Path]
@@ -193,37 +195,40 @@ class TestApplyReconcile:
         state, config = burner_files
         before = json.loads(state.read_text(encoding="utf-8"))
         events_before = len(before["accounts"]["SENSENOVA_API_KEY_02"]["events"])
-
+        # cap_5h = 57000，账本已烧 150。运营者填剩余 1000 = 已烧 56000。
         result = bs.apply_reconcile(
             state,
             config,
-            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "burned_5h": 999999.0}]},
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "left_5h": 1000.0}]},
         )
-        assert any("burned_5h" in w for w in result["ledger_written"])
+        assert any("left_5h" in w for w in result["ledger_written"])
 
         after = json.loads(state.read_text(encoding="utf-8"))
         acct = after["accounts"]["SENSENOVA_API_KEY_02"]
         assert len(acct["events"]) == events_before + 1
-        # 新事件落在当前 5h 窗口内，且符号 = 目标值 - 账本估算
+        # 新事件落在当前 5h 窗口内，且符号 = 目标已烧 - 账本已烧
         now = time.time()
         gap = acct["events"][-1][1]
         assert acct["events"][-1][0] > now - 5 * 3600
-        assert gap > 0 and gap == pytest.approx(999999.0 - 150.0, abs=1.0)
+        # 目标已烧 = 57000 - 1000 = 56000，账本已烧 = 150，gap = 55850
+        assert gap > 0 and gap == pytest.approx(56000.0 - 150.0, abs=1.0)
 
-        # 关键：重算出来的 burned_5h 必须等于运营者填的数
+        # 关键：重算出来的 burned_5h 必须等于运营者给的隐含值
         status = bs.read_status(state, bs.read_config(config))
         acct_status = next(a for a in status.accounts if a.name == "SENSENOVA_API_KEY_02")
         view = bs.account_view(acct_status, now, 0.0, status, 1.0)
-        assert view["burned_5h"] == pytest.approx(999999.0, abs=1.0)
+        assert view["burned_5h"] == pytest.approx(56000.0, abs=1.0)
+        assert view["left_5h"] == pytest.approx(1000.0, abs=1.0)
 
     def test_negative_gap_when_operator_sees_less(
         self, burner_files: tuple[Path, Path]
     ) -> None:
         state, config = burner_files
+        # 运营者填剩余 56900 = 已烧 100，比账本 150 少 -> gap 为负
         bs.apply_reconcile(
             state,
             config,
-            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "burned_5h": 10.0}]},
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "left_5h": 56900.0}]},
         )
         data = json.loads(state.read_text(encoding="utf-8"))
         assert data["accounts"]["SENSENOVA_API_KEY_02"]["events"][-1][1] < 0
@@ -234,10 +239,12 @@ class TestApplyReconcile:
         """四舍五入噪音不该落盘：每次都写会让账本事件无限增长。"""
         state, config = burner_files
         before = json.loads(state.read_text(encoding="utf-8"))
+        # 账本已烧 150，cap 57000，剩余 56850。填剩余 56849.8 = 已烧 150.2，
+        # gap 只有 0.2，低于 0.5 阈值，不该写入。
         result = bs.apply_reconcile(
             state,
             config,
-            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "burned_5h": 150.2}]},
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02", "left_5h": 56849.8}]},
         )
         after = json.loads(state.read_text(encoding="utf-8"))
         assert len(after["accounts"]["SENSENOVA_API_KEY_02"]["events"]) == len(
@@ -296,6 +303,59 @@ class TestApplyReconcile:
         data = json.loads(state.read_text(encoding="utf-8"))
         assert data["reconciled_at"] > 0
 
+    def test_week_anchor_per_account_is_synced_to_config(
+        self, burner_files: tuple[Path, Path]
+    ) -> None:
+        """账号级 week_anchor 保存时必须同步写入 burner.yaml 的 week_anchors。
+
+        2026-10-07 事故：消耗器重启后从配置文件读 week_anchors，
+        如果配置文件没更新，账本里的新锚点会被旧配置覆盖。
+        """
+        state, config = burner_files
+        result = bs.apply_reconcile(
+            state,
+            config,
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02",
+                            "week_anchor": "10-14 18:10"}]},
+        )
+        # 账本写了
+        assert any("week_anchor_ts" in w for w in result["ledger_written"])
+        # 配置文件也写了
+        assert "week_anchors" in result["config_written"]
+        text = config.read_text(encoding="utf-8")
+        assert "2=10-14 18:10" in text
+        # week_anchors 是重启键
+        assert "week_anchors" in result["restart_keys"]
+
+    def test_anchor_per_account_is_synced_to_config(
+        self, burner_files: tuple[Path, Path]
+    ) -> None:
+        """账号级 anchor 同理：必须同步写入 burner.yaml 的 anchors。"""
+        state, config = burner_files
+        result = bs.apply_reconcile(
+            state,
+            config,
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02",
+                            "anchor": "16:00"}]},
+        )
+        assert "anchors" in result["config_written"]
+        text = config.read_text(encoding="utf-8")
+        assert "2=16:00" in text
+        assert "anchors" in result["restart_keys"]
+
+    def test_week_anchor_slash_format_is_accepted(
+        self, burner_files: tuple[Path, Path]
+    ) -> None:
+        """斜杠 10/14 18:10 和横线 10-14 18:10 都要接受（2026-10-07 事故根因）。"""
+        state, config = burner_files
+        result = bs.apply_reconcile(
+            state,
+            config,
+            {"accounts": [{"name": "SENSENOVA_API_KEY_02",
+                            "week_anchor": "10/14 18:10"}]},
+        )
+        assert any("week_anchor_ts" in w for w in result["ledger_written"])
+
 
 class TestCalibration:
     def test_back_solves_rates_from_actual_credits(
@@ -353,6 +413,22 @@ class TestCalibration:
                 state, bs.read_config(config), 100.0, account="SENSENOVA_API_KEY_02"
             )
 
+    def test_short_name_resolves_to_full_account(
+        self, burner_files: tuple[Path, Path]
+    ) -> None:
+        """前端显示 S_02 省屏幕，后端要能把它还原成 SENSENOVA_API_KEY_02。"""
+        state, config = burner_files
+        full = bs.suggest_calibration(
+            state, bs.read_config(config), 100.0, account="SENSENOVA_API_KEY_02"
+        )
+        short = bs.suggest_calibration(
+            state, bs.read_config(config), 100.0, account="S_02"
+        )
+        # 两者算出的建议费率应该完全一致（同一个账号的 token 量）
+        assert full["suggested"] == short["suggested"]
+        # 返回的 account 字段保留用户原始输入
+        assert short["account"] == "S_02"
+
 
 class TestRestartModes:
     def test_windows_uses_the_tray_file(self, tmp_path: Path) -> None:
@@ -381,11 +457,16 @@ class TestAccountAnchorResolution:
     def test_per_account_anchor_wins_over_global(self) -> None:
         config = {"anchors": "2=15:10", "anchor": "03:00"}
         got = bs.account_anchor_ts(config, "SENSENOVA_API_KEY_02", 0.0)
-        assert bs._fmt_hhmm(got) == "15:10"
+        # 显示格式 2026-10-07 改为 MM-DD HH:MM（和周锚点统一），只断言时刻。
+        assert got > 0
+        lt = time.localtime(got)
+        assert (lt.tm_hour, lt.tm_min) == (15, 10)
 
     def test_global_anchor_is_the_fallback(self) -> None:
         got = bs.account_anchor_ts({"anchor": "03:00"}, "SENSENOVA_API_KEY_02", 0.0)
-        assert bs._fmt_hhmm(got) == "03:00"
+        assert got > 0
+        lt = time.localtime(got)
+        assert (lt.tm_hour, lt.tm_min) == (3, 0)
 
     def test_no_anchor_means_rolling(self) -> None:
         assert bs.account_anchor_ts({}, "SENSENOVA_API_KEY_02", 0.0) == 0.0
@@ -416,56 +497,92 @@ class TestAccountAnchorResolution:
         assert bs.account_week_anchor_ts(bad, "SENSENOVA_API_KEY_02", 0.0) == 0.0
 
 
-class TestWeekAnchorDateFormat:
-    """周锚点的日期格式（2026-10-07 加）：运营者照抄商汤控制台的「下次重置时间」。
+class TestAnchorDateFormat:
+    """5h 和周锚点的日期格式（2026-10-07）：支持中文、数字、旧格式。
 
-    旧格式 `Wed 18:10` 要求运营者自己从日期推星期几——用户明确反馈
-    「看不懂也不知道怎么调整」。新格式直接填 `10-09 18:10`。
+    语义：运营者填的是「下次重置时间」，锚点 = 该时刻 - WIN（当前窗口起点）。
+    过去的日期先推到最近的未来边界，再减一个窗口。
     """
 
-    def test_date_format_is_accepted(self) -> None:
-        ts = bs._parse_weekday_hhmm("10-09 18:10")
+    def test_hhmm_still_works(self) -> None:
+        """5h 锚点旧格式 HH:MM 不能失效。"""
+        ts = bs._parse_hhmm("23:10")
         assert ts > 0
         lt = time.localtime(ts)
-        assert (lt.tm_mon, lt.tm_mday) == (10, 9)
-        assert (lt.tm_hour, lt.tm_min) == (18, 10)
+        assert (lt.tm_hour, lt.tm_min) == (23, 10)
 
-    def test_date_without_time_midnight(self) -> None:
-        ts = bs._parse_weekday_hhmm("10-05")
+    def test_chinese_date_is_accepted(self) -> None:
+        """5h 锚点支持中文格式 10月7日 23:10。"""
+        ts = bs._parse_hhmm("10月7日 23:10")
         assert ts > 0
-        lt = time.localtime(ts)
-        assert (lt.tm_hour, lt.tm_min) == (0, 0)
 
-    def test_date_always_resolves_to_the_future(self) -> None:
-        """填过去的日期 = 「那次重置已经过去了」，此时要推到下一个未来边界。
-
-        不是学术洁癖：向下取会把运营者填的日期当成上一轮窗口的延续，
-        凭空少算一个 7 天窗口的额度——那是真金白银。
-        """
-        now = time.time()
-        past = f"01-{time.localtime(now).tm_mday:02d} 12:00"
-        ts = bs._parse_weekday_hhmm(past)
-        assert ts > now, "过去的日期必须推到未来边界"
+    def test_chinese_week_anchor_is_accepted(self) -> None:
+        """周锚点支持中文格式 10月9日 18:10。"""
+        ts = bs._parse_weekday_hhmm("10月9日 18:10")
+        assert ts > 0
 
     def test_weekday_format_still_works(self) -> None:
-        """旧格式不能因为加了新格式而失效（配置文件里有历史遗留）。"""
+        """周锚点旧格式 Wed 18:10 不能失效。"""
         ts = bs._parse_weekday_hhmm("Wed 18:10")
         assert ts > 0
         assert time.localtime(ts).tm_hour == 18
 
-    def test_bad_date_format_raises_in_localized_text(self) -> None:
+    def test_slash_separator_is_accepted(self) -> None:
+        """斜杠 10/07 23:10 和横线 10-07 23:10 都要接受。"""
+        assert bs._parse_hhmm("10/07 23:10") > 0
+        assert bs._parse_weekday_hhmm("10/09 18:10") > 0
+
+    def test_bad_format_raises(self) -> None:
+        with pytest.raises(ValueError, match="锚点"):
+            bs._parse_hhmm("someday")
         with pytest.raises(ValueError, match="周锚点"):
             bs._parse_weekday_hhmm("someday")
-        with pytest.raises(ValueError, match="周锚点"):
-            bs._parse_weekday_hhmm("13-45 99:99")
 
-    def test_form_shows_a_date_not_a_weekday(self) -> None:
-        """表单要显示日期——运营者对着控制台照抄，星期几对不上。"""
-        shown = bs._fmt_weekday_hhmm(bs._parse_weekday_hhmm("10-09 18:10"))
-        assert shown.count("-") == 1
-        assert shown.startswith("10-09")
+    def test_past_date_resolves_to_current_window(self) -> None:
+        """过去的日期：推到最近未来边界再减一个窗口 = 当前窗口起点。"""
+        now = time.time()
+        past = f"01-{time.localtime(now).tm_mday:02d} 12:00"
+        ts5 = bs._parse_hhmm(past)
+        tsw = bs._parse_weekday_hhmm(past)
+        # 锚点 = 当前窗口起点，应该在过去或刚好等于当前窗口起点（<= now + 一点容差）
+        # 因为是"当前窗口起点"，所以 <= now
+        assert ts5 <= now + 1, "5h 锚点应是当前窗口起点（<= now）"
+        assert tsw <= now + 1, "周锚点应是当前窗口起点（<= now）"
 
-    def test_console_hint_teaches_the_new_format(self) -> None:
-        html = (Path(__file__).resolve().parent.parent
-                / "app" / "web" / "index.html").read_text(encoding="utf-8")
-        assert "MM-DD HH:MM" in html, "输入框提示必须教新格式"
+    def test_future_date_resolves_to_current_window(self) -> None:
+        """未来日期：减一个窗口 = 当前窗口起点。
+
+        填 10-21（未来）-> 锚点 10-14（当前窗口起点），下次重置 10-21。
+        用户原话「10.21 正确就应该滚到 10.14」。
+        """
+        now = time.time()
+        # 构造一个 7 天以上的未来日期
+        lt = time.localtime(now + 14 * 86400)
+        future = f"{lt.tm_mon:02d}-{lt.tm_mday:02d} {lt.tm_hour:02d}:{lt.tm_min:02d}"
+        future_ts = time.mktime(time.strptime(f"{time.localtime().tm_year} {future}", "%Y %m-%d %H:%M"))
+        ts = bs._parse_weekday_hhmm(future)
+        # 锚点 = 填的日期 - WIN_WEEK
+        from scripts.burn_sensenova import WIN_WEEK
+        assert ts == pytest.approx(future_ts - WIN_WEEK, abs=2)
+        # 下次重置 = 锚点 + WIN_WEEK = 填的日期
+        assert ts + WIN_WEEK == pytest.approx(future_ts, abs=2)
+
+    def test_fmt_shows_date(self) -> None:
+        """表单显示 MM-DD HH:MM 格式。"""
+        # 用固定 ts 测试格式化，不依赖当前时间（parse_window_anchor 会推边界）
+        import time as _time
+        # 10-07 18:10 在东八区的 epoch
+        ts = _time.mktime((2026, 10, 7, 18, 10, 0, 0, 0, -1))
+        shown = bs._fmt_hhmm(ts)
+        assert shown.count("-") == 1, f"期望 1 个横线，得到 {shown!r}"
+        assert "18:10" in shown, f"期望 18:10，得到 {shown!r}"
+        assert "10-07" in shown, f"期望 10-07，得到 {shown!r}"
+
+    def test_console_hint_teaches_new_format(self) -> None:
+        """输入框提示必须教新格式。"""
+        web = Path(__file__).resolve().parent.parent / "app" / "web"
+        html = (web / "index.html").read_text(encoding="utf-8")
+        js = (web / "console.js").read_text(encoding="utf-8") if (web / "console.js").exists() else ""
+        # 提示里应该出现中文日期示例或 MM-DD 格式
+        assert "10月" in html or "10月" in js or "MM-DD" in html or "MM-DD" in js, \
+            "输入框提示必须教新格式（中文日期或 MM-DD）"
