@@ -1408,7 +1408,7 @@ def burner_files(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
     state = tmp_path / "burn_state.json"
     config = tmp_path / "burner.yaml"
-    monkeypatch.setattr(admin_module, "_burner_paths", lambda: (state, config))
+    monkeypatch.setattr(admin_module.burner, "_burner_paths", lambda: (state, config))
     return state, config
 
 

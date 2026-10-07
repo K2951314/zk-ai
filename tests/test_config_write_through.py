@@ -236,7 +236,7 @@ async def test_add_key_writes_env_not_yaml(write_api, tmp_path, monkeypatch) -> 
     client, _harness, config_dir = write_api
     env_path = tmp_path / "env-under-test"
     env_path.write_text("ZKAI_PORT=8317\n", encoding="utf-8")
-    monkeypatch.setattr("app.api.admin._env_file", lambda: env_path)
+    monkeypatch.setattr("app.api.admin._common._env_file", lambda: env_path)
 
     res = await client.post(
         "/admin/providers/fake/credentials",
@@ -280,7 +280,7 @@ async def test_add_key_refuses_key_pasted_as_id(write_api) -> None:
 
 async def test_write_env_requires_value_and_name(write_api, monkeypatch, tmp_path) -> None:
     client, _, _ = write_api
-    monkeypatch.setattr("app.api.admin._env_file", lambda: tmp_path / "unused.env")
+    monkeypatch.setattr("app.api.admin._common._env_file", lambda: tmp_path / "unused.env")
     missing_value = await client.post(
         "/admin/providers/fake/credentials",
         headers=ADMIN,

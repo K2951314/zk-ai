@@ -685,7 +685,7 @@ def test_marketplace_verdict_labels_cover_the_backend_vocabulary() -> None:
     词表从后端源码推导，不手抄一份清单：以后谁在 _probe_verdict 里新增一种
     结论，这个测试立刻撞上。和 BURNER_LABELS 加参数自动撞上是同一个套路。
     """
-    backend = (PROJECT_ROOT / "app" / "api" / "admin.py").read_text(encoding="utf-8")
+    backend = (PROJECT_ROOT / "app" / "api" / "admin" / "providers.py").read_text(encoding="utf-8")
     produced = set(re.findall(r'return "([a-z_]+)"', backend))
     produced |= set(re.findall(r'verdict": "([a-z_]+)"', backend))
 
