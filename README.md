@@ -396,7 +396,7 @@ providers:
     timeout: 300                 # K3 开思考模式会跑很久，别用默认 120
     credentials:
       - id: sensenova-01
-        env: SENSENOVA_API_KEY   # 变量「名」，不要写成 ${SENSENOVA_API_KEY}
+        env: SENSENOVA_API_KEY_01   # 变量「名」，不要写成 ${SENSENOVA_API_KEY_01}
         priority: 100
 ```
 

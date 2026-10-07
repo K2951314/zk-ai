@@ -73,8 +73,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   再改，并且先确认不是同一个账号的多把 Key。
 - **网关和积分消耗器共用同一批商汤 Key**：`config/providers.yaml` 的
   `sensenova-02` 用的就是 `SENSENOVA_API_KEY_02`，而消耗器 `config/burner.yaml` 的
-  `only:` 列的是 `SENSENOVA_API_KEY_02`~`_10`——9 把里 8 把重合（只有不带后缀的
-  `SENSENOVA_API_KEY` 是网关独享）。消耗器满速烧时，网关打这些账号的 kimi-k3 必然
+  `only:` 列的是 `SENSENOVA_API_KEY_01`~`_09`（2026-10-05 统一改名，原 `_10` 值移到 `_01`）。
+  消耗器满速烧时，网关打这些账号的 kimi-k3 必然
   撞 tpm/rpm 429。**诊断网关 429 先看消耗器是否在烧**，这不是网关的错。
 - **探针能判「这个 ID 能不能调」，判不了「你要的产品是哪个 ID」**（2026-09-29
   被用户当面纠正）：`deepseek-v4.1-flash` 403 之后，我据一篇 **09-04 的二手文章**
@@ -524,6 +524,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   - **修法**：删掉那个错位的 `pin_first: true`，在 zk-auto 块内显式写 `pin_first: false`。
     同一批真实轮次回灌立刻变成：推理型 14 条 → kimi-k3，非推理型 10 条 → glm-5.3。
     备份 `config/models.yaml.bak-20260927`。
+    **2026-10-07 补**：服务器上的 `models.yaml` 曾长期停在 `pin_first: true` 旧版，
+    本地 `pin_first: false` 修好后一直没推上去——本轮配置核对才发现并补齐。
   - **为什么不直接删了 pin_first**：它同时是控制台「🤖 ChatGPT」热切换功能的依赖——
     `app/api/admin.py:1239` 硬编码 `pin_first=True`，把所选模型提到 targets[0] 并钉住，
     否则 capability 策略下高分模型恒赢、热切换 silently 无效。所以是「YAML 静态 pin
