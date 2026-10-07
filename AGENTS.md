@@ -430,12 +430,26 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 ## 服务器化改造的坑（2026-10-03）
 
+- **Caddy 的 `ZKAI_PUBLIC_TOKEN` 必须与网关 `.env` 的 `ZKAI_API_TOKEN` 同值**：
+  2026-10-07 实测事故——Caddy 用 79 字符的 `zk-ai-lo...`，网关只有 11 字符，
+  于是 `https://120.53.28.29/zkai/v1/models` **永远 401**，客户端怎么配都拿不到模型。
+  Caddy 是 `/v1/*` 的第一道（也是主力）认证：网关自己的 `/v1/models` **没挂**
+  `require_client_auth`（只有 `app/api/chat.py` 挂了），所以 Caddy 一拦错就全错。
+  同步方法：把 `/opt/zkai/.env` 的 `ZKAI_API_TOKEN` 值写进 `/etc/caddy/zkai.env`
+  的 `ZKAI_PUBLIC_TOKEN`，然后 `systemctl reload caddy`。**别为了「统一」去给
+  `/v1/models` 加认证**——OpenAI 客户端拿目录是不带凭据的，加了会破坏兼容。
+
 - **公网入口只能靠 `ZKAI_PUBLIC_BASE_URL` 显式配置，别用 host:port 猜**：网关只听得到
   自己的 host:port，看不到 Caddy 加的 `/zkai` 前缀。猜出来的地址在公网上打不开，
   而运营者会把它抄给客户端——这种错误静默且难查。判据集中在
   `Settings.public_base_url_effective` / `client_base_url` / `is_remote_deploy` 三个
   属性上，`/health` 的 `deploy` 块与控制台接入面板共用同一份，别在第二处再判一次。
   未配置时回落 `http://<host>:<port>`，本机零配置可用。
+
+- **控制台真实地址是裸 `/ui`，不是 Caddyfile 注释里写的 `/zkconsole/ui`**：
+  2026-10-07 被自己的注释带到 404（那个路径没有路由，落到兜底的智能询价）。
+  Caddyfile 的打开地址注释已改；`/ui` 页面壳公开、数据接口仍走 `/admin/*` 的
+  token 分流（XHR 裸请求 → 网关 401 弹登录框、浏览器导航 → 智能询价）。
 
 - **消耗器账本校准必须注入事件，不能覆盖 burned**：`apply_reconcile()` 写回 burned 时
   是往 `events` 里追加一个差值事件（负数 = 账本多记了），不是改 burned 值——
@@ -473,7 +487,23 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 - **三件事同时成立，少一个就只是「桌面仪表盘被撞窄」**：底部四条挤指可及的 Tab（总览/模型/消耗器/更多，其余收进抽屉）、表格卡片化（`tbody td::before` + `data-label`，列名显示在值左侧）、长页面手风琴。前端只有一个断点：`@media (max-width: 860px)`，桌面端不变（`#mnav` 默认 `display: none`，只在媒体查询里打开）。
 - **固定定位的底部 Tab 会被子元素带飞**：实测到一个 392px 的 `modelscope → deepseek-ai/...` 把 `#mnav` 带到 869px，Tab 翻到屏幕外。所以三层都要：根节点 `overflow-x: hidden`、`td > * { min-width: 0 }`、长串 `word-break: break-all`（`break-word` 在没空格的链路上仍不断行）。
-- **账号核对表单的锚点列恒为空（2026-10-04 修）**：`GET /admin/burner/reconcile` 写死 `_fmt_hhmm(0.0)`，而它对 0 恒返回 `""`。运营者看到空表单会以为账号没配锚点，实际配了。现在走 `account_anchor_ts` / `account_week_anchor_ts`（按账号优先、回落全局、坏值不抛异常）。
+- **弹窗的关闭按钮不许藏在可能被 `display:none` 的区块里**（2026-10-05 事故）：
+  「客户端接入」唯一的「取消」按钮原本在 `#cg-local-zone` 内，而服务器部署时
+  整个本机区被隐藏 → 面板上没有**任何**能关它的控件，只能刷新页面；手机上更致命。
+  现在关闭路径有三重且都在条件隐藏之外：卡头 ✕、modal 最外层的关闭按钮、
+  Esc / 点遮罩（`closeModal` 复用，别再写 `classList.remove`）。
+  守卫 `test_console_zh.py::test_chatgpt_modal_close_is_not_inside_the_local_zone`。
+- **顶层 `const`/`let`/`function` 重复声明 = 整个 `<script>` 中止，页面静默失效**
+  （2026-10-07 事故）：我给消耗器页加 `BURNER_GROUPS` 时漏看文件里已有同名声明，
+  `Identifier 'X' has already been declared` 一抛，**后面所有代码都不执行**——
+  连接状态永远「未连接」、登录框永不弹。症状是「网络问题」其实是 JS 挂了。
+  **所有现役测试都抓不到它**（中文扫描只看文案、DOM 契约只看 id），只有浏览器
+  真跑才暴露。守卫 `test_console_js_has_no_duplicate_top_level_declarations`
+  用「顶层声明唯一性」静态兜住，已用变异法验证鉴别力。
+  **给单文件 vanilla JS 加新顶层符号前，先 grep 一遍同名。**
+- **改完前端必须真机验证**：本机 873 个测试全绿、`/health` 也正常，但页面是死的
+  （上面那条）。真机 = 无头 Chromium 打开 `/ui`、走登录、看目标视图，不是看健康检查。
+- **账号核对表单的锚点列恒为空（2026-10-04 修）**：`GET /admin/burner/reconcile` 写死 `_fmt_hhmm(0.0)`，而它对 0 恒返回 `""`。运营者看到空表单会以为账号没配锚点，实际配了。现在走 `account_anchor_ts` / `account_week_anchor_ts`（按账号优先、回落全局、坏值不抛异常）。**周锚点 2026-10-07 改成「月-日 时刻」**（`10-09 18:10`，照抄商汤控制台「周刷新」列），旧格式 `Wed 18:10` 仍兼容；新格式一律向上取未来边界，向下取会凭空少算一个 7 天窗口的额度。
 - **重启网关只能通过托盘**：gateway 是 `tray_launcher.py` spawn 的子进程，而 `RESTART_REQUEST` 邮箱**只对 burner 模式生效**（`_consume_restart_request` 只在 `self._mode == "burner"` 时调），且托盘不会自动拉起已退出的子进程。所以改代码后重启网关 = `python scripts/launch_hidden.py gateway`（它先杀同模式旧托盘，新托盘的 `_guard_port()` 再清旧 uvicorn）。看 `launch_hidden` 的 docstring 会以为它只防双弹托盘，其实它就是重启入口。
 
 ## Agent 工作方式（2026-09-23，防半途而废）
@@ -484,113 +514,19 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   列为明确不满，动手写每句话前先确认这一点
 - 临时脚本统一放 `exports/_*.py`，跑完即删；不要把审计脚本留在工作区
 
-## 当前状态（持续整理：2026-10-04）
+## 当前状态（持续整理：2026-10-07）
 
-- **`.env` 换行损坏只在换机后发生，共 1 次（2026-09-24）**：115 行全部
-  `\r\r\n`，细节见上面「已知坑」里那条。**9-26 我曾把它写成「第二次复发」，
-  那是误判**——当天真正发生的是：我为给测试跑门禁，用脚本往 `.env` 写过两次最小
-  占位内容，最后一次写成 UTF-16LE（BOM `fffe`）且只剩一个键，**把真配置覆盖掉了**。
-  症状是 `import app.main` 直接 `UnicodeDecodeError`、6 个测试文件 collection error。
-  已从 `.env.bak-20260926` 恢复（UTF-8 无 BOM + 全 CRLF，115 行内容零差异），
-  真实启动验证 `/health` healthy、`/v1/models` 带令牌 200、启动日志 0 ERROR。
-  **教训（写给以后的自己）**：①**绝不用 `read_text()` 读写这个文件**——Python 文本
-  模式会把 CRLF 悄悄归一成 LF，混着写就成了半 LF 半 CRLF；要么全程字节，要么
-  `open(..., newline="")`（同 `chatgpt_service.apply_config`）。②**不许为了跑测试
-  去改本机 `.env`**——那是运营配置，不是测试夹具；门禁跑不了就停下来问，别再自作
-  ③`malformed_env_names()` 是现成的体检入口，返回空才算健康。
-  ④换机已改用一键换机 Skill（项目 `migrate.py` 已删），Skill 引擎不检查 `.env` 换行，
-  但启动日志仍会替你把关。
-- 2026-09-26（请求体/上下文治理，承接 Codex 413 排查）：①`estimated_input_tokens()`
-  补了 `tool_call arguments` 与图片 token，低估 2.67 倍的问题见「已知坑」；
-  ②Codex 截图不再被静默吞（`ZKAI_FORWARD_IMAGES`），见「已知坑」；
-  ③新增 token 闸 `ZKAI_MAX_INPUT_TOKENS`，**智能语义**：超过软上限不要紧，
-  只要有部署装得下就放行，只有「所有部署都装不下」才 413（`Router.plan` 零 I/O）。
-  本机现设 400000——覆盖历史分布 96% 的成功请求，又不误杀 719,090 那种大请求。
-  门禁 ruff / mypy / **616 passed**。
-- 2026-09-27（「智能分工」的真因：`pin_first` 会静默压过 `request_requires` 门槛）：
-  用户要「任何 agent 调用都能合理分工各模型」。**结论：机制本来就存在，一行配置就够，
-  不需要新建子链。**
-  - **现役已有分工机制**：`models.yaml` 里 kimi-k3 三个部署都配了
-    `request_requires: {reasoning: 4.0}`（`DeploymentConfig.request_requires`，
-    `app/routing/capability.py:238`）+ alias 的 `requires`——门槛不达标的部署直接被踢，
-    剩下的才按能力分排序。这套设计是对的，models.yaml 注释写着「旗舰的接活标准」。
-  - **病根**：`zk-auto` 静态配了 `pin_first: true`（且位置错位，夹在 zk-auto 的
-    `fallback_to_local` 与 zk-k3 注释之间，靠巧合归到 zk-auto）。
-    `strategy.py:160-168` 的 pin 分支**只按 `target_index` 排，不看 score、不看门槛**，
-    所以站在 `targets[0]` 的 `step-5-preview`（reasoning 8.5）赢下所有请求。
-    实测 `data/gateway.log`：zk-auto 有 25,642 次给 step-5、仅 3,022 次给 kimi-k3（89:10）；
-    用真实 rollout 24 条轮次回灌（14 条推理型）→ **100% 落 step-5，K3 一次没轮到**，
-    即使它分数更高（0.957 vs 0.837）、即使它过了 reasoning>=4 门槛。
-  - **修法**：删掉那个错位的 `pin_first: true`，在 zk-auto 块内显式写 `pin_first: false`。
-    同一批真实轮次回灌立刻变成：推理型 14 条 → kimi-k3，非推理型 10 条 → glm-5.3。
-    备份 `config/models.yaml.bak-20260927`。
-    **2026-10-07 补**：服务器上的 `models.yaml` 曾长期停在 `pin_first: true` 旧版，
-    本地 `pin_first: false` 修好后一直没推上去——本轮配置核对才发现并补齐。
-  - **为什么不直接删了 pin_first**：它同时是控制台「🤖 ChatGPT」热切换功能的依赖——
-    `app/api/admin.py:1239` 硬编码 `pin_first=True`，把所选模型提到 targets[0] 并钉住，
-    否则 capability 策略下高分模型恒赢、热切换 silently 无效。所以是「YAML 静态 pin
-    有害、代码热切换 pin 必要」——静态的那个删掉即可，热切换不受影响（它每次都会重写）。
-  - **教训（绕了四轮才想通）**：我先后四轮调 `weights`（reasoning 2→8、cost 3→0.5）
-    想让 K3「优先但适度分担」，每轮都是一边倒没有中间态。**真正的原因门槛在
-    `requires` 里、而 pin 在覆盖门槛——调 weights 对这两者都无效。** 识别信号：
-    同一个输入换权重后赢家只在两个模型间整体翻转、分数差恒定，而不是随输入变化。
-    以后遇到「聪明模型永远不接活」，先查 alias 有没有静态 pin_first，再查 weights。
-  - 测试 `tests/test_router.py` 两条（`test_request_requires_gate_divides_labour_without_a_pin`
-    的正向 + `test_a_static_pin_can_silently_defeat_the_request_requires_gate` 的反面对照），
-    已用变异法验证过鉴别力（移除门槛时正向测试精确失败在「机械请求该被门槛挡住」）。
-    门禁 ruff / mypy / **647 passed**。
-  - **现役还有第二层分工：`app/routing/agent_auto.py` 的按「形状」改写**（接线在
-    `router.py:210`，**监控的入口名就是 `zk-auto`**，不是另起的名字）。它在候选展开
-    **之前**按请求形状把 `zk-auto` 改写到别的链，让打分器只在选中的链内排名：
-    ①有图 → `zk-vision`（`requires: {vision: 8.0}` 硬门槛，无视觉能力的模型结构上不可能入选）；
-    ②`est >= 100_000` → `zk-long`（长上下文 + K3 唯一 1M 部署已饱和，机械长读该走空闲链）；
-    ③`has_tools and est >= 24_000` → `zk-long`（Codex 重放 31 个工具 schema + 5 万历史
-    只为产出 300 token 的 ack，不需要 K3 的 9.5 推理）；④其余**不改写**，留在 `zk-auto`
-    让 K3 有机会接。阈值故意设高——短的、规划重的工具轮仍走 `zk-auto`，「质量优先」是默认、
-    「省」是例外。DB 实测 Codex 近 7 天 ≥100k 的 1,131 条命中②。改写只改用于展开的 alias，
-    DB 里 `requested_model` 仍是 `zk-auto`，`zk_ai.alias` 显示改写后的链，可审计。
-  - **两层的边界别混**：`request_requires` 管「哪个部署有资格接」，`agent_auto` 管
-    「这批候选里该不该含 K3」。前者是资格、后者是范围，叠加是乘法不是互相取代。
-  - **差点犯的错**：我一度断定 `agent_auto.py` 是「接线了但没人用的死代码」要删，
-    依据是合成测试显示 `alias` 没变。**那是测试造假**——我只喂了最后一条 user 消息
-    （est 才 1.5k），够不到 24k 门槛，当然不改写；用真实轮次 + 真实规模重测，
-    1,131 条命中②。**教训：判断某段逻辑是否失效，先确认测试输入的量级真实，
-    否则「没触发」很可能是我喂得太小。** 反过来也栽过：我曾据一个合成输入断言
-    「中轮推理型会被误分流到 glm-5.3」，真实轮次下 0 条——**合成输入造出来的缺陷不算缺陷**。
-- 2026-09-26（晚，9.44 亿 input tokens 的病根定位 + `zk-long` + 按别名统计）：病根是
-  **`zk-k3` 单目标死钉 K3**（2,956 条、平均 input 228,745、io 比 640:1，吃掉全站 72%），
-  详见上面 9-27 条——但那条已修正了本条的归因（当时误判为「策略无中间态」，真因是
-  `pin_first` 压过门槛）。**仍然有效的部分**：①新增 `zk-long` 别名
-  （`glm-5.3`→`step-5-preview`→`deepseek-v4-flash`→`glm-5.3-flash`，capability，
-  刻意不含 K3），给客户端一个「要快/要省」的显式选择；②新增控制台「按别名」表
-  （`UsageRepository.summary` 的 `by_alias`，含 io_ratio，前端 >200:1 标黄 /
-  >500:1 标红）——这个维度此前只能靠 SQL 手工查，所以浪费长期隐形；
-  ③`purge_older_than` 必须连带删 `usage_records`，否则 join 不上的行会让
-  `by_alias` 少算（实测 30 天窗口差 15%），且必须用 `in_(select(...))` 子查询
-  （SQLite 变量上限 32766，先查 ID 再 in_ 会让清理永久停止）。
-  测试 `tests/test_usage_by_alias.py`。
-
-- 2026-09-27（晚，项目价值复盘 + 一个待观察的钩子）：复核「这个项目是否值得继续」，
-  结论是**值得，但该收缩而非继续加功能**。硬数据：近 14 天 31,767 条真实请求
-  （峰值一天 8 个客户端同时在线），累计 10.75 亿 input tokens，其中 $2,438
-  （83% 等价牌价）走商汤/NVIDIA/魔搭免费额度、真金白银只 $67。**若没有网关，
-  这批 token 约合 $2,989。** 代码 19,368 行 + 测试 11,595 行（测试/产品 = 60%）。
-  **⚠ 待观察的钩子**：分工修好的次日（09-27），K3 占当日 input 的 98%
-  （8,418 万），而前两日只占 20-21%。**这不是配置改坏**——用同一批真实 Codex
-  轮次受控对比，pin_first=True 时 24 条全落 step-5、False 时推理 14 条落 K3 /
-  非推理 10 条落 glm-5.3，配置在按设计工作。真实成因是**当日会话异常长**
-  （一次会话跨了上下文治理+分工+洁癖，claude-cli 单客户端 562 条、均 14.7 万 tokens）。
-  **教训：诊断模型负担前先分清「配置行为」与「当日会话长度」**，否则会把
-  自己造成的峰值误判成配置事故——我这次就差点又改回去。
-  **真正管这个的是客户端侧**：claude-cli 每轮重发全量历史，是最大 token 消费者；
-  网关分工管不了它，杠杆是「适时开新会话」。
-  **战略判断**：别再加 `/v1/*` 层的编排。已量化：四段编排（分工→规划→执行→
-  审核）会让 Codex 周成本从 $653 涨到 $3,277（5 倍，44.7% 的工具回执也在付
-  编排费），与用户「省 token」的核心诉求方向相反。要高质量产出应走
-  `/ui/agent` 任务台（一次任务付一次编排成本），不走对外路径。
-
-- 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）
-- ~~待办~~（已解决）：moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），
-  `kimi-k3-moonshot` 部署不存在了。`kimi-k3-nvidia` 仍保留但靠自动隔离兜底
-  （见上面「部署级自动隔离」那条）。
+- **`.env` 是运营配置，不是测试夹具**：绝不用 `read_text()` 读写它（CRLF 会被悄悄
+  归一成 LF，半 LF 半 CRLF 混着写就是事故）；要么全程字节，要么 `open(..., newline="")`。
+  门禁跑不了就停下来问，别为了跑测试改它。`malformed_env_names()` 是现成体检入口，
+  返回空才算健康。2026-09-24 换机后那份 `.env` 115 行全 `\r\r\n`，症状是网关 bind
+  失败却报 `getaddrinfo failed`——排查方法见「已知坑」。
+- **战略判断：别再往 `/v1/*` 层加编排**。已量化过：四段编排（分工→规划→执行→审核）
+  会让 Codex 周成本从 $653 涨到 $3,277（5 倍，44.7% 的工具回执也在付编排费），
+  与用户「省 token」的核心诉求方向相反。要高质量产出走 `/ui/agent` 任务台
+  （一次任务付一次编排成本），不走对外路径。**真正管 token 的是客户端侧**：
+  claude-cli 每轮重发全量历史，网关分工管不了它，杠杆是「适时开新会话」。
+- 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）。
+  moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），要恢复需同时加回
+  providers.yaml 的供应商与 models.yaml 的部署；`kimi-k3-nvidia` 仍保留，靠自动隔离兜底。
 

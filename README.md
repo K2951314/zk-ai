@@ -490,6 +490,19 @@ curl.exe -s "http://127.0.0.1:8317/admin/router/preview?model=zk-coding&prompt=w
 `/health` 的 `credentials.usable` 为 0 基本只有两个原因：变量名写错（看启动告警），
 或者 Key 还没填进 `.env`。
 
+改完 `config/*.yaml` 跑一次自洽性体检（悬空部署、不可解析 target、模型启用了但
+0 个可用部署、「Key 不在 .env 里」的迁移缺口、外部改动未 reload）：
+
+```bash
+uv run python scripts/check_config.py
+```
+
+改完代码重启网关（托盘是父进程，不会自动拉起已退出的子进程）：
+
+```bash
+uv run python scripts/launch_hidden.py gateway
+```
+
 调用 Kimi K3（用别名，客户端不用知道后端是谁）：
 
 ```bash
@@ -657,8 +670,8 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 72 个文件约 22,496 行，`tests/` 35 个测试模块 880 个用例（约 15,787 行），
-`scripts/` 18 个文件约 4,724 行。**测试/产品代码 = 70%**。
+规模：`app/` 72 个文件约 22,510 行，`tests/` 36 个测试模块 880 个用例（约 15,903 行），
+`scripts/` 18 个文件约 4,757 行。**测试/产品代码 = 70%**。
 （这两个数字上一次更新是 2026-09-19 的 15,400/7,300/3,600——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
