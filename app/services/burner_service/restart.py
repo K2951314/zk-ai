@@ -127,9 +127,98 @@ def request_restart_ex(data_dir: Path) -> dict[str, Any]:
     }
 
 
+def stop_burner(data_dir: Path) -> dict[str, Any]:
+    """停止消耗器。systemd 模式直接 systemctl stop；托盘模式写 stop 文件。"""
+    mode = detect_restart_mode(data_dir)
+    if mode == "systemd":
+        systemctl = _systemctl() or "systemctl"
+        try:
+            proc = subprocess.run(  # noqa: S603
+                [systemctl, "stop", _SYSTEMD_UNIT],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"mode": "manual", "ok": False,
+                    "message": f"systemctl 停止失败：{exc}",
+                    "command": f"sudo systemctl stop {_SYSTEMD_UNIT}"}
+        if proc.returncode == 0:
+            return {"mode": "systemd", "ok": True,
+                    "message": f"已通过 systemd 停止 {_SYSTEMD_UNIT}"}
+        return {"mode": "manual", "ok": False,
+                "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
+                "command": f"sudo systemctl stop {_SYSTEMD_UNIT}"}
+    if mode == "tray":
+        path = data_dir / "burner_stop.request"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(time.strftime("%Y-%m-%d %H:%M:%S") + "\n", encoding="utf-8")
+        return {"mode": "tray", "ok": True,
+                "message": "已留下停止请求，托盘约 3 秒内停止消耗器"}
+    return {"mode": "manual", "ok": False,
+            "message": "检测不到托盘也检测不到 systemd unit，请手动停止消耗器",
+            "command": "pkill -f burn_sensenova"}
+
+
+def start_burner(data_dir: Path) -> dict[str, Any]:
+    """启动消耗器。systemd 模式直接 systemctl start；托盘模式写 start 文件。"""
+    mode = detect_restart_mode(data_dir)
+    if mode == "systemd":
+        systemctl = _systemctl() or "systemctl"
+        try:
+            proc = subprocess.run(  # noqa: S603
+                [systemctl, "start", _SYSTEMD_UNIT],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"mode": "manual", "ok": False,
+                    "message": f"systemctl 启动失败：{exc}",
+                    "command": f"sudo systemctl start {_SYSTEMD_UNIT}"}
+        if proc.returncode == 0:
+            return {"mode": "systemd", "ok": True,
+                    "message": f"已通过 systemd 启动 {_SYSTEMD_UNIT}"}
+        return {"mode": "manual", "ok": False,
+                "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
+                "command": f"sudo systemctl start {_SYSTEMD_UNIT}"}
+    if mode == "tray":
+        path = data_dir / "burner_start.request"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(time.strftime("%Y-%m-%d %H:%M:%S") + "\n", encoding="utf-8")
+        return {"mode": "tray", "ok": True,
+                "message": "已留下启动请求，托盘约 3 秒内启动消耗器"}
+    return {"mode": "manual", "ok": False,
+            "message": "检测不到托盘也检测不到 systemd unit，请手动启动消耗器",
+            "command": "python scripts/burn_sensenova.py"}
+
+
+def is_burner_running(data_dir: Path) -> bool:
+    """消耗器是否在运行。systemd 看 active 状态；托盘模式看进程或最近的日志。"""
+    if _systemd_unit_active():
+        systemctl = _systemctl()
+        if systemctl is None:
+            return False
+        try:
+            proc = subprocess.run(  # noqa: S603
+                [systemctl, "is-active", _SYSTEMD_UNIT],
+                capture_output=True, text=True, timeout=10,
+            )
+            return proc.returncode == 0 and proc.stdout.strip() == "active"
+        except (OSError, subprocess.SubprocessError):
+            return False
+    # 托盘/本机模式：托盘心跳会写 burner_alive 心跳文件，3 秒内更新 = 活着
+    marker = data_dir / "burner_alive"
+    if not marker.exists():
+        return False
+    try:
+        return time.time() - marker.stat().st_mtime < 10
+    except OSError:
+        return False
+
+
 __all__ = [
     "detect_restart_mode",
+    "is_burner_running",
     "request_restart",
     "request_restart_ex",
     "restart_pending",
+    "start_burner",
+    "stop_burner",
 ]

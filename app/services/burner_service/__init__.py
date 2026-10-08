@@ -48,9 +48,12 @@ from app.services.burner_service.reconcile import (
 from app.services.burner_service.restart import (
     _SYSTEMD_UNIT,
     detect_restart_mode,
+    is_burner_running,
     request_restart,
     request_restart_ex,
     restart_pending,
+    start_burner,
+    stop_burner,
 )
 from app.services.burner_service.status import (
     WIN_5H,
@@ -90,6 +93,7 @@ __all__ = [
     "apply_reconcile",
     "detect_restart_mode",
     "estimate_request_cost",
+    "is_burner_running",
     "is_flash_lite",
     "only_to_set",
     "read_config",
@@ -100,6 +104,8 @@ __all__ = [
     "restart_pending",
     "set_to_only",
     "snapshot",
+    "start_burner",
+    "stop_burner",
     "suggest_calibration",
     "validate_patch",
     "week_anchors_to_accounts",

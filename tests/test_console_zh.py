@@ -259,12 +259,15 @@ def test_burner_view_has_log_and_reconcile_cards() -> None:
 
     2026-10-07 改造：账本校准表格已合并到主窗口账表格（每行内联可编辑），
     rec-table 不再存在；rec-btn-diff / rec-btn-apply 移到主表格下方。
+    2026-10-08 改造：费率校准卡片与 only 复选框已删除（过时），启停切换按钮加入。
     """
     html = _html("index.html")
     for hook in ("bl-log", "bl-state", "bl-follow", "bl-copy", "bl-clear",
-                 "rec-btn-diff", "rec-btn-apply", "rec-only",
-                 "cal-actual", "cal-account", "cal-btn", "cal-adopt"):
+                 "rec-btn-diff", "rec-btn-apply", "btn-burner-toggle"):
         assert f'id="{hook}"' in html, f"挂点 {hook} 必须保留"
+    # 已删除的过时挂点不应存在
+    for gone in ("rec-only", "cal-actual", "cal-account", "cal-btn", "cal-adopt"):
+        assert f'id="{gone}"' not in html, f"过时挂点 {gone} 应已删除"
     # 主表格行内联可编辑：rec-in class 的 input 必须存在
     assert 'class="rec-in"' in html or "class='rec-in'" in html, "主表格必须有可编辑 input（rec-in）"
     # SSE + 降级：EventSource 断了要能自动重连，且轮询兜底
@@ -273,7 +276,6 @@ def test_burner_view_has_log_and_reconcile_cards() -> None:
     assert "/admin/burner/log/tail" in html
     # 核对走「预演 -> 确认 -> 落盘」三步，不能让一次手滑直接写账本
     assert "/admin/burner/reconcile" in html
-    assert "/admin/burner/calibrate" in html
 
 
 def test_burner_account_names_are_shortened() -> None:

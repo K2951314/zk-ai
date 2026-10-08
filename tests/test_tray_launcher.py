@@ -281,16 +281,23 @@ def test_restart_child_does_not_block_the_menu(monkeypatch) -> None:
 # 控制台「保存并重启」：信箱文件 → 托盘重启 burner
 # --------------------------------------------------------------------------- #
 class _CountingChild:
-    """只关心 start() 被调了几次的心跳替身。"""
+    """只关心 start()/stop() 被调了几次的心跳替身。"""
 
     def __init__(self) -> None:
         self.starts = 0
+        self.stops = 0
+        self._stopped = False
 
     def start(self) -> None:
         self.starts += 1
+        self._stopped = False
+
+    def stop(self) -> None:
+        self.stops += 1
+        self._stopped = True
 
     def alive(self) -> bool:
-        return True
+        return not self._stopped
 
     def log_age(self) -> float:
         return 0.0
@@ -309,16 +316,47 @@ def test_restart_request_restarts_the_burner(tmp_path: Path, monkeypatch) -> Non
     from scripts import tray_launcher
 
     req = tmp_path / "burner_restart.request"
+    stop_req = tmp_path / "burner_stop.request"
+    start_req = tmp_path / "burner_start.request"
     monkeypatch.setattr(tray_launcher, "RESTART_REQUEST", req)
+    monkeypatch.setattr(tray_launcher, "STOP_REQUEST", stop_req)
+    monkeypatch.setattr(tray_launcher, "START_REQUEST", start_req)
     tray = _tray("burner")
 
-    assert tray._consume_restart_request() is False, "没有请求就不该重启"
+    # 没有请求就不该动
+    tray._consume_requests()
     assert tray._child.starts == 0
 
+    # restart 请求 → 重启
     req.write_text("2026-09-24 13:00:00\n", encoding="utf-8")
-    assert tray._consume_restart_request() is True
+    tray._consume_requests()
     assert tray._child.starts == 1
     assert not req.exists(), "请求必须被消费掉，否则每次心跳都重启一次"
+
+
+def test_stop_start_requests_control_burner(tmp_path: Path, monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    req = tmp_path / "burner_restart.request"
+    stop_req = tmp_path / "burner_stop.request"
+    start_req = tmp_path / "burner_start.request"
+    monkeypatch.setattr(tray_launcher, "RESTART_REQUEST", req)
+    monkeypatch.setattr(tray_launcher, "STOP_REQUEST", stop_req)
+    monkeypatch.setattr(tray_launcher, "START_REQUEST", start_req)
+    tray = _tray("burner")
+
+    # stop 请求 → 停子进程
+    stop_req.write_text("stop\n", encoding="utf-8")
+    tray._consume_requests()
+    assert stop_req.exists() is False, "stop 请求必须被消费"
+    # 子进程被 stop 后 alive=False（_ChildProcess.stop 把 _proc 置 None）
+    assert tray._child.alive() is False
+
+    # start 请求 → 拉起子进程
+    start_req.write_text("start\n", encoding="utf-8")
+    tray._consume_requests()
+    assert start_req.exists() is False, "start 请求必须被消费"
+    assert tray._child.starts >= 1
 
 
 def test_restart_request_is_ignored_in_gateway_mode(tmp_path: Path, monkeypatch) -> None:

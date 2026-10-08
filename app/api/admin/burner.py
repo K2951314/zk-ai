@@ -237,3 +237,27 @@ async def burner_calibrate(payload: dict[str, Any] = Body(...)) -> dict[str, Any
     else:
         result["adopted"] = False
     return {"ok": True, "calibration": result}
+
+
+@router.post("/burner/stop", summary="停止消耗器")
+async def burner_stop() -> dict[str, Any]:
+    state_file, _ = _burner_paths()
+    result = burner_service.stop_burner(state_file.parent)
+    logger.info("burner stop requested: %s", result.get("message", ""))
+    return {"ok": result["ok"], **result}
+
+
+@router.post("/burner/start", summary="启动消耗器")
+async def burner_start() -> dict[str, Any]:
+    state_file, _ = _burner_paths()
+    result = burner_service.start_burner(state_file.parent)
+    logger.info("burner start requested: %s", result.get("message", ""))
+    return {"ok": result["ok"], **result}
+
+
+@router.get("/burner/running", summary="消耗器是否在运行")
+async def burner_running() -> dict[str, Any]:
+    state_file, _ = _burner_paths()
+    running = burner_service.is_burner_running(state_file.parent)
+    mode = burner_service.detect_restart_mode(state_file.parent)
+    return {"running": running, "mode": mode}

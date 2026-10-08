@@ -2371,10 +2371,11 @@ const BURNER_NUM = new Set(["concurrency","per_account_start","per_account_max",
   "filler_chars","rate_in","rate_out","safety_margin","window_credits","weekly_credits",
   "pool_total_credits","quota_park_hours","cooldown_base","cooldown_max",
   "summary_interval","max_seconds"]);
-const BURNER_WIDE = new Set(["only","anchors","week_anchors","account_groups"]);
+const BURNER_WIDE = new Set(["account_groups"]);
 
 /* 配置表单分组（h5 小标题；别用 h4.sec——手机手风琴按它切片，会再切一刀）。
-   新增键没列入任何组时落到最后的「其它」。 */
+   新增键没列入任何组时落到最后的「其它」。
+   only / anchors / week_anchors / week_anchor 已移至每账号窗口账表格内联编辑，不在这里。 */
 const BURNER_GROUPS = [
   ["烧什么", ["model", "max_tokens", "filler_chars"]],
   ["并发与限流", ["concurrency", "per_account_start", "per_account_max",
@@ -2382,7 +2383,7 @@ const BURNER_GROUPS = [
     "cooldown_base", "cooldown_max"]],
   ["预算与费率", ["rate_in", "rate_out", "safety_margin", "window_credits",
     "weekly_credits", "pool_total_credits", "quota_park_hours"]],
-  ["账号与窗口", ["only", "account_groups", "anchors", "week_anchors", "week_anchor"]],
+  ["账号与窗口", ["account_groups"]],
   ["其它", ["connect_timeout", "read_timeout", "summary_interval", "max_seconds"]],
 ];
 
@@ -2460,6 +2461,7 @@ async function loadBurner() {
   const rows = (d.accounts || []).map(a => {
     const pct5 = a.cap_5h ? Math.min(100, a.burned_5h / a.cap_5h * 100) : 0;
     const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
+    const b5 = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "—";
     const bW = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "—";
     const waTs = a.week_anchor_ts || 0;
     const waInit = waTs ? cgBoundaryText(waTs) : "";
@@ -2481,11 +2483,12 @@ async function loadBurner() {
           value="${num(Math.round(a.left_week))}" title="剩余 ${Math.round(a.left_week)} / 熔断 ${Math.round(a.cap_week)}；填 0 = 停止该账号"
           style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_week))}</div></td>
+      <td><div class="muted small" title="5h 窗口下次重置时间（只读）">${b5}</div></td>
       <td><input class="rec-in" data-f="week_anchor" type="text"
           value="${esc(waInit)}" placeholder="（全局）"
           title="周锚点：照抄商汤控制台的「周刷新」列，填 10月14日 18:10 或 10-14 18:10；留空 = 用全局锚点"
           style="width:120px;font-size:var(--fs-12)">
-        <div class="muted small" title="下次重置时间（只读，由锚点算出）">下次重置 ${bW}</div></td>
+        <div class="muted small" title="周窗口下次重置时间（只读，由锚点算出）">周重置 ${bW}</div></td>
       <td class="small">目标 ${num(a.target)} · 成功 ${num(a.ok)}
         · <span title="与同实例其他账号抢每分钟配额，窗口滑过就恢复">限流 ${num(a.freq_hits ?? 0)}</span>
         · <span title="专属池+通用池都扣完了，停靠到周刷新">额度用尽 ${num(a.quota_hits ?? 0)}</span>
@@ -2526,18 +2529,19 @@ async function loadBurner() {
           看到某个号「一直限流」，是它在饿——网关会给饿超过 5 分钟的号临时借一点并发
           （显示「已救济」），成功一次就收回。「<b>限流停靠</b>」是连续撞 limit 满阈值后主动停手，
           省下每次冷却期满去撞一次的纯空转。
-          <br><br><b>周锚点（下次重置）</b>：直接在表格「下次重置」列填 <code>月-日 时刻</code>
+          <br><br><b>周锚点（周重置）</b>：直接在表格「周重置」列填 <code>月-日 时刻</code>
           （例 <code>10-14 18:10</code> 或 <code>10月14日 18:10</code>）——
           <b>照抄商汤控制台的「周刷新」那一列</b>，不用自己算星期几。留空 = 用全局锚点。</div>
       </details>
     </div>
     <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 剩余</th><th>本周剩余</th>
-      <th>下次重置</th><th>状态 / 参与</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
+      <th>5h 重置</th><th>周重置</th><th>状态 / 参与</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
     <div class="row-flex" style="gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap">
       <button class="mini" id="rec-btn-diff">预演改动</button>
-      <button class="primary mini" id="rec-btn-apply">保存改动并重启</button>
-      <span class="muted small" id="rec-hint">改剩余 = 校准账本；填 0 = 停止该账号；改下次重置 = 对齐官网</span>
+      <button class="primary mini" id="rec-btn-apply">保存改动并重启消耗器</button>
+      <button class="mini" id="btn-burner-toggle" title="启动或停止消耗器进程">…</button>
+      <span class="muted small" id="rec-hint">改剩余 = 校准账本；填 0 = 停止该账号；改周重置 = 对齐官网</span>
       <span class="muted small" id="rec-diff" style="display:none"></span>
     </div>
     <h4 class="sec">实时日志</h4>
@@ -2555,37 +2559,21 @@ async function loadBurner() {
       <pre id="bl-log" style="margin:0;padding:12px;height:280px;overflow:auto;font-size:var(--fs-12);line-height:1.55;white-space:pre-wrap;word-break:break-all"></pre>
     </div>
 
-    <details class="card" style="margin-top:14px" open>
-      <summary style="cursor:pointer;font-weight:600;padding:2px 0">🔧 费率校准 & 只烧这些 Key</summary>
-      <div class="note" style="margin-top:8px">账本的「已烧」是按费率<b>估算</b>的，商汤后台的「实扣」才是真的。
-        把后台某段时段的实扣积分填进来，按账本同期 token 反推费率。
-        <b>时段必须对齐</b>：账本记的是「累计」，实扣也必须是同样范围的累计。</div>
-      <div class="formgrid" style="margin-top:10px">
-        <label>实扣积分（累计）<input id="cal-actual" type="number" step="any" min="0" placeholder="如 120000"></label>
-        <label>只算这个账号（可空）<input id="cal-account" placeholder="如 S_02（留空算全部）"></label>
-      </div>
-      <div class="modal-actions">
-        <button id="cal-btn">算出建议费率</button>
-        <button class="primary" id="cal-adopt" style="display:none">采纳并重启</button>
-        <span class="muted small" id="cal-out"></span>
-      </div>
-      <div class="small" style="margin:14px 0 4px;font-weight:600">只烧这些 Key（only）<span class="muted">—— 取消勾选 = 不烧该账号</span></div>
-      <div id="rec-only" class="row-flex" style="flex-wrap:wrap;gap:8px"></div>
-    </details>
-
     <details class="card" style="margin-top:14px">
-      <summary style="cursor:pointer;font-weight:600;padding:2px 0">⚙ 高级配置（27 项，默认收起）</summary>
-      <div class="note" style="margin-top:10px">改完点保存会写入 <code>config/burner.yaml</code> 并重启消耗器生效。
-        热更键（并发 / 费率 / 预算 / 锚点）立即生效，重启键（model / only / account_groups / 窗口锚点）要重启才生效——
-        页面里改这两者走的是「账号核对」流程，不是这里。</div>
+      <summary style="cursor:pointer;font-weight:600;padding:2px 0">⚙ 高级配置（默认收起）</summary>
+      <div class="note" style="margin-top:10px">改完点保存会写入 <code>config/burner.yaml</code> 并重启消耗器生效（约 3 秒）。
+        费率 / 并发 / 预算等热更键改完即生效，模型等重启键要重启才生效。</div>
       <div class="cfg-grid" style="margin-top:12px">${fields}</div>
       <div class="modal-actions">
-        <button id="bf-save" class="primary">保存并重启</button>
+        <button id="bf-save" class="primary">保存并重启消耗器</button>
         <span class="muted small">写入 config/burner.yaml（保留注释），并让托盘重启消耗器使配置生效（约 3 秒）</span>
       </div>
     </details>`;
   $("#bf-save").onclick = saveBurnerConfig;
-  $("#cal-btn").onclick = calRun;
+  // 启停切换按钮
+  const toggleBtn = $("#btn-burner-toggle");
+  if (toggleBtn) toggleBtn.onclick = toggleBurner;
+  refreshBurnerToggle();
   // 日志 SSE 只连一次：loadBurner 会被自动刷新反复调用，每次重连会把
   // 历史重发一遍并让滚动位置乱跳。
   if (!burnLog.es && !burnLog.timer) blWire();
@@ -2692,15 +2680,10 @@ function recNum(v) { return v === null || v === undefined || v === "" ? "" : Str
 
 async function loadReconcile() {
   // 表格行由 loadBurner 用 snapshot 数据渲染（可编辑 input 已内联），
-  // 这里只负责加载 only 复选框列表 + 绑定保存/预演按钮。
-  // 消耗器没跑时账本文件还在，snapshot 和 reconcile 都能正常返回数据。
+  // 这里只负责绑定保存/预演按钮。消耗器没跑时账本文件还在，
+  // snapshot 和 reconcile 都能正常返回数据。
   try {
     recState = await api("/admin/burner/reconcile");
-    const only = recState.config || {};
-    const onlyEl = $("#rec-only");
-    if (onlyEl) onlyEl.innerHTML = (only.only || []).map(k =>
-      `<label class="row-flex small" style="gap:4px" title="${esc(k)}"><input type="checkbox" class="rec-only" value="${esc(k)}" checked> ${esc(sName(k))}</label>`
-    ).join("") || '<span class="muted small">没有可选的 Key</span>';
     const hint = $("#rec-hint");
     if (hint) hint.textContent = recState.ledger_saved_at
       ? `账本更新于 ${recState.ledger_saved_at}`
@@ -2726,11 +2709,7 @@ function recCollect() {
     });
     accounts.push(item);
   });
-  const only = [];
-  document.querySelectorAll(".rec-only").forEach(el => { if (el.checked) only.push(el.value); });
-  const patch = { accounts };
-  if (only.length) patch.only = only;
-  return patch;
+  return { accounts };
 }
 
 function recDiff() {
@@ -2788,7 +2767,7 @@ async function recApply() {
   const willRestart = cfgKeys.length > 0;
   if (!confirm(`确认保存？\n`
     + `将写入消耗器账本${cfgKeys.length ? "和 burner.yaml（" + cfgKeys.join("、") + "）" : ""}\n`
-    + (willRestart ? "改的是 only/anchors 这类键，保存后会自动重启消耗器（正在飞的两三秒请求会被断）。\n" : "")
+    + (willRestart ? "改的是配置键，保存后会自动重启消耗器（正在飞的两三秒请求会被断）。\n" : "")
     + "\n按「确定」继续。")) return;
   try {
     const r = await api("/admin/burner/reconcile?restart=true", { method: "PUT", json: patch });
@@ -2802,44 +2781,51 @@ async function recApply() {
   } catch (err) { toast(err.message, "err"); }
 }
 
-async function calRun() {
-  const actual = Number($("#cal-actual").value);
-  const account = $("#cal-account").value.trim();
-  if (!actual) { toast("先填实扣积分", "err"); return; }
-  $("#cal-out").textContent = "计算中…";
-  $("#cal-adopt").style.display = "none";
+async function toggleBurner() {
+  const btn = $("#btn-burner-toggle");
+  if (!btn) return;
+  btn.disabled = true;
   try {
-    const r = await api("/admin/burner/calibrate", {
-      method: "POST", json: { actual_credits: actual, account },
-    });
-    const c = r.calibration;
-    $("#cal-out").innerHTML =
-      `建议 <code>入 ${c.suggested.rate_in} / 出 ${c.suggested.rate_out}</code>`
-      + `　当前账本 <code>入 ${c.current.rate_in} / 出 ${c.current.rate_out}</code>`
-      + `　账本 token 入 ${Math.round(c.ledger_tokens.tokens_in / 1e3)}K / 出 ${Math.round(c.ledger_tokens.tokens_out / 1e3)}K`
-      + `<div class="muted small" style="margin-top:4px">${esc(c.caveat)}</div>`;
-    $("#cal-adopt").style.display = "";
-    $("#cal-adopt").onclick = () => calAdopt(actual, account);
+    const st = await api("/admin/burner/running");
+    if (st.running) {
+      if (!confirm("确定停止消耗器？停止后积分不再消耗。")) return;
+      const r = await api("/admin/burner/stop", { method: "POST" });
+      toast(r.message || "已停止", r.ok ? "ok" : "err");
+      if (!r.ok && r.command) toast("手动执行：" + r.command, "err");
+    } else {
+      const r = await api("/admin/burner/start", { method: "POST" });
+      toast(r.message || "已启动", r.ok ? "ok" : "err");
+      if (!r.ok && r.command) toast("手动执行：" + r.command, "err");
+    }
+    setTimeout(refreshBurnerToggle, 1500);
+    setTimeout(() => { loadBurner(); }, 3500);
   } catch (err) {
-    $("#cal-out").textContent = "";
     toast(err.message, "err");
+  } finally {
+    btn.disabled = false;
   }
 }
 
-async function calAdopt(actual, account) {
-  if (!confirm(`采纳建议费率并写入 burner.yaml + 账本，然后重启消耗器？\n`
-    + "重启只影响正在飞的两三秒请求。")) return;
+async function refreshBurnerToggle() {
+  const btn = $("#btn-burner-toggle");
+  if (!btn) return;
   try {
-    const r = await api("/admin/burner/calibrate", {
-      method: "POST", json: { actual_credits: actual, account, adopt: true },
-    });
-    const rs = r.calibration.restart || {};
-    toast(`已采纳：入 ${r.calibration.suggested.rate_in} / 出 ${r.calibration.suggested.rate_out}；${rs.message || ""}`,
-      rs.ok ? "ok" : "err");
-    await loadBurner();
-    setTimeout(loadBurner, 4000);
-  } catch (err) { toast(err.message, "err"); }
+    const st = await api("/admin/burner/running");
+    if (st.running) {
+      btn.textContent = "⏹ 停止消耗器";
+      btn.className = "mini is-err";
+      btn.title = "消耗器运行中，点击停止";
+    } else {
+      btn.textContent = "▶ 启动消耗器";
+      btn.className = "mini is-ok";
+      btn.title = "消耗器已停止，点击启动";
+    }
+  } catch {
+    btn.textContent = "▶ 启动消耗器";
+    btn.title = "无法获取消耗器状态";
+  }
 }
+
 async function saveBurnerConfig() {
   const patch = {};
   document.querySelectorAll("#view-burner [id^='bf-']").forEach(el => {

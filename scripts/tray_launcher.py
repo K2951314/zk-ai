@@ -100,6 +100,9 @@ _SILENT_AFTER = 90.0
 #: 重启后删掉。这样既不用给 burner 开端口/信号，也不改父子结构。
 #: 路径可被 ZKAI_DATA_DIR 覆盖，测试用 tmp_path 隔离。
 RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_restart.request"
+STOP_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_stop.request"
+START_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_start.request"
+_ALIVE_MARKER = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_alive"
 _HEARTBEAT_EVERY = 3.0
 
 
@@ -364,27 +367,56 @@ class TrayLauncher:
 
         threading.Thread(target=_go, daemon=True).start()
 
-    def _consume_restart_request(self) -> bool:
-        """控制台请求重启消耗器 → 读一下、删掉、重启子进程。
+    def _consume_requests(self) -> None:
+        """控制台请求 stop/start/restart 消耗器 → 读信箱、删掉、执行。
 
-        返回是否真的重启了（只在 burner 模式有意义；网关模式没有这个信箱）。
+        stop：停子进程但不退出托盘（托盘还活着，能再 start）。
+        start：子进程没在跑就拉起来。
+        restart：等价于 stop + start。
         """
+        if self._mode != "burner":
+            return
+        # stop
         try:
-            if not RESTART_REQUEST.exists():
-                return False
-            RESTART_REQUEST.unlink()
+            if STOP_REQUEST.exists():
+                STOP_REQUEST.unlink()
+                logger.info("stop requested by the console; stopping %s", self._mode)
+                self._child.stop()
         except OSError:
-            return False
-        logger.info("restart requested by the console; restarting %s", self._mode)
-        self._child.start()
-        return True
+            pass
+        # start
+        try:
+            if START_REQUEST.exists():
+                START_REQUEST.unlink()
+                if self._child.alive():
+                    logger.info("start requested but %s already running", self._mode)
+                else:
+                    logger.info("start requested by the console; starting %s", self._mode)
+                    self._child.start()
+        except OSError:
+            pass
+        # restart
+        try:
+            if RESTART_REQUEST.exists():
+                RESTART_REQUEST.unlink()
+                logger.info("restart requested by the console; restarting %s", self._mode)
+                self._child.start()
+        except OSError:
+            return
 
     def _heartbeat_loop(self) -> None:
         while self._running:
             time.sleep(_HEARTBEAT_EVERY)
             try:
                 if self._mode == "burner":
-                    self._consume_restart_request()
+                    self._consume_requests()
+                    # 写心跳标记，让网关 /admin/burner/running 能判断消耗器是否活着
+                    if self._child.alive():
+                        with contextlib.suppress(OSError):
+                            _ALIVE_MARKER.write_text(
+                                time.strftime("%Y-%m-%d %H:%M:%S") + "\n",
+                                encoding="utf-8",
+                            )
                 self._refresh()
             except Exception:
                 logger.exception("tray heartbeat failed for %s", self._mode)
