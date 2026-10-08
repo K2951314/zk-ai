@@ -2474,12 +2474,12 @@ async function loadBurner() {
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pct5 * 1.2)}px"><i></i></div></div>
         <input class="rec-in" data-f="left_5h" type="number" step="any" min="0"
           value="${num(Math.round(a.left_5h))}" title="剩余 ${Math.round(a.left_5h)} / 熔断 ${Math.round(a.cap_5h)}；填 0 = 停止该账号"
-          style="width:80px;font-size:var(--fs-12)">
+          style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_5h))} · ≈${num(a.requests_left_5h)} 条</div></td>
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pctW * 1.2)}px"><i></i></div></div>
         <input class="rec-in" data-f="left_week" type="number" step="any" min="0"
           value="${num(Math.round(a.left_week))}" title="剩余 ${Math.round(a.left_week)} / 熔断 ${Math.round(a.cap_week)}；填 0 = 停止该账号"
-          style="width:80px;font-size:var(--fs-12)">
+          style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_week))}</div></td>
       <td><input class="rec-in" data-f="week_anchor" type="text"
           value="${esc(waInit)}" placeholder="（全局）"
