@@ -75,7 +75,9 @@ watch_config_interval: ${ZKAI_WATCH_CONFIG_INTERVAL:-2.0}
 # 同一个 provider 内部优先用哪把 Key：
 #   priority | round_robin | weighted | least_failures | fastest
 #   （优先级 / 轮询 / 加权 / 失败最少 / 最快）
-credential_rotation: priority
+# weighted：在同一个 priority 档内按 weight 加权随机选。多账号多 Key 时
+# 能让每把 Key 的选中概率略有差异，避免请求分布过于规律被上游监控到。
+credential_rotation: weighted
 
 # ---------------------------------------------------------------------------
 # 会话亲和（sticky session）：同一通对话优先复用上一步成功的那把 Key。
@@ -150,8 +152,10 @@ cooldown:
   throttle_scopes:
     # 默认 account（不是 provider）：2026-09-28 实测证明商汤的 tpm/rpm 桶
     # 按账号分，不是全供应商共享。判成 provider 会把健康账号一起停靠。
+    # throughput 默认 credential（2026-10-08）：9 把 Key = 9 个独立账号时，
+    # 一把 429 只该冷这一把，让调度器继续在其余 8 把里随机选。
     quota: ${ZKAI_THROTTLE_SCOPE_QUOTA:-account}
-    throughput: ${ZKAI_THROTTLE_SCOPE_THROUGHPUT:-account}
+    throughput: ${ZKAI_THROTTLE_SCOPE_THROUGHPUT:-credential}
     frequency: ${ZKAI_THROTTLE_SCOPE_FREQUENCY:-credential}
     unknown: ${ZKAI_THROTTLE_SCOPE_UNKNOWN:-credential}
 
