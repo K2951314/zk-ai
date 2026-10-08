@@ -74,6 +74,44 @@ def detect_restart_mode(data_dir: Path) -> str:
     return "manual"
 
 
+def _run_systemctl_action(action: str) -> dict[str, Any]:
+    """执行 systemctl <action> zkai-burner，自动尝试 sudo -n 免密。
+
+    网关进程通常以非 root 用户运行，裸 ``systemctl stop`` 会因 PolicyKit
+    交互认证失败。先试裸命令（本机或有 polkit 授权时直接成功），失败后
+    试 ``sudo -n``（服务器配了免密 sudoers 就能过），都失败才回 manual。
+
+    ``action`` 只接受 ``stop`` / ``start`` / ``restart`` 三个常量。
+    """
+    systemctl = _systemctl()
+    if systemctl is None:
+        return {"mode": "manual", "ok": False,
+                "message": "找不到 systemctl",
+                "command": f"sudo systemctl {action} {_SYSTEMD_UNIT}"}
+    for cmd_prefix in ([systemctl], ["sudo", "-n", systemctl]):
+        try:
+            proc = subprocess.run(  # noqa: S603 固定命令+常量，无外部输入
+                [*cmd_prefix, action, _SYSTEMD_UNIT],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            return {"mode": "systemd", "ok": True,
+                    "message": f"已通过 systemd {action} {_SYSTEMD_UNIT}"}
+        # 裸 systemctl 失败可能是权限不够，继续试 sudo -n；
+        # sudo -n 也失败就真的不行了。
+        if cmd_prefix[0] == systemctl:
+            continue
+        return {"mode": "manual", "ok": False,
+                "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
+                "command": f"sudo systemctl {action} {_SYSTEMD_UNIT}"}
+    # 两种方式都因异常跳过了
+    return {"mode": "manual", "ok": False,
+            "message": f"systemctl {action} 执行失败（权限或路径问题）",
+            "command": f"sudo systemctl {action} {_SYSTEMD_UNIT}"}
+
+
 def request_restart_ex(data_dir: Path) -> dict[str, Any]:
     """按部署形态请求重启，返回 {mode, message, command, ok}。
 
@@ -82,34 +120,7 @@ def request_restart_ex(data_dir: Path) -> dict[str, Any]:
     """
     mode = detect_restart_mode(data_dir)
     if mode == "systemd":
-        systemctl = _systemctl() or "systemctl"
-        try:
-            proc = subprocess.run(  # noqa: S603 固定命令+常量 unit 名，无外部输入
-                [systemctl, "restart", _SYSTEMD_UNIT],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {
-                "mode": "manual",
-                "ok": False,
-                "message": f"systemctl 重启失败：{exc}",
-                "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
-            }
-        if proc.returncode == 0:
-            return {
-                "mode": "systemd",
-                "ok": True,
-                "message": f"已通过 systemd 重启 {_SYSTEMD_UNIT}",
-                "command": f"systemctl restart {_SYSTEMD_UNIT}",
-            }
-        return {
-            "mode": "manual",
-            "ok": False,
-            "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
-            "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
-        }
+        return _run_systemctl_action("restart")
     if mode == "tray":
         path = request_restart(data_dir)
         return {
@@ -131,22 +142,7 @@ def stop_burner(data_dir: Path) -> dict[str, Any]:
     """停止消耗器。systemd 模式直接 systemctl stop；托盘模式写 stop 文件。"""
     mode = detect_restart_mode(data_dir)
     if mode == "systemd":
-        systemctl = _systemctl() or "systemctl"
-        try:
-            proc = subprocess.run(  # noqa: S603
-                [systemctl, "stop", _SYSTEMD_UNIT],
-                capture_output=True, text=True, timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"mode": "manual", "ok": False,
-                    "message": f"systemctl 停止失败：{exc}",
-                    "command": f"sudo systemctl stop {_SYSTEMD_UNIT}"}
-        if proc.returncode == 0:
-            return {"mode": "systemd", "ok": True,
-                    "message": f"已通过 systemd 停止 {_SYSTEMD_UNIT}"}
-        return {"mode": "manual", "ok": False,
-                "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
-                "command": f"sudo systemctl stop {_SYSTEMD_UNIT}"}
+        return _run_systemctl_action("stop")
     if mode == "tray":
         path = data_dir / "burner_stop.request"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,22 +158,7 @@ def start_burner(data_dir: Path) -> dict[str, Any]:
     """启动消耗器。systemd 模式直接 systemctl start；托盘模式写 start 文件。"""
     mode = detect_restart_mode(data_dir)
     if mode == "systemd":
-        systemctl = _systemctl() or "systemctl"
-        try:
-            proc = subprocess.run(  # noqa: S603
-                [systemctl, "start", _SYSTEMD_UNIT],
-                capture_output=True, text=True, timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"mode": "manual", "ok": False,
-                    "message": f"systemctl 启动失败：{exc}",
-                    "command": f"sudo systemctl start {_SYSTEMD_UNIT}"}
-        if proc.returncode == 0:
-            return {"mode": "systemd", "ok": True,
-                    "message": f"已通过 systemd 启动 {_SYSTEMD_UNIT}"}
-        return {"mode": "manual", "ok": False,
-                "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
-                "command": f"sudo systemctl start {_SYSTEMD_UNIT}"}
+        return _run_systemctl_action("start")
     if mode == "tray":
         path = data_dir / "burner_start.request"
         path.parent.mkdir(parents=True, exist_ok=True)

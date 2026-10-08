@@ -2481,13 +2481,15 @@ async function loadBurner() {
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pct5 * 1.2)}px"><i></i></div></div>
         <input class="rec-in" data-f="left_5h" type="number" step="any" min="0"
           value="${num(Math.round(a.left_5h))}" title="剩余 ${Math.round(a.left_5h)} / 熔断 ${Math.round(a.cap_5h)}；填 0 = 停止该账号"
+          data-cost="${d.request_cost || 0}" data-cap="${Math.round(a.cap_5h)}"
           style="width:110px;font-size:var(--fs-12)">
-        <div class="muted small">/ ${num(Math.round(a.cap_5h))} · ≈${num(a.requests_left_5h)} 条</div></td>
+        <div class="muted small">/ ${num(Math.round(a.cap_5h))} · <span class="req-left-5h">≈${num(a.requests_left_5h)} 条</span></div></td>
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pctW * 1.2)}px"><i></i></div></div>
         <input class="rec-in" data-f="left_week" type="number" step="any" min="0"
           value="${num(Math.round(a.left_week))}" title="剩余 ${Math.round(a.left_week)} / 熔断 ${Math.round(a.cap_week)}；填 0 = 停止该账号"
+          data-cost="${d.request_cost || 0}" data-cap="${Math.round(a.cap_week)}"
           style="width:110px;font-size:var(--fs-12)">
-        <div class="muted small">/ ${num(Math.round(a.cap_week))}</div></td>
+        <div class="muted small">/ ${num(Math.round(a.cap_week))} · <span class="req-left-week">≈${num(a.requests_left_week)} 条</span></div></td>
       <td><input class="rec-in" data-f="anchor" type="text"
           value="${esc(a5Init)}" placeholder="（滚动）"
           title="5h 锚点：填 10月8日 14:00 或 10-08 14:00；留空 = 滚动窗口"
@@ -2586,6 +2588,27 @@ async function loadBurner() {
   const toggleBtn = $("#btn-burner-toggle");
   if (toggleBtn) toggleBtn.onclick = toggleBurner;
   refreshBurnerToggle();
+  // 输入框实时更新剩余条数：改 left_5h / left_week 时立刻重算 ≈N 条
+  document.querySelectorAll("#view-burner input.rec-in[data-f='left_5h']").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const cost = parseFloat(inp.dataset.cost || 0);
+      const span = inp.closest("td").querySelector(".req-left-5h");
+      if (span && cost > 0) {
+        const left = parseFloat(inp.value) || 0;
+        span.textContent = "≈" + num(Math.round(left / cost)) + " 条";
+      }
+    });
+  });
+  document.querySelectorAll("#view-burner input.rec-in[data-f='left_week']").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const cost = parseFloat(inp.dataset.cost || 0);
+      const span = inp.closest("td").querySelector(".req-left-week");
+      if (span && cost > 0) {
+        const left = parseFloat(inp.value) || 0;
+        span.textContent = "≈" + num(Math.round(left / cost)) + " 条";
+      }
+    });
+  });
   // 日志 SSE 只连一次：loadBurner 会被自动刷新反复调用，每次重连会把
   // 历史重发一遍并让滚动位置乱跳。
   if (!burnLog.es && !burnLog.timer) blWire();

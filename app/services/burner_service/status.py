@@ -193,6 +193,7 @@ def account_view(acct: AccountStatus, now: float, global_week_anchor: float,
         "tokens_in": acct.tokens_in,
         "tokens_out": acct.tokens_out,
         "requests_left_5h": int(left5 / request_cost) if request_cost > 0 else 0,
+        "requests_left_week": int(leftw / request_cost) if request_cost > 0 else 0,
     }
 
 
