@@ -2442,6 +2442,23 @@ async function loadBurner() {
   const totalCap = accts.reduce((s, a) => s + (a.cap_week || 0), 0);
   const totalLeft = Math.max(0, totalCap - totalBurned);
   const totalPct = totalCap ? Math.min(100, totalBurned / totalCap * 100) : 0;
+  // 5h 窗口汇总
+  const totalBurned5h = accts.reduce((s, a) => s + (a.burned_5h || 0), 0);
+  const totalCap5h = accts.reduce((s, a) => s + (a.cap_5h || 0), 0);
+  const totalLeft5h = Math.max(0, totalCap5h - totalBurned5h);
+  const totalPct5h = totalCap5h ? Math.min(100, totalBurned5h / totalCap5h * 100) : 0;
+  // 账号状态统计
+  const parkedCount = accts.filter(a => a.parked || a.absolute_capped).length;
+  const rateParkedCount = accts.filter(a => a.rate_parked).length;
+  const activeCount = accts.length - parkedCount - rateParkedCount;
+  // 账本新鲜度：saved_at 距今多久
+  const ledgerAge = L.saved_at ? Date.now() - new Date(L.saved_at.replace(/-/g, "/")).getTime() : 0;
+  const ledgerStale = ledgerAge > 3600000; // 超过 1 小时算过时
+  const ledgerAgeText = ledgerAge > 86400000
+    ? Math.floor(ledgerAge / 3600000) + " 小时前"
+    : ledgerAge > 3600000
+      ? Math.floor(ledgerAge / 60000) + " 分钟前"
+      : "刚刚";
   // 最高风险账号：周烧比例最高的那个
   const riskAcct = accts.map(a => ({
     name: sName(a.name), pct: a.cap_week ? a.burned_week / a.cap_week * 100 : 0,
@@ -2453,14 +2470,15 @@ async function loadBurner() {
       + (riskAcct.pct >= 95 ? ` · 仅剩 ${num(Math.round(riskAcct.left))}` : "")
       + (riskAcct.parked ? " · 停靠中" : "")
     : "—";
-  // 安全系数风险说明：0.95 = 5% 缓冲，说人话
+  // 安全系数风险说明：1.0 = 不打折（满额烧），0.95 = 留 5% 缓冲
   const sm = L.safety_margin || 0;
-  const smTone = sm >= 0.95 ? "err" : sm >= 0.85 ? "warn" : "ok";
-  const smSub = sm >= 0.95
-    ? `缓冲仅 ${(1 - sm) * 100 | 0}%（${num(Math.round(600000 * (1 - sm)))} 积分），费率偏低就会烧穿`
-    : sm >= 0.85
-      ? `缓冲 ${(1 - sm) * 100 | 0}%（${num(Math.round(600000 * (1 - sm)))} 积分），正常`
-      : `缓冲充足（${(1 - sm) * 100 | 0}%）`;
+  const smTone = sm >= 0.99 ? "warn" : sm >= 0.9 ? "ok" : "warn";
+  const smBufPct = Math.round((1 - sm) * 100);
+  const smSub = sm >= 0.99
+    ? `无缓冲（满额烧），需勤核对费率`
+    : sm >= 0.9
+      ? `留 ${smBufPct}% 缓冲（约 ${num(Math.round(600000 * (1 - sm)))} 积分），正常`
+      : `留 ${smBufPct}% 缓冲，偏保守`;
   const rows = (d.accounts || []).map(a => {
     const pct5 = a.cap_5h ? Math.min(100, a.burned_5h / a.cap_5h * 100) : 0;
     const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
@@ -2476,13 +2494,13 @@ async function loadBurner() {
       <td><b title="${esc(a.name)}">${esc(sName(a.name))}</b><div class="muted small">${tag}</div></td>
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pct5 * 1.2)}px"><i></i></div></div>
         <input class="rec-in" data-f="left_5h" type="number" step="any" min="0"
-          value="${num(Math.round(a.left_5h))}" title="剩余 ${Math.round(a.left_5h)} / 熔断 ${Math.round(a.cap_5h)}；填 0 = 停止该账号"
+          value="${Math.round(a.left_5h)}" title="剩余 ${Math.round(a.left_5h)} / 熔断 ${Math.round(a.cap_5h)}；填 0 = 停止该账号"
           data-cost="${d.request_cost || 0}" data-cap="${Math.round(a.cap_5h)}"
           style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_5h))} · <span class="req-left-5h">≈${num(a.requests_left_5h)} 条</span></div></td>
       <td><div class="row-flex"><div class="bar" style="width:${Math.max(4, pctW * 1.2)}px"><i></i></div></div>
         <input class="rec-in" data-f="left_week" type="number" step="any" min="0"
-          value="${num(Math.round(a.left_week))}" title="剩余 ${Math.round(a.left_week)} / 熔断 ${Math.round(a.cap_week)}；填 0 = 停止该账号"
+          value="${Math.round(a.left_week)}" title="剩余 ${Math.round(a.left_week)} / 熔断 ${Math.round(a.cap_week)}；填 0 = 停止该账号"
           data-cost="${d.request_cost || 0}" data-cap="${Math.round(a.cap_week)}"
           style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_week))} · <span class="req-left-week">≈${num(a.requests_left_week)} 条</span></div></td>
@@ -2514,8 +2532,11 @@ async function loadBurner() {
     </div>
     ${warn ? `<div class="attention">${warn}</div>` : ""}
     <div class="grid kpis">
+      ${kpi("5h 窗口剩余", `${num(Math.round(totalLeft5h))}<span class="muted small"> / ${num(Math.round(totalCap5h))}</span>`,
+        `已烧 ${num(Math.round(totalBurned5h))}（${totalPct5h.toFixed(0)}%）· ${activeCount} 活跃 / ${parkedCount} 停靠 / ${rateParkedCount} 限流停靠`,
+        totalPct5h >= 80 ? "err" : totalPct5h >= 50 ? "warn" : "ok")}
       ${kpi("本周剩余", `${num(Math.round(totalLeft))}<span class="muted small"> / ${num(Math.round(totalCap))}</span>`,
-        `已烧 ${num(Math.round(totalBurned))} 积分（${totalPct.toFixed(0)}%）· ${num(accts.length)} 个账号 · 更新于 ${esc(L.saved_at || "—")}`,
+        `已烧 ${num(Math.round(totalBurned))}（${totalPct.toFixed(0)}%）· ${num(accts.length)} 个账号 · 账本 ${ledgerStale ? "⚠ " : ""}${esc(ledgerAgeText)}`,
         totalPct >= 80 ? "err" : totalPct >= 50 ? "warn" : "ok")}
       ${kpi("最高风险账号", riskText,
         riskAcct && riskAcct.pct >= 95 ? "已逼近熔断线，专属池可能溢出扣通用池" : "周烧比例最高的账号",
