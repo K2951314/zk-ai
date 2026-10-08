@@ -263,6 +263,9 @@ function rankBadge(n) {
 
 
 async function api(path, opts = {}) {
+  // 2026-10-08：admin API 前缀从 /admin 迁移到 /zkadmin，把 /admin/* 彻底
+  // 归还智能询价。所有调用处仍写 /admin/xxx，这里统一加前缀，改一处即可。
+  if (path.startsWith("/admin/")) path = "/zkadmin/" + path.slice(7);
   const headers = Object.assign({}, opts.headers);
   if (state.token) headers["X-Admin-Token"] = state.token;
   if (opts.json !== undefined) {
@@ -2463,6 +2466,8 @@ async function loadBurner() {
     const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
     const b5 = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "—";
     const bW = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "—";
+    const a5Ts = a.anchor_ts || 0;
+    const a5Init = a5Ts ? cgBoundaryText(a5Ts) : "";
     const waTs = a.week_anchor_ts || 0;
     const waInit = waTs ? cgBoundaryText(waTs) : "";
     const tag = a.absolute_capped ? `<span class="tag is-err">已达上限</span>`
@@ -2483,7 +2488,11 @@ async function loadBurner() {
           value="${num(Math.round(a.left_week))}" title="剩余 ${Math.round(a.left_week)} / 熔断 ${Math.round(a.cap_week)}；填 0 = 停止该账号"
           style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_week))}</div></td>
-      <td><div class="muted small" title="5h 窗口下次重置时间（只读）">${b5}</div></td>
+      <td><input class="rec-in" data-f="anchor" type="text"
+          value="${esc(a5Init)}" placeholder="（滚动）"
+          title="5h 锚点：填 10月8日 14:00 或 10-08 14:00；留空 = 滚动窗口"
+          style="width:120px;font-size:var(--fs-12)">
+        <div class="muted small" title="5h 窗口下次重置时间（只读，由锚点算出）">5h 重置 ${b5}</div></td>
       <td><input class="rec-in" data-f="week_anchor" type="text"
           value="${esc(waInit)}" placeholder="（全局）"
           title="周锚点：照抄商汤控制台的「周刷新」列，填 10月14日 18:10 或 10-14 18:10；留空 = 用全局锚点"
@@ -2529,6 +2538,9 @@ async function loadBurner() {
           看到某个号「一直限流」，是它在饿——网关会给饿超过 5 分钟的号临时借一点并发
           （显示「已救济」），成功一次就收回。「<b>限流停靠</b>」是连续撞 limit 满阈值后主动停手，
           省下每次冷却期满去撞一次的纯空转。
+          <br><br><b>5h 锚点（5h 重置）</b>：在表格「5h 重置」列填 <code>月-日 时刻</code>
+          （例 <code>10-08 14:00</code> 或 <code>10月8日 14:00</code>）——
+          照抄商汤控制台对应的 5h 重置时间。留空 = 滚动窗口（按事件时间滑）。
           <br><br><b>周锚点（周重置）</b>：直接在表格「周重置」列填 <code>月-日 时刻</code>
           （例 <code>10-14 18:10</code> 或 <code>10月14日 18:10</code>）——
           <b>照抄商汤控制台的「周刷新」那一列</b>，不用自己算星期几。留空 = 用全局锚点。</div>
@@ -2541,7 +2553,7 @@ async function loadBurner() {
       <button class="mini" id="rec-btn-diff">预演改动</button>
       <button class="primary mini" id="rec-btn-apply">保存改动并重启消耗器</button>
       <button class="mini" id="btn-burner-toggle" title="启动或停止消耗器进程">…</button>
-      <span class="muted small" id="rec-hint">改剩余 = 校准账本；填 0 = 停止该账号；改周重置 = 对齐官网</span>
+      <span class="muted small" id="rec-hint">改剩余 = 校准账本；填 0 = 停止该账号；改 5h 重置 / 周重置 = 对齐官网</span>
       <span class="muted small" id="rec-diff" style="display:none"></span>
     </div>
     <h4 class="sec">实时日志</h4>
@@ -2606,7 +2618,7 @@ function blConnect() {
   if (typeof EventSource === "undefined") { blFallback(); return; }
   let es;
   try {
-    es = new EventSource("/admin/burner/log/stream?lines=120&within_seconds=86400");
+    es = new EventSource("/zkadmin/burner/log/stream?lines=120&within_seconds=86400");
   } catch {
     blFallback();
     return;
@@ -2635,7 +2647,7 @@ function blFallback() {
   clearInterval(burnLog.timer);
   burnLog.timer = setInterval(async () => {
     try {
-      const r = await fetch("/admin/burner/log/tail?lines=30", {
+      const r = await fetch("/zkadmin/burner/log/tail?lines=30", {
         headers: state.token ? { "X-Admin-Token": state.token } : {},
       });
       if (!r.ok) { blSetState("日志读取失败 HTTP " + r.status, false); return; }

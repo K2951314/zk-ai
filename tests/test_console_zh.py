@@ -272,9 +272,10 @@ def test_burner_view_has_log_and_reconcile_cards() -> None:
     assert 'class="rec-in"' in html or "class='rec-in'" in html, "主表格必须有可编辑 input（rec-in）"
     # SSE + 降级：EventSource 断了要能自动重连，且轮询兜底
     assert "EventSource" in html
-    assert "/admin/burner/log/stream" in html
-    assert "/admin/burner/log/tail" in html
+    assert "/zkadmin/burner/log/stream" in html
+    assert "/zkadmin/burner/log/tail" in html
     # 核对走「预演 -> 确认 -> 落盘」三步，不能让一次手滑直接写账本
+    # console.js 里写 api("/admin/burner/reconcile")，api() 运行时替换为 /zkadmin/
     assert "/admin/burner/reconcile" in html
 
 
@@ -390,7 +391,7 @@ def test_report_page_is_self_contained_and_explains_the_division() -> None:
     体检逻辑已移入 console.js 的 loadReport()，这里检查 console.js 的内容。
     """
     text = _html("index.html")  # 内联了 console.js
-    # 数据端点与延迟归因都要在
+    # 数据端点与延迟归因都要在（console.js 里写 /admin/，api() 运行时替换为 /zkadmin/）
     assert "/admin/stats" in text and "/admin/requests" in text
     assert "latency_ms" in text
     # 讲的是人话：规则的每一条都要落在页面上

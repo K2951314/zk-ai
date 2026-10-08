@@ -19,7 +19,7 @@ from app.core.container import Container
 from app.core.errors import ZKAIError
 from app.services.agent.service import AgentService
 
-router = APIRouter(prefix="/admin/agent", tags=["agent"],
+router = APIRouter(prefix="/zkadmin/agent", tags=["agent"],
                    dependencies=[Depends(require_admin)])
 
 _SSE_HEARTBEAT = 15.0

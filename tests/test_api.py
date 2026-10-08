@@ -520,27 +520,27 @@ ADMIN = {"x-admin-token": "test-admin-token"}
 
 async def test_admin_requires_the_token(api) -> None:
     client, _ = api
-    assert (await client.get("/admin/providers")).status_code == 401
-    assert (await client.get("/admin/providers", headers=ADMIN)).status_code == 200
+    assert (await client.get("/zkadmin/providers")).status_code == 401
+    assert (await client.get("/zkadmin/providers", headers=ADMIN)).status_code == 200
     assert (
-        await client.get("/admin/providers", headers={"authorization": "Bearer test-admin-token"})
+        await client.get("/zkadmin/providers", headers={"authorization": "Bearer test-admin-token"})
     ).status_code == 200
     assert (
-        await client.get("/admin/providers", headers={"x-admin-token": "wrong"})
+        await client.get("/zkadmin/providers", headers={"x-admin-token": "wrong"})
     ).status_code == 401
 
 
 async def test_admin_providers_models_and_credentials(api) -> None:
     client, _ = api
-    providers = (await client.get("/admin/providers", headers=ADMIN)).json()
+    providers = (await client.get("/zkadmin/providers", headers=ADMIN)).json()
     assert providers["data"][0]["id"] == "fake"
     assert providers["data"][0]["available"] is True
 
-    models = (await client.get("/admin/models", headers=ADMIN)).json()
+    models = (await client.get("/zkadmin/models", headers=ADMIN)).json()
     assert {item["id"] for item in models["data"]} == {"fake-model", "fake-smart"}
     assert "zk-test" in models["aliases"]
 
-    credentials = (await client.get("/admin/credentials", headers=ADMIN)).json()
+    credentials = (await client.get("/zkadmin/credentials", headers=ADMIN)).json()
     assert len(credentials["data"]) == 3
     assert credentials["stats"]["usable"] == 3
     assert "secret" not in json.dumps(credentials["data"]).lower().replace(
@@ -552,31 +552,31 @@ async def test_admin_providers_models_and_credentials(api) -> None:
 
 async def test_admin_disable_and_enable_credential(api) -> None:
     client, harness = api
-    disabled = await client.post("/admin/credentials/key-1/disable", headers=ADMIN)
+    disabled = await client.post("/zkadmin/credentials/key-1/disable", headers=ADMIN)
     assert disabled.status_code == 200
     assert disabled.json()["status"] == "disabled"
     assert harness.pool.get("key-1").status.value == "disabled"
 
-    enabled = await client.post("/admin/credentials/key-1/enable", headers=ADMIN)
+    enabled = await client.post("/zkadmin/credentials/key-1/enable", headers=ADMIN)
     assert enabled.status_code == 200
     assert harness.pool.get("key-1").status.value == "healthy"
 
-    missing = await client.post("/admin/credentials/nope/enable", headers=ADMIN)
+    missing = await client.post("/zkadmin/credentials/nope/enable", headers=ADMIN)
     assert missing.status_code == 404
 
 
 async def test_admin_health_and_manual_check(api) -> None:
     client, harness = api
-    report = (await client.get("/admin/health", headers=ADMIN)).json()
+    report = (await client.get("/zkadmin/health", headers=ADMIN)).json()
     assert report["summary"]["providers"] == 1
 
-    checked = await client.post("/admin/health/check", headers=ADMIN, json={})
+    checked = await client.post("/zkadmin/health/check", headers=ADMIN, json={})
     assert checked.status_code == 200
     assert checked.json()["ok"] == 3  # one probe per credential
     assert harness.adapter.health_calls == 3
 
     failing = await client.post(
-        "/admin/health/check", headers=ADMIN, json={"providers": ["ghost"]}
+        "/zkadmin/health/check", headers=ADMIN, json={"providers": ["ghost"]}
     )
     assert failing.status_code == 200
     assert failing.json()["failed"] == 1
@@ -585,7 +585,7 @@ async def test_admin_health_and_manual_check(api) -> None:
 async def test_admin_router_preview(api) -> None:
     client, _ = api
     response = await client.get(
-        "/admin/router/preview",
+        "/zkadmin/router/preview",
         params={"model": "zk-test", "prompt": "write a python function", "tools": 1},
         headers=ADMIN,
     )
@@ -600,7 +600,7 @@ async def test_admin_router_preview(api) -> None:
 async def test_admin_alias_hot_swap(api) -> None:
     client, harness = api
     created = await client.post(
-        "/admin/aliases",
+        "/zkadmin/aliases",
         headers=ADMIN,
         json={"name": "zk-new", "targets": ["fake-smart"], "strategy": "priority"},
     )
@@ -612,13 +612,13 @@ async def test_admin_alias_hot_swap(api) -> None:
     assert chat.json()["zk_ai"]["alias"] == "zk-new"
 
     invalid = await client.post(
-        "/admin/aliases", headers=ADMIN, json={"name": "zk-bad", "targets": ["ghost"]}
+        "/zkadmin/aliases", headers=ADMIN, json={"name": "zk-bad", "targets": ["ghost"]}
     )
     assert invalid.status_code == 400
 
-    deleted = await client.delete("/admin/aliases/zk-new", headers=ADMIN)
+    deleted = await client.delete("/zkadmin/aliases/zk-new", headers=ADMIN)
     assert deleted.status_code == 200
-    assert (await client.delete("/admin/aliases/zk-new", headers=ADMIN)).status_code == 404
+    assert (await client.delete("/zkadmin/aliases/zk-new", headers=ADMIN)).status_code == 404
 
 
 async def test_admin_stats_records_usage(api) -> None:
@@ -628,7 +628,7 @@ async def test_admin_stats_records_usage(api) -> None:
     await client.post("/v1/chat/completions", json=CHAT_BODY)
     await client.post("/v1/chat/completions", json=CHAT_BODY)
 
-    stats = (await client.get("/admin/stats", headers=ADMIN)).json()
+    stats = (await client.get("/zkadmin/stats", headers=ADMIN)).json()
     assert stats["usage"]["requests"] == 2
     assert stats["usage"]["total_tokens"] == 50
     assert stats["pool"]["success"] == 2
@@ -636,7 +636,7 @@ async def test_admin_stats_records_usage(api) -> None:
     assert stats["recent_requests"][0]["status"] == "success"
 
     request_id = stats["recent_requests"][0]["id"]
-    detail = (await client.get(f"/admin/requests/{request_id}", headers=ADMIN)).json()
+    detail = (await client.get(f"/zkadmin/requests/{request_id}", headers=ADMIN)).json()
     assert detail["attempts"][0]["attempt_number"] == 1
     assert detail["attempts"][0]["input_tokens"] == 20
 
@@ -646,9 +646,9 @@ async def test_admin_records_failed_attempts(api) -> None:
     harness_adapter = api[1].adapter
     harness_adapter.queue_status(429, 200)
     await client.post("/v1/chat/completions", json=CHAT_BODY)
-    stats = (await client.get("/admin/stats", headers=ADMIN)).json()
+    stats = (await client.get("/zkadmin/stats", headers=ADMIN)).json()
     request_id = stats["recent_requests"][0]["id"]
-    detail = (await client.get(f"/admin/requests/{request_id}", headers=ADMIN)).json()
+    detail = (await client.get(f"/zkadmin/requests/{request_id}", headers=ADMIN)).json()
     assert [item["status"] for item in detail["attempts"]] == ["error", "success"]
     assert detail["attempts"][0]["error_type"] == "rate_limit_error"
     assert detail["attempts"][0]["http_status"] == 429
@@ -656,7 +656,7 @@ async def test_admin_records_failed_attempts(api) -> None:
 
 async def test_admin_unknown_request_returns_404(api) -> None:
     client, _ = api
-    response = await client.get("/admin/requests/does-not-exist", headers=ADMIN)
+    response = await client.get("/zkadmin/requests/does-not-exist", headers=ADMIN)
     assert response.status_code == 404
 
 
@@ -692,19 +692,19 @@ async def test_admin_requests_list_filters_and_pages(api) -> None:
     await client.post("/v1/chat/completions", json=CHAT_BODY)
     await client.post("/v1/chat/completions", json=CHAT_BODY)
 
-    listed = (await client.get("/admin/requests", headers=ADMIN)).json()
+    listed = (await client.get("/zkadmin/requests", headers=ADMIN)).json()
     assert listed["total"] == 2 and listed["object"] == "list"
     assert [row["status"] for row in listed["data"]] == ["success", "success"]
     assert listed["data"][0]["attempt_count"] >= 1
 
-    by_model = (await client.get("/admin/requests?model=fake", headers=ADMIN)).json()
+    by_model = (await client.get("/zkadmin/requests?model=fake", headers=ADMIN)).json()
     assert by_model["total"] == 2
-    by_alias = (await client.get("/admin/requests?alias=不存在的别名", headers=ADMIN)).json()
+    by_alias = (await client.get("/zkadmin/requests?alias=不存在的别名", headers=ADMIN)).json()
     assert by_alias["total"] == 0
-    errored = (await client.get("/admin/requests?error_type=rate_limit_error", headers=ADMIN)).json()
+    errored = (await client.get("/zkadmin/requests?error_type=rate_limit_error", headers=ADMIN)).json()
     assert errored["total"] == 0  # 请求最终成功了，错误只存在于尝试明细
 
-    page = (await client.get("/admin/requests?limit=1&offset=1", headers=ADMIN)).json()
+    page = (await client.get("/zkadmin/requests?limit=1&offset=1", headers=ADMIN)).json()
     assert page["total"] == 2 and len(page["data"]) == 1
     assert page["data"][0]["id"] != listed["data"][0]["id"]
 
@@ -713,10 +713,10 @@ async def test_admin_request_detail_exposes_row_and_attempt_detail(api) -> None:
     client, harness = api
     harness.adapter.queue_status(429, 200)
     await client.post("/v1/chat/completions", json=CHAT_BODY)
-    listed = (await client.get("/admin/requests", headers=ADMIN)).json()
+    listed = (await client.get("/zkadmin/requests", headers=ADMIN)).json()
     request_id = listed["data"][0]["id"]
 
-    detail = (await client.get(f"/admin/requests/{request_id}", headers=ADMIN)).json()
+    detail = (await client.get(f"/zkadmin/requests/{request_id}", headers=ADMIN)).json()
     assert detail["request"]["requested_model"] == "fake-model"
     assert detail["request"]["status"] == "success"
     first = detail["attempts"][0]
@@ -733,7 +733,7 @@ async def test_admin_endpoints_hidden_when_disabled(provider_config, fake_adapte
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
-            response = await client.get("/admin/providers")
+            response = await client.get("/zkadmin/providers")
             assert response.status_code == 404
     finally:
         await harness.container.shutdown()
@@ -1029,14 +1029,14 @@ async def test_backfill_reprices_zero_cost_usage_rows(api) -> None:
     deployment.input_cost_per_mtok = 2.0
     deployment.output_cost_per_mtok = 10.0
 
-    response = await client.post("/admin/usage/backfill-cost", headers=ADMIN)
+    response = await client.post("/zkadmin/usage/backfill-cost", headers=ADMIN)
     assert response.status_code == 200
     body = response.json()
     assert body["updated"] == 1
     assert body["total_cost_usd"] == 2.0  # 1M input tokens at $2/MTok
 
     # Idempotent: a second run touches nothing.
-    again = await client.post("/admin/usage/backfill-cost", headers=ADMIN)
+    again = await client.post("/zkadmin/usage/backfill-cost", headers=ADMIN)
     assert again.json()["updated"] == 0
 # --------------------------------------------------------------------------- #
 # ChatGPT hot-swap: the pinned model must actually lead the attempt order
@@ -1074,7 +1074,7 @@ async def test_chatgpt_hot_swap_takes_effect_on_the_next_request(provider_config
 
             # Now hot-swap to glm-5.3 through the console endpoint.
             swapped = await client.post(
-                "/admin/chatgpt", json={"model": "glm-5.3"}, headers=ADMIN
+                "/zkadmin/chatgpt", json={"model": "glm-5.3"}, headers=ADMIN
             )
             assert swapped.status_code == 200
             assert swapped.json()["model"] == "glm-5.3"
@@ -1141,7 +1141,7 @@ async def _chatgpt_env(tmp_path, monkeypatch):
 async def test_chatgpt_get_state_shape(tmp_path, monkeypatch) -> None:
     client, harness, codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
     try:
-        response = await client.get("/admin/chatgpt", headers=ADMIN)
+        response = await client.get("/zkadmin/chatgpt", headers=ADMIN)
         assert response.status_code == 200
         body = response.json()
         assert body["ok"] is True
@@ -1165,7 +1165,7 @@ async def test_chatgpt_save_and_apply_writes_config_toml(tmp_path, monkeypatch) 
     client, harness, codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         saved = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"model": "glm-5.3", "model_reasoning_effort": "low", "apply": True},
             headers=ADMIN,
         )
@@ -1187,7 +1187,7 @@ async def test_chatgpt_save_and_apply_writes_config_toml(tmp_path, monkeypatch) 
 
         # a second identical save is a no-op on disk (no new backup)
         again = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"model": "glm-5.3", "model_reasoning_effort": "low", "apply": True},
             headers=ADMIN,
         )
@@ -1202,7 +1202,7 @@ async def test_chatgpt_save_rejects_invalid_config(tmp_path, monkeypatch) -> Non
     client, harness, codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         bad = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"model": "zk-auto", "base_url": "not-a-url", "apply": False},
             headers=ADMIN,
         )
@@ -1222,7 +1222,7 @@ async def test_chatgpt_warns_about_unknown_model(tmp_path, monkeypatch) -> None:
     client, harness, _codex, cfg_dir = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         saved = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"model": "not-a-real-model", "apply": False},
             headers=ADMIN,
         )
@@ -1246,7 +1246,7 @@ async def test_chatgpt_apply_endpoint_rewrites_from_saved_yaml(tmp_path, monkeyp
         # the desktop app regenerated its file: back to defaults on disk
         (codex / "config.toml").write_text("model = \"zk-auto\"\n", encoding="utf-8")
 
-        applied = await client.post("/admin/chatgpt/apply", headers=ADMIN)
+        applied = await client.post("/zkadmin/chatgpt/apply", headers=ADMIN)
         assert applied.status_code == 200
         assert applied.json()["no_op"] is False
 
@@ -1262,7 +1262,7 @@ async def test_chatgpt_apply_endpoint_rewrites_from_saved_yaml(tmp_path, monkeyp
 async def test_chatgpt_apply_without_saved_config_is_404(tmp_path, monkeypatch) -> None:
     client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
     try:
-        applied = await client.post("/admin/chatgpt/apply", headers=ADMIN)
+        applied = await client.post("/zkadmin/chatgpt/apply", headers=ADMIN)
         assert applied.status_code == 404
         assert "还没有保存过" in applied.json()["detail"]["error"]["message"]
     finally:
@@ -1276,7 +1276,7 @@ async def test_chatgpt_client_rejects_a_model_the_gateway_cannot_route(tmp_path,
     client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         response = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"model": "zk", "apply": False},
             headers=ADMIN,
         )
@@ -1296,7 +1296,7 @@ async def test_chatgpt_client_rejects_a_model_the_gateway_cannot_route_official_
     client, harness, codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         response = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"mode": "official", "official_model": "gpt-5.6-terra", "apply": True},
             headers=ADMIN,
         )
@@ -1311,7 +1311,7 @@ async def test_chatgpt_port_mismatch_warns(tmp_path, monkeypatch) -> None:
     client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
     try:
         saved = await client.put(
-            "/admin/chatgpt/client",
+            "/zkadmin/chatgpt/client",
             json={"model": "zk-auto", "base_url": "http://127.0.0.1:9999/v1", "apply": False},
             headers=ADMIN,
         )
@@ -1333,18 +1333,18 @@ async def test_chatgpt_get_reports_env_key_visibility(tmp_path, monkeypatch) -> 
     harness.container.config.settings.api_token = "tok-1"
     try:
         monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: None)
-        body = (await client.get("/admin/chatgpt", headers=ADMIN)).json()
+        body = (await client.get("/zkadmin/chatgpt", headers=ADMIN)).json()
         assert body["env_key_name"] == "ZKAI_API_TOKEN"
         assert body["env_key_visible"] is False
         assert body["env_key_matches_gateway"] is None
 
         monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "tok-1")
-        body = (await client.get("/admin/chatgpt", headers=ADMIN)).json()
+        body = (await client.get("/zkadmin/chatgpt", headers=ADMIN)).json()
         assert body["env_key_visible"] is True
         assert body["env_key_matches_gateway"] is True
 
         monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "stale-token")
-        body = (await client.get("/admin/chatgpt", headers=ADMIN)).json()
+        body = (await client.get("/zkadmin/chatgpt", headers=ADMIN)).json()
         assert body["env_key_matches_gateway"] is False  # 陈旧令牌：桌面版会 401
     finally:
         await client.aclose()
@@ -1365,7 +1365,7 @@ async def test_chatgpt_sync_env_writes_and_verifies(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(chatgpt_service, "write_user_env_var", fake_write)
     monkeypatch.setattr(chatgpt_service, "read_user_env_var", lambda name: "tok-2")
     try:
-        response = await client.post("/admin/chatgpt/sync-env", headers=ADMIN)
+        response = await client.post("/zkadmin/chatgpt/sync-env", headers=ADMIN)
         assert response.status_code == 200
         body = response.json()
         assert body["ok"] is True
@@ -1383,7 +1383,7 @@ async def test_chatgpt_sync_env_without_gateway_token_is_400(tmp_path, monkeypat
     client, harness, _codex, _cfg = await _chatgpt_env(tmp_path, monkeypatch)
     monkeypatch.setattr(chatgpt_service, "write_user_env_var", _forbid_write)
     try:
-        response = await client.post("/admin/chatgpt/sync-env", headers=ADMIN)
+        response = await client.post("/zkadmin/chatgpt/sync-env", headers=ADMIN)
         assert response.status_code == 400
         assert "ZKAI_API_TOKEN" in response.json()["detail"]["error"]["message"]
     finally:
@@ -1430,7 +1430,7 @@ async def test_burner_snapshot_returns_config_and_accounts(api, burner_files) ->
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.get("/admin/burner", headers=BURNER_HEADERS)
+    r = await client.get("/zkadmin/burner", headers=BURNER_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert body["config"]["model"] == "sensenova-6.8-flash-lite"
@@ -1449,14 +1449,14 @@ async def test_burner_snapshot_tolerates_a_half_written_ledger(api, burner_files
     state, config = burner_files
     state.write_text('{"accounts": {"K2": {"even', encoding="utf-8")
     config.write_text("model: sensenova-6.8-flash-lite\n", encoding="utf-8")
-    r = await client.get("/admin/burner", headers=BURNER_HEADERS)
+    r = await client.get("/zkadmin/burner", headers=BURNER_HEADERS)
     assert r.status_code == 200
     assert r.json()["accounts"] == []
 
 
 async def test_burner_snapshot_without_any_files(api, burner_files) -> None:
     client, _ = api
-    r = await client.get("/admin/burner", headers=BURNER_HEADERS)
+    r = await client.get("/zkadmin/burner", headers=BURNER_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert body["accounts"] == []
@@ -1467,7 +1467,7 @@ async def test_burner_save_config_round_trips(api, burner_files) -> None:
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config", headers=BURNER_HEADERS,
                          json={"concurrency": 96, "safety_margin": 0.5})
     assert r.status_code == 200
     body = r.json()
@@ -1486,7 +1486,7 @@ async def test_burner_save_config_rejects_a_non_flash_lite_model(api, burner_fil
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config", headers=BURNER_HEADERS,
                          json={"model": "kimi-k3"})
     assert r.status_code == 400
     err = r.json()["detail"]["error"]
@@ -1500,7 +1500,7 @@ async def test_burner_save_config_rejects_unknown_key(api, burner_files) -> None
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config", headers=BURNER_HEADERS,
                          json={"not_a_flag": 1})
     assert r.status_code == 400
     assert "not_a_flag" not in config.read_text(encoding="utf-8")
@@ -1510,7 +1510,7 @@ async def test_burner_save_config_rejects_out_of_range_margin(api, burner_files)
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config", headers=BURNER_HEADERS,
                          json={"safety_margin": 1.5})
     assert r.status_code == 400
     assert "safety_margin" in r.json()["detail"]["error"]["message"]
@@ -1522,7 +1522,7 @@ async def test_burner_save_requests_a_restart_by_default(api, burner_files) -> N
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config", headers=BURNER_HEADERS,
                          json={"concurrency": 96})
     assert r.status_code == 200
     assert (state.parent / "burner_restart.request").exists()
@@ -1533,7 +1533,7 @@ async def test_burner_save_can_skip_the_restart(api, burner_files) -> None:
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config?restart=false", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config?restart=false", headers=BURNER_HEADERS,
                          json={"concurrency": 96})
     assert r.status_code == 200
     assert not (state.parent / "burner_restart.request").exists()
@@ -1544,7 +1544,7 @@ async def test_burner_rejects_config_without_asking_for_a_restart(api, burner_fi
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    r = await client.put("/admin/burner/config", headers=BURNER_HEADERS,
+    r = await client.put("/zkadmin/burner/config", headers=BURNER_HEADERS,
                          json={"model": "kimi-k3"})
     assert r.status_code == 400
     assert not (state.parent / "burner_restart.request").exists()
@@ -1554,8 +1554,8 @@ async def test_burner_endpoints_require_admin(api, burner_files) -> None:
     client, _ = api
     state, config = burner_files
     _seed(state, config)
-    assert (await client.get("/admin/burner")).status_code in (401, 403)
-    assert (await client.put("/admin/burner/config", json={"concurrency": 8})).status_code in (401, 403)
+    assert (await client.get("/zkadmin/burner")).status_code in (401, 403)
+    assert (await client.put("/zkadmin/burner/config", json={"concurrency": 8})).status_code in (401, 403)
 
 
 # --------------------------------------------------------------------------- #
@@ -1778,7 +1778,7 @@ async def test_hot_swap_sets_the_front_model(api) -> None:
     """运营者改一行就能换接口模型，不用重排 targets、不用重启。"""
     client, harness = api
     response = await client.post(
-        "/admin/aliases",
+        "/zkadmin/aliases",
         json=_alias_body(front_model="fake-smart"),
         headers=BURNER_HEADERS,
     )
@@ -1791,7 +1791,7 @@ async def test_front_model_outside_targets_is_rejected(api) -> None:
     """接口模型不同时是链上成员 = 没有可用部署，必须当场报错。"""
     client, _harness = api
     response = await client.post(
-        "/admin/aliases",
+        "/zkadmin/aliases",
         json=_alias_body(front_model="nope-model"),
         headers=BURNER_HEADERS,
     )
@@ -1806,7 +1806,7 @@ async def test_front_model_round_trips_to_models_yaml(api, tmp_path) -> None:
     """热改必须落盘，否则重启就丢——那等于没改。"""
     client, harness = api
     await client.post(
-        "/admin/aliases",
+        "/zkadmin/aliases",
         json=_alias_body(front_model="fake-smart"),
         headers=BURNER_HEADERS,
     )
@@ -1826,7 +1826,7 @@ async def test_verify_reports_a_working_model(api) -> None:
     client, harness = api
     harness.adapter.queue(Behavior(text="hi", prompt_tokens=3, completion_tokens=1))
     r = await client.post(
-        "/admin/providers/fake/models/verify",
+        "/zkadmin/providers/fake/models/verify",
         json={"models": ["fake-model"], "timeout_seconds": 5},
         headers=BURNER_HEADERS,
     )
@@ -1847,7 +1847,7 @@ async def test_verify_catches_the_entitlement_trap(api) -> None:
         status=403, error_message="model is not available in the current token plan",
     ))
     r = await client.post(
-        "/admin/providers/fake/models/verify",
+        "/zkadmin/providers/fake/models/verify",
         json={"models": ["deepseek-v4.1-flash"], "timeout_seconds": 5},
         headers=BURNER_HEADERS,
     )
@@ -1866,7 +1866,7 @@ async def test_verify_catches_a_hanging_model(api) -> None:
     client, harness = api
     harness.adapter.queue(Behavior(delay=10.0, text="too late"))
     r = await client.post(
-        "/admin/providers/fake/models/verify",
+        "/zkadmin/providers/fake/models/verify",
         json={"models": ["z-ai/glm-5.3"], "timeout_seconds": 0.3},
         headers=BURNER_HEADERS,
     )
@@ -1884,7 +1884,7 @@ async def test_verify_catches_an_upstream_not_found(api) -> None:
         status=404, error_message="Function id '1586112a' version 'null' Not Found",
     ))
     r = await client.post(
-        "/admin/providers/fake/models/verify",
+        "/zkadmin/providers/fake/models/verify",
         json={"models": ["moonshotai/kimi-k3"], "timeout_seconds": 5},
         headers=BURNER_HEADERS,
     )
@@ -1894,7 +1894,7 @@ async def test_verify_catches_an_upstream_not_found(api) -> None:
 async def test_verify_rejects_unknown_provider(api) -> None:
     client, _harness = api
     r = await client.post(
-        "/admin/providers/nope/models/verify",
+        "/zkadmin/providers/nope/models/verify",
         json={"models": ["x"]}, headers=BURNER_HEADERS,
     )
     assert r.status_code == 404
@@ -1905,7 +1905,7 @@ async def test_verify_honours_the_limit(api) -> None:
     client, harness = api
     harness.adapter.queue(*[Behavior(text="ok")] * 3)
     r = await client.post(
-        "/admin/providers/fake/models/verify",
+        "/zkadmin/providers/fake/models/verify",
         json={"models": ["a", "b", "c", "d"], "limit": 2, "timeout_seconds": 5},
         headers=BURNER_HEADERS,
     )

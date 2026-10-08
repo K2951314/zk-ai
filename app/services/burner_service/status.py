@@ -144,11 +144,11 @@ def account_view(acct: AccountStatus, now: float, global_week_anchor: float,
     cap5h = status.window_credits * status.safety_margin
     capweek = status.weekly_credits * status.safety_margin
     ws5 = (acct.anchor_ts + int((now - acct.anchor_ts) // WIN_5H) * WIN_5H) if acct.anchor_ts else 0.0
-    burned_5h = sum(c for ts, c in acct.events if ts >= ws5) if ws5 else \
-        sum(c for ts, c in acct.events if ts > now - WIN_5H)
+    burned_5h = max(0.0, sum(c for ts, c in acct.events if ts >= ws5) if ws5 else \
+        sum(c for ts, c in acct.events if ts > now - WIN_5H))
     wsw = _week_start(acct.week_anchor_ts or global_week_anchor, now)
-    burned_week = sum(c for ts, c in acct.events if ts >= wsw) if wsw else \
-        sum(c for ts, c in acct.events if ts > now - WIN_WEEK)
+    burned_week = max(0.0, sum(c for ts, c in acct.events if ts >= wsw) if wsw else \
+        sum(c for ts, c in acct.events if ts > now - WIN_WEEK))
     left5 = max(0.0, cap5h - burned_5h)
     leftw = max(0.0, capweek - burned_week)
     next5 = (ws5 + WIN_5H) if ws5 else 0.0

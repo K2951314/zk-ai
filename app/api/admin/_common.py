@@ -29,7 +29,7 @@ logger = get_logger("api.admin")
 #: one instance (not one per file) means the ``/admin`` prefix, the ``admin``
 #: tag and the ``require_admin`` dependency are declared exactly once.
 router = APIRouter(
-    prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)]
+    prefix="/zkadmin", tags=["admin"], dependencies=[Depends(require_admin)]
 )
 
 

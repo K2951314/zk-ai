@@ -230,7 +230,7 @@ class TestBurnerDir:
             ) as client:
                 health = (await client.get("/health")).json()["deploy"]
                 tail = await client.get(
-                    "/admin/burner/log/tail", headers={"X-Admin-Token": "t"}
+                    "/zkadmin/burner/log/tail", headers={"X-Admin-Token": "t"}
                 )
             assert health["burner_log_path"] == str(burner_dir / "burn_sensenova.log")
             assert tail.status_code == 200

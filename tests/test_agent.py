@@ -469,33 +469,33 @@ async def test_api_agent_endpoints(tmp_path):
     app.state.container = harness.container
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/admin/agent/models")
+        r = await client.get("/zkadmin/agent/models")
         assert r.status_code == 200
         assert "zk-auto" in r.json()["aliases"]
 
-        r = await client.post("/admin/agent/sessions",
+        r = await client.post("/zkadmin/agent/sessions",
                               json={"task": "x", "model": "unknown-model"})
         assert r.status_code == 400
 
-        r = await client.post("/admin/agent/sessions", json={"task": "api 任务"})
+        r = await client.post("/zkadmin/agent/sessions", json={"task": "api 任务"})
         assert r.status_code == 201
         sid = r.json()["session"]["id"]
         row = await wait_for_status(harness.container.agent_service, sid, {"done", "failed"})
         assert row["status"] == "done"
 
-        r = await client.get(f"/admin/agent/sessions/{sid}")
+        r = await client.get(f"/zkadmin/agent/sessions/{sid}")
         assert r.status_code == 200
         kinds = [m["kind"] for m in r.json()["messages"]]
         assert "task" in kinds and "message" in kinds
 
         # SSE：终态会话应立刻回 snapshot + session_done
-        r = await client.get(f"/admin/agent/sessions/{sid}/events")
+        r = await client.get(f"/zkadmin/agent/sessions/{sid}/events")
         assert r.status_code == 200
         assert "snapshot" in r.text and "session_done" in r.text
 
-        r = await client.delete(f"/admin/agent/sessions/{sid}")
+        r = await client.delete(f"/zkadmin/agent/sessions/{sid}")
         assert r.status_code == 200
-        r = await client.get(f"/admin/agent/sessions/{sid}")
+        r = await client.get(f"/zkadmin/agent/sessions/{sid}")
         assert r.status_code == 404
     await harness.container.shutdown()
 

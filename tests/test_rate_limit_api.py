@@ -115,7 +115,7 @@ async def test_token_cap_frees_only_after_window_slides(provider_config) -> None
 # --------------------------------------------------------------------------- #
 async def test_admin_list_reports_limits_and_source(limit_api) -> None:
     client, _ = limit_api
-    data = (await client.get("/admin/providers", headers=ADMIN)).json()["data"]
+    data = (await client.get("/zkadmin/providers", headers=ADMIN)).json()["data"]
     fake = next(p for p in data if p["id"] == "fake")
     assert fake["rate_limits"] == [
         {"scope": "credential", "window_seconds": 60, "max_requests": 40}
@@ -127,7 +127,7 @@ async def test_admin_put_update_and_reset(limit_api) -> None:
     client, harness = limit_api
     # operator tightens the cap to 1 and adds a token budget
     response = await client.put(
-        "/admin/providers/fake/limits",
+        "/zkadmin/providers/fake/limits",
         headers=ADMIN,
         json={"rules": [{"scope": "credential", "window_seconds": 60, "max_requests": 1}]},
     )
@@ -148,7 +148,7 @@ async def test_admin_put_update_and_reset(limit_api) -> None:
 
     # reset back to YAML: this provider has no YAML definition (built in test),
     # so the effective rules become empty (= unlimited).
-    reset = await client.delete("/admin/providers/fake/limits", headers=ADMIN)
+    reset = await client.delete("/zkadmin/providers/fake/limits", headers=ADMIN)
     assert reset.status_code == 200
     assert reset.json()["rules"] == []
     assert "fake" not in harness.container.rate_limiter.describe()
@@ -157,14 +157,14 @@ async def test_admin_put_update_and_reset(limit_api) -> None:
 async def test_admin_put_rejects_uncapped_rule(limit_api) -> None:
     client, _ = limit_api
     response = await client.put(
-        "/admin/providers/fake/limits",
+        "/zkadmin/providers/fake/limits",
         headers=ADMIN,
         json={"rules": [{"scope": "credential", "window_seconds": 60}]},
     )
     assert response.status_code == 400
 
     missing = await client.put(
-        "/admin/providers/ghost/limits", headers=ADMIN, json={"rules": []}
+        "/zkadmin/providers/ghost/limits", headers=ADMIN, json={"rules": []}
     )
     assert missing.status_code == 404
 
@@ -172,7 +172,7 @@ async def test_admin_put_rejects_uncapped_rule(limit_api) -> None:
 async def test_admin_put_clear_all_means_unlimited(limit_api) -> None:
     client, harness = limit_api
     response = await client.put(
-        "/admin/providers/fake/limits", headers=ADMIN, json={"rules": []}
+        "/zkadmin/providers/fake/limits", headers=ADMIN, json={"rules": []}
     )
     assert response.status_code == 200
     assert harness.container.rate_limiter.remaining("fake", "key-1") == float("inf")

@@ -361,19 +361,30 @@ def apply_reconcile(
         for name, item in accounts_payload.items():
             blob = accounts.setdefault(name, {})
             events = [[float(ts), float(c)] for ts, c in blob.get("events") or []]
-            window_start = now - WIN_5H
-            burned_5h_now = sum(c for ts, c in events if ts > window_start)
-            burned_week_now = sum(c for ts, c in events if ts > now - WIN_WEEK)
-            # 前端填「剩余」，后端换算成 burned 注入校准事件。
-            # cap 从配置算（与 status.py 的 account_view 同一算法）。
+            # 用固定窗口算 burned（与 account_view 同一口径）。
+            # 旧代码用滚动窗口 ts > now - WIN，和 account_view 的固定窗口 ts >= ws
+            # 不一致，校准事件注入后两边对不上，会出现「额度越用越多」。
             from scripts.burn_sensenova import DEFAULT_SAFETY_MARGIN
+            anchor_ts = float(blob.get("anchor_ts") or 0.0)
+            if anchor_ts:
+                ws5 = anchor_ts + int((now - anchor_ts) // WIN_5H) * WIN_5H
+                burned_5h_now = max(0.0, sum(c for ts, c in events if ts >= ws5))
+            else:
+                burned_5h_now = max(0.0, sum(c for ts, c in events if ts > now - WIN_5H))
+            week_anchor_ts = float(blob.get("week_anchor_ts") or 0.0)
+            if week_anchor_ts:
+                wsw = week_anchor_ts + int((now - week_anchor_ts) // WIN_WEEK) * WIN_WEEK
+                burned_week_now = max(0.0, sum(c for ts, c in events if ts >= wsw))
+            else:
+                burned_week_now = max(0.0, sum(c for ts, c in events if ts > now - WIN_WEEK))
+            # cap 从配置算（与 status.py 的 account_view 同一算法）。
             cap5h = float(config.get("window_credits") or 60000.0) * \
                 float(config.get("safety_margin") or DEFAULT_SAFETY_MARGIN)
             capweek = float(config.get("weekly_credits") or 600000.0) * \
                 float(config.get("safety_margin") or DEFAULT_SAFETY_MARGIN)
-            for field_name, current, cap in (
-                ("left_5h", burned_5h_now, cap5h),
-                ("left_week", burned_week_now, capweek),
+            for field_name, current, cap, win_start in (
+                ("left_5h", burned_5h_now, cap5h, ws5 if anchor_ts else 0.0),
+                ("left_week", burned_week_now, capweek, wsw if week_anchor_ts else 0.0),
             ):
                 raw = item.get(field_name)
                 # 兼容旧字段名 burned_5h / burned_week
@@ -382,12 +393,14 @@ def apply_reconcile(
                     raw = item.get(legacy)
                 if raw is None or str(raw).strip() == "":
                     continue
-                filled_left = float(raw)
+                filled_left = max(0.0, min(float(raw), cap))
                 filled_burned = cap - filled_left
                 gap = filled_burned - current
                 if abs(gap) < 0.5:
                     continue
-                events.append([now, round(gap, 4)])
+                # 校准事件时间戳用窗口起点（固定窗口）或 now（滚动窗口），
+                # 这样固定窗口下校准事件不会跨窗口泄漏到下一个窗口。
+                events.append([win_start if win_start else now, round(gap, 4)])
                 ledger_written.append(f"{name}.{field_name}")
             raw_total = item.get("credits_total")
             if raw_total not in (None, ""):

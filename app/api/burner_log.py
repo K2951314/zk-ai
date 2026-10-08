@@ -30,7 +30,7 @@ from app.core.logging import get_logger
 
 logger = get_logger("api.burner_log")
 
-router = APIRouter(prefix="/admin/burner/log", tags=["burner"])
+router = APIRouter(prefix="/zkadmin/burner/log", tags=["burner"])
 
 #: 轮询间隔（秒）。日志是 append 写、每分钟一条汇总，1 秒的粒度既不会有
 #: 明显延迟，也不会把 CPU 烧在 stat 上。测试用 monkeypatch 调小它。

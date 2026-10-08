@@ -189,7 +189,7 @@ class TestEndpoints:
                 transport=ASGITransport(app=app), base_url="http://zkai.test"
             ) as client:
                 resp = await client.get(
-                    "/admin/burner/log/tail",
+                    "/zkadmin/burner/log/tail",
                     headers={"X-Admin-Token": "t"},
                 )
             assert resp.status_code == 200
@@ -219,7 +219,7 @@ class TestEndpoints:
                 transport=ASGITransport(app=app), base_url="http://zkai.test"
             ) as client:
                 resp = await client.get(
-                    "/admin/burner/log/tail",
+                    "/zkadmin/burner/log/tail",
                     headers={"X-Admin-Token": "t"},
                 )
             assert resp.status_code == 200
@@ -229,8 +229,8 @@ class TestEndpoints:
 
     def test_routes_are_registered(self) -> None:
         paths = {r.path for r in burner_log.router.routes}
-        assert "/admin/burner/log/tail" in paths
-        assert "/admin/burner/log/stream" in paths
+        assert "/zkadmin/burner/log/tail" in paths
+        assert "/zkadmin/burner/log/stream" in paths
 
     def test_stream_disables_proxy_buffering(self) -> None:
         """X-Accel-Buffering 必须在：Caddy/nginx 默认会把 SSE 缓冲成一次性返回。"""
