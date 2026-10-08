@@ -2464,11 +2464,8 @@ async function loadBurner() {
   const rows = (d.accounts || []).map(a => {
     const pct5 = a.cap_5h ? Math.min(100, a.burned_5h / a.cap_5h * 100) : 0;
     const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
-    // 锚点输入框显示「下次重置时间」而非锚点本身——与用户填写时的语义一致
-    // （parse_window_anchor 把填入的值当作「下次重置时间」，减 5h 得锚点）。
-    // 旧代码显示 anchor_ts（窗口起点），用户看到比预期少 5h，以为算错了。
-    const a5Init = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "";
-    const waInit = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "";
+    const b5 = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "—（滚动）";
+    const bW = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "—（全局）";
     const tag = a.absolute_capped ? `<span class="tag is-err">已达上限</span>`
       : a.parked ? `<span class="tag is-warn">停靠</span>`
       : a.anchored_5h ? `<span class="tag is-ok">锚点</span>`
@@ -2489,16 +2486,16 @@ async function loadBurner() {
           data-cost="${d.request_cost || 0}" data-cap="${Math.round(a.cap_week)}"
           style="width:110px;font-size:var(--fs-12)">
         <div class="muted small">/ ${num(Math.round(a.cap_week))} · <span class="req-left-week">≈${num(a.requests_left_week)} 条</span></div></td>
-      <td><input class="rec-in" data-f="anchor" type="text"
-          value="${esc(a5Init)}" placeholder="（滚动）"
-          title="5h 重置时间：填 10月8日 18:36 或 10-08 18:36；留空 = 滚动窗口"
-          style="width:120px;font-size:var(--fs-12)">
-        <div class="muted small">${a5Init ? "" : "滚动窗口"}</div></td>
-      <td><input class="rec-in" data-f="week_anchor" type="text"
-          value="${esc(waInit)}" placeholder="（全局）"
-          title="周重置时间：照抄商汤控制台的「周刷新」列，填 10月14日 18:10 或 10-14 18:10；留空 = 用全局锚点"
-          style="width:120px;font-size:var(--fs-12)">
-        <div class="muted small">${waInit ? "" : "全局锚点"}</div></td>
+      <td><div class="muted small" style="margin-bottom:2px"><b>${b5}</b></div>
+        <input class="rec-in" data-f="anchor" type="text"
+          value="" placeholder="改这里 → 照抄商汤控制台"
+          title="照抄商汤控制台的 5h 重置时间，如 10-08 18:36 或 10月8日 18:36；留空 = 不改"
+          style="width:120px;font-size:var(--fs-12)"></td>
+      <td><div class="muted small" style="margin-bottom:2px"><b>${bW}</b></div>
+        <input class="rec-in" data-f="week_anchor" type="text"
+          value="" placeholder="改这里 → 照抄商汤控制台"
+          title="照抄商汤控制台的「周刷新」列，如 10-14 18:10 或 10月14日 18:10；留空 = 不改"
+          style="width:120px;font-size:var(--fs-12)"></td>
       <td class="small">目标 ${num(a.target)} · 成功 ${num(a.ok)}
         · <span title="与同实例其他账号抢每分钟配额，窗口滑过就恢复">限流 ${num(a.freq_hits ?? 0)}</span>
         · <span title="专属池+通用池都扣完了，停靠到周刷新">额度用尽 ${num(a.quota_hits ?? 0)}</span>
@@ -2539,12 +2536,10 @@ async function loadBurner() {
           看到某个号「一直限流」，是它在饿——网关会给饿超过 5 分钟的号临时借一点并发
           （显示「已救济」），成功一次就收回。「<b>限流停靠</b>」是连续撞 limit 满阈值后主动停手，
           省下每次冷却期满去撞一次的纯空转。
-          <br><br><b>5h 锚点（5h 重置）</b>：在表格「5h 重置」列填 <code>月-日 时刻</code>
-          （例 <code>10-08 14:00</code> 或 <code>10月8日 14:00</code>）——
-          照抄商汤控制台对应的 5h 重置时间。留空 = 滚动窗口（按事件时间滑）。
-          <br><br><b>周锚点（周重置）</b>：直接在表格「周重置」列填 <code>月-日 时刻</code>
-          （例 <code>10-14 18:10</code> 或 <code>10月14日 18:10</code>）——
-          <b>照抄商汤控制台的「周刷新」那一列</b>，不用自己算星期几。留空 = 用全局锚点。</div>
+          <br><br><b>5h 重置</b>：每行上方粗体显示系统算的下次 5h 重置时间（和商汤控制台对齐）。
+          下方输入框留空 = 不改；要改时照抄商汤控制台的重置时间（如 <code>10-08 18:36</code> 或 <code>10月8日 18:36</code>），
+          保存后粗体行会更新为新值。填的时间如果已过去，系统自动推到下一个未来边界。
+          <br><br><b>周重置</b>：同上，照抄商汤控制台的「周刷新」列（如 <code>10-14 18:10</code> 或 <code>10月14日 18:10</code>）。</div>
       </details>
     </div>
     <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 剩余</th><th>本周剩余</th>
@@ -2554,7 +2549,7 @@ async function loadBurner() {
       <button class="mini" id="rec-btn-diff">预演改动</button>
       <button class="primary mini" id="rec-btn-apply">保存改动并重启消耗器</button>
       <button class="mini" id="btn-burner-toggle" title="启动或停止消耗器进程">…</button>
-      <span class="muted small" id="rec-hint">改剩余 = 校准账本；填 0 = 停止该账号；改 5h 重置 / 周重置 = 对齐官网</span>
+      <span class="muted small" id="rec-hint">改剩余 = 校准账本；填 0 = 停止该账号；改 5h 重置 / 周重置 = 照抄商汤控制台（留空 = 不改）</span>
       <span class="muted small" id="rec-diff" style="display:none"></span>
     </div>
     <h4 class="sec">实时日志</h4>

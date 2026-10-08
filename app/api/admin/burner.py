@@ -111,15 +111,11 @@ async def burner_reconcile_state() -> dict[str, Any]:
                 "cap_5h": a["cap_5h"],
                 "cap_week": a["cap_week"],
                 "anchor": burner_service._fmt_hhmm(
-                    burner_service.account_anchor_ts(
-                        config, a["name"], now
-                    )
-                ),
+                    a["next_5h_boundary"]
+                ) if a["next_5h_boundary"] else "",
                 "week_anchor": burner_service._fmt_weekday_hhmm(
-                    burner_service.account_week_anchor_ts(
-                        config, a["name"], now
-                    )
-                ),
+                    a["next_week_boundary"]
+                ) if a["next_week_boundary"] else "",
                 "is_burning": not a["parked"],
                 "parked": a["parked"],
             }
