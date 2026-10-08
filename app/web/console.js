@@ -2464,12 +2464,11 @@ async function loadBurner() {
   const rows = (d.accounts || []).map(a => {
     const pct5 = a.cap_5h ? Math.min(100, a.burned_5h / a.cap_5h * 100) : 0;
     const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
-    const b5 = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "—";
-    const bW = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "—";
-    const a5Ts = a.anchor_ts || 0;
-    const a5Init = a5Ts ? cgBoundaryText(a5Ts) : "";
-    const waTs = a.week_anchor_ts || 0;
-    const waInit = waTs ? cgBoundaryText(waTs) : "";
+    // 锚点输入框显示「下次重置时间」而非锚点本身——与用户填写时的语义一致
+    // （parse_window_anchor 把填入的值当作「下次重置时间」，减 5h 得锚点）。
+    // 旧代码显示 anchor_ts（窗口起点），用户看到比预期少 5h，以为算错了。
+    const a5Init = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "";
+    const waInit = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "";
     const tag = a.absolute_capped ? `<span class="tag is-err">已达上限</span>`
       : a.parked ? `<span class="tag is-warn">停靠</span>`
       : a.anchored_5h ? `<span class="tag is-ok">锚点</span>`
@@ -2492,14 +2491,14 @@ async function loadBurner() {
         <div class="muted small">/ ${num(Math.round(a.cap_week))} · <span class="req-left-week">≈${num(a.requests_left_week)} 条</span></div></td>
       <td><input class="rec-in" data-f="anchor" type="text"
           value="${esc(a5Init)}" placeholder="（滚动）"
-          title="5h 锚点：填 10月8日 14:00 或 10-08 14:00；留空 = 滚动窗口"
+          title="5h 重置时间：填 10月8日 18:36 或 10-08 18:36；留空 = 滚动窗口"
           style="width:120px;font-size:var(--fs-12)">
-        <div class="muted small" title="5h 窗口下次重置时间（只读，由锚点算出）">5h 重置 ${b5}</div></td>
+        <div class="muted small">${a5Init ? "" : "滚动窗口"}</div></td>
       <td><input class="rec-in" data-f="week_anchor" type="text"
           value="${esc(waInit)}" placeholder="（全局）"
-          title="周锚点：照抄商汤控制台的「周刷新」列，填 10月14日 18:10 或 10-14 18:10；留空 = 用全局锚点"
+          title="周重置时间：照抄商汤控制台的「周刷新」列，填 10月14日 18:10 或 10-14 18:10；留空 = 用全局锚点"
           style="width:120px;font-size:var(--fs-12)">
-        <div class="muted small" title="周窗口下次重置时间（只读，由锚点算出）">周重置 ${bW}</div></td>
+        <div class="muted small">${waInit ? "" : "全局锚点"}</div></td>
       <td class="small">目标 ${num(a.target)} · 成功 ${num(a.ok)}
         · <span title="与同实例其他账号抢每分钟配额，窗口滑过就恢复">限流 ${num(a.freq_hits ?? 0)}</span>
         · <span title="专属池+通用池都扣完了，停靠到周刷新">额度用尽 ${num(a.quota_hits ?? 0)}</span>

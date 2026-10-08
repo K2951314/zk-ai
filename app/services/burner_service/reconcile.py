@@ -272,11 +272,11 @@ def reconcile_diff(
                     and (current <= 0 or abs(delta) / current > 0.05),
                 }
         row["anchor"] = {
-            "current": _fmt_hhmm(acct.anchor_ts),
+            "current": _fmt_hhmm(view["next_5h_boundary"]) if view["next_5h_boundary"] else "",
             "filled": str(item.get("anchor") or "").strip(),
         }
         row["week_anchor"] = {
-            "current": _fmt_weekday_hhmm(acct.week_anchor_ts),
+            "current": _fmt_weekday_hhmm(view["next_week_boundary"]) if view["next_week_boundary"] else "",
             "filled": str(item.get("week_anchor") or "").strip(),
         }
         row["parked"] = bool(acct.parked_until and now < acct.parked_until)
