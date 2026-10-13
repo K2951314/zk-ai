@@ -261,10 +261,24 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `unknown`），`cooldown.throttle_scopes` 决定冷却覆盖到哪：
   `credential` 只冷却这把（rpm 类，NVIDIA 按 Key 计 40rpm 就属这类）、
   `account` 同 `account-*` 标签一起冷、`provider` 整个供应商一起冷并**直接故障转移**。
-  默认 `quota`/`throughput` 是 `provider`——商汤这两个桶账号间共享，扫 7 个账号
-  只会拿回同一个 429（19.7% 尝试纯空转的由来）。判「换 Key 还是换部署」只看
-  `CredentialPool.effective_throttle_scope()` 一个方法，池子与调度器共用，
-  否则两边判断会漂移。
+  现役 `quota` 是 `account`、`throughput` 是 `credential`（2026-10-08 改：
+  9 把 Key = 9 个独立账号，一把 429 只冷这把，让其余 8 把继续被试）。
+  判「换 Key 还是换部署」只看 `CredentialPool.effective_throttle_scope()` 一个方法，
+  池子与调度器共用，否则两边判断会漂移。
+- **商汤公测账号的 rpm 桶极小，且越线会转入长冷却**（2026-10-13 实测，
+  服务器 DB + 本机 DB 双口径）：服务器近 3 小时每把 Key 每分钟被打 3~6 次，
+  **429 率 80%、04:56 起连续 3 小时无一把 Key 恢复**；本机 7 天 459 次成功里
+  每 Key 实际通过的 rpm **中位 2、p90 6、p99 8、最大 8**，从没突破 8。
+  且 429 时 prompt 中位数不足 5k tokens——**不是 tpm 打爆，是账号级 rpm 惩罚**。
+  你换成官方 API 也一样：限流按账号算，不是按入口算。
+  **已加主动 rpm 闸**（`providers.yaml` 的 `options.rate_limits`：
+  `{scope: account, window_seconds: 60, max_requests: 3}`）——
+  **事前**让配额见底的 Key 出列去换下一把，而不是撞了 429 才事后惩罚。
+  取 3 不取 6：超发会被商汤惩罚数小时，保守的代价只是排队几十秒。
+  扩容新 Key 时按同比例上调（每把 Key 独立计，互不挤占）。
+  回归测试 `tests/test_limits.py` 的 `test_sensenova_has_a_tuned_rpm_rule_in_real_config`
+  与 `test_the_rpm_rule_actually_gates_in_the_limiter` 钉住「规则必须存在、数值=3、
+  第 4 个请求必须被拦、换账号不受牵连」。
 - **K3 的 `request_requires: {reasoning: 4.0}` 已删除**（2026-09-28）：它拿
   `capability.py` 的**关键词命中**当硬门槛，而 zk-auto 别名地板把 reasoning 权重
   钉在 2.0，于是非推理关键词请求永远 `gated_out`——「你好」、短代码、工具回执
