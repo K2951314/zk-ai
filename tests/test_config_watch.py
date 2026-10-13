@@ -246,6 +246,7 @@ providers:
       - id: p1-01
         env: SOMETHING
         value: dev-only
+        tags: ["account-a"]
 """
 
 
@@ -341,5 +342,120 @@ async def test_a_broken_yaml_does_not_take_the_gateway_down(tmp_path: Path) -> N
 
         assert container.router.aliases.names() == ["zk-one"], "旧配置必须还在"
         assert watcher.status()["last_error"], "为什么没生效必须说得出来"
+    finally:
+        await container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# cooldown: 段的热更新（2026-10-13 实测事故）
+# --------------------------------------------------------------------------- #
+# 事故回放：运营者把 config.yaml 的 cooldown.throttle_scopes.throughput 从
+# account 改成 credential，日志里却**仍然**是
+#   "429 (throughput) has account-wide cooldown -> failing over instead of
+#    rotating keys"
+# 改前改后行为一模一样。根因：CooldownPolicy 只在 build_container 里构造一次，
+# reload_config() 重建了 router / 别名 / 凭据注册，唯独没有重建它——于是「改完
+# YAML 自动生效」对这一个文件段是句空话（必须整进程重启才生效）。
+# 后果正是运营者报的症状：商汤一把 Key 429 就停靠同账号兄弟 Key 并直接故障
+# 转移，其余 8 把健康 Key 一次都没被试过。
+_COOLDOWN_A = """\
+cooldown:
+  throttle_scopes:
+    throughput: account
+"""
+
+_COOLDOWN_B = """\
+cooldown:
+  throttle_scopes:
+    throughput: credential
+"""
+
+
+async def _container_with_cooldown(tmp_path: Path):
+    """A real container whose config.yaml carries a ``cooldown:`` section."""
+    from app.core.config import Settings
+    from app.core.container import build_container
+    from app.database.db import Database
+
+    (tmp_path / "models.yaml").write_text(_MODELS_A, encoding="utf-8")
+    (tmp_path / "providers.yaml").write_text(_PROVIDERS, encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(_COOLDOWN_A, encoding="utf-8")
+    settings = Settings(environment="test", config_dir=tmp_path, data_dir=tmp_path)
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.init()
+    return await build_container(settings, database=database, start_services=False)
+
+
+async def test_editing_the_cooldown_section_reaches_the_pool(tmp_path: Path) -> None:
+    """改 cooldown.throttle_scopes 必须真的改掉池子的策略对象。
+
+    只断言 `container.pool.policy.throttle_scopes` 是不够的：那可以被一个
+    只换字段、调度器还在读旧对象的假实现骗过。所以这里断言
+    `container.pool.policy is container.pool.tracker.policy`（tracker 是真正
+    计算冷却时长的那一个）并且跑一次 reload 后再看值。
+    """
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        assert container.pool.policy.throttle_scope("throughput") == "account"
+
+        (tmp_path / "config.yaml").write_text(_COOLDOWN_B, encoding="utf-8")
+        await container.reload_config()
+
+        assert container.pool.policy.throttle_scope("throughput") == "credential", (
+            "reload 之后 pool.policy 还是旧值——冷却策略根本没被热更新"
+        )
+        # tracker 持有同一个 policy 对象才算真的接上（它才是算冷却时长的那个）。
+        assert container.pool.tracker.policy is container.pool.policy
+    finally:
+        await container.shutdown()
+
+
+async def test_a_cooldown_edit_changes_the_failover_decision(tmp_path: Path) -> None:
+    """端到端：改完之后，一把 tpm 429 从「直接故障转移」变成「换兄弟 Key」。
+
+    上面那条钉字段，这条钉**决策**——字段对而决策不变，运营者看到的现象就
+    一模一样（日志里还是那句 account-wide failover）。走的是
+    ``Scheduler._normalize_throttle``，也就是当初打印
+    "429 (throughput) has account-wide cooldown" 的那一个函数。
+    """
+    from app.retry.classifier import ErrorClass, ErrorInfo, ThrottleKind
+
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        await container.reload_config()
+        scheduler = container.scheduler
+        # 用第一把 Key 构造一把 tpm 429（分类器的原始判定：换 Key）。
+        credential = container.pool.for_provider("p1")[0]
+        info = ErrorInfo(
+            error_type="rate_limit_error",
+            error_class=ErrorClass.THROTTLE,
+            http_status=429,
+            message="inference exceeds tpm/rpm limit",
+            switch_credential=True,
+            throttle_kind=ThrottleKind.THROUGHPUT,
+        )
+
+        # account 范围 → 改写成「故障转移」，不再扫兄弟 Key。
+        rewritten = scheduler._normalize_throttle(info, credential)
+        assert rewritten.switch_credential is False
+        assert rewritten.switch_provider is True
+
+        # 改成 credential：同一把 Key 的 429 现在只冷它自己，继续换兄弟 Key。
+        (tmp_path / "config.yaml").write_text(_COOLDOWN_B, encoding="utf-8")
+        await container.reload_config()
+
+        info2 = ErrorInfo(
+            error_type="rate_limit_error",
+            error_class=ErrorClass.THROTTLE,
+            http_status=429,
+            message="inference exceeds tpm/rpm limit",
+            switch_credential=True,
+            throttle_kind=ThrottleKind.THROUGHPUT,
+        )
+        rewritten2 = scheduler._normalize_throttle(info2, credential)
+        assert rewritten2.switch_credential is True, (
+            "reload 之后仍在改写成交故障转移——冷却策略没热更新"
+        )
+        assert rewritten2.switch_provider is False
     finally:
         await container.shutdown()

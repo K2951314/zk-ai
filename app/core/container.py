@@ -224,6 +224,17 @@ class Container:
         self.health_service.config = config
         self.usage_service.config = config
         self.rate_limiter.configure(config.providers)
+        # 冷却策略（cooldown: 段）也在热更新范围内。2026-10-13 实测事故：
+        # 运营者把 throughput 从 account 改成 credential，日志里却仍出现
+        # "429 (throughput) has account-wide cooldown -> failing over instead of
+        # rotating keys"——改前改后行为一模一样。根因是 CooldownPolicy 只在
+        # build_container 里构造过一次，reload 重建了 router/别名/凭据却没有
+        # 重建它，于是「改完 YAML 自动生效」对这一个文件段是句空话（必须整进程
+        # 重启才生效）。后果正是运营者报的那个：商汤一把 Key 429 就停靠同账号
+        # 兄弟 Key 并直接故障转移，其余 8 把健康 Key 一次都没被试过。
+        # 用同一个 from_mapping，与 build_container 的构造路径完全一致。
+        self.pool.policy = CooldownPolicy.from_mapping(config.raw.get("cooldown"))
+        self.pool.tracker.policy = self.pool.policy
         for provider in config.providers.values():
             self.pool.register_provider(provider)
         # The pool is in-memory state: dropping a credential/provider from YAML

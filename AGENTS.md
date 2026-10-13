@@ -158,6 +158,23 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
     `last_error`，改好后自动接上。`ZKAI_WATCH_CONFIG` / `ZKAI_WATCH_CONFIG_INTERVAL` 可控。
     `/health` 暴露 `config_watch`，控制台状态行显示「配置自动生效（已自动 reload N 次）」。
     纯标准库 stat 轮询（不引 watchdog/inotify），监听名单 = loader 真正读过的文件（不是 glob）。
+- **`reload_config()` 曾经漏更新冷却策略，`cooldown:` 段改了不生效**（2026-10-13 运营者
+  报「商汤只试一个 Key 就跳 NVIDIA」时挖出来）：`build_container` 一次性构造
+  `CooldownPolicy` 塞进 `pool.policy`，而 `reload_config()` 重建 router / 别名 /
+  凭据注册 / rate_limiter，**唯独不重建它**。于是 `cooldown.throttle_scopes` 属于
+  「改完 YAML 自动生效」承诺里的一个洞——必须整进程重启才生效。实测后果：
+  运营者 2026-10-08 把 `throughput` 从 `account` 改成 `credential`，日志里**仍**是
+  `429 (throughput) has account-wide cooldown -> failing over instead of rotating keys`，
+  行为一模一样；DB 佐证 09-30/10-01/10-05 各有 1151/1776/500 次请求**只试了 1 个
+  商汤 Key 就换供应商**，其余 8 把健康 Key 一次都没被试。
+  已修（`reload_config` 里两行）：`self.pool.policy = CooldownPolicy.from_mapping(...)`
+  且 `self.pool.tracker.policy = self.pool.policy`——**tracker 那个也必须跟着换**，
+  它才是真正算冷却时长的对象，只换 pool.policy 会让「字段对、行为不变」。
+  回归测试 `tests/test_config_watch.py` 的 `test_editing_the_cooldown_section_reaches_the_pool`
+  （钉字段 + 钉 tracker 同一个对象）与 `test_a_cooldown_edit_changes_the_failover_decision`
+  （钉 `_normalize_throttle` 的真实决策），已用变异法验证鉴别力。
+  ⚠ **凡 reload 时重建了一部分派生对象，就要问「还有谁持有旧配置的切片」**——
+  这次漏的是 CooldownPolicy，同类候选：RetryPolicy、RateLimiter 的规则表。
 - **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
   「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
   只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
