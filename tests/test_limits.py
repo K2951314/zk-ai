@@ -151,6 +151,67 @@ def test_malformed_rule_ignored() -> None:
     assert RateLimitRule.from_mapping({"window_seconds": 60, "max_requests": 5, "scope": "x"}) is None
 
 
+# --------------------------------------------------------------------------- #
+# 真实配置文件里的 sensenova rpm 闸（2026-10-13 实测后补的规则）
+# --------------------------------------------------------------------------- #
+# 背景：运营者反馈「单 Key 调官网就通、走网关总限流」。服务器 DB 查下来每
+# 30 分钟桶 ~80% 被拒、连续 3 小时无一把 Key 恢复，且 429 时 prompt 中位数
+# 不足 5k tokens——不是 tpm 打爆，是商汤公测账号的 rpm 桶本来就极小、越线
+# 会转入长冷却。实测本机 7 天 459 次成功里，每 Key 实际通过的 rpm 中位 2、
+# p90 6、p99 8、**最大 8**，从没突破 8。所以给 sensenova 加一条 60s/3 请求的
+# 主动闸，在**事前**把配额见底的 Key 出列，而不是撞了 429 才事后惩罚。
+# 下面两条钉住的是「规则真的在真实配置里、且数值是校准过的那一个」，不是
+# 重新测 RateLimiter 本身（那已被上面 10 余条覆盖）。
+def test_sensenova_has_a_tuned_rpm_rule_in_real_config() -> None:
+    """providers.yaml 里 sensenova 的 60s 闸必须是实测校准的值（3），不是没配。
+
+    用真实配置文件，不是手工构造——前者才是网关实际读的东西。若是有人改
+    数值（比如凭直觉拍成 40），这条会立刻指出来：商汤的桶实测没过 8。
+    """
+    from app.core.config.loader import load_app_config
+
+    config = load_app_config()
+    provider = config.providers["sensenova"]
+    rpm_rules = [
+        RateLimitRule.from_mapping(e)
+        for e in (provider.options or {}).get("rate_limits") or []
+    ]
+    minute_rules = [
+        r for r in rpm_rules if r is not None and int(r.window_seconds) == 60
+    ]
+    assert minute_rules, "sensenova 缺 60 秒 rpm 闸——2026-10-13 实测补的那条不见了"
+    for rule in minute_rules:
+        assert rule.max_requests == 3, (
+            f"sensenova rpm 闸被改成了 {rule.max_requests}；实测每账号"
+            f"通过的 rpm 中位 2、最大 8，取 3 是刻意保守（超发会被商汤惩罚数小时）"
+        )
+        assert rule.scope == "account", "rpm 桶按账号分，scope 必须是 account"
+
+
+def test_the_rpm_rule_actually_gates_in_the_limiter() -> None:
+    """把真实配置灌进 RateLimiter，第 4 个请求必须被拦。
+
+    上一条钉「规则存在」，这条钉「它真的拦得住」——字段对而不生效，运营者
+    看到的还是 80% 429。按账号记账：3 个给 account-a 放行，第 4 个被拦，
+    换 account-b 不受牵连。
+    """
+    from app.core.config.loader import load_app_config
+
+    config = load_app_config()
+    provider = config.providers["sensenova"]
+    limiter = RateLimiter()
+    limiter.register_provider(provider)
+
+    ok = [limiter.admit("sensenova", "sensenova-01", tags=["account-a"]) for _ in range(3)]
+    assert ok == [True, True, True], "前 3 个请求必须放行（rpm 闸 60s/3）"
+    assert not limiter.admit("sensenova", "sensenova-01", tags=["account-a"]), (
+        "第 4 个请求必须被 rpm 闸拦下——否则规则只是记账，不在事前出列"
+    )
+    assert limiter.admit("sensenova", "sensenova-02", tags=["account-b"]), (
+        "account-b 不该被 account-a 的额度拖累——桶是按账号分的"
+    )
+
+
 async def test_the_ledger_survives_an_ungraceful_exit(tmp_path: Path) -> None:
     """没有 shutdown 也必须落盘——否则那道配额守卫只是个装饰。
 

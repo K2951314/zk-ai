@@ -85,6 +85,11 @@ providers:
       # rate_limits:
       #   - {scope: credential, window_seconds: 60, max_requests: 40}        # 40 rpm
       #   - {scope: account, window_seconds: 18000, max_tokens: 300000000}   # 5h token 预算
+      #   - {scope: account, window_seconds: 604800, max_tokens: 3000000000} # 7d token 预算
+      # ⚠ 若该供应商按 rpm 限流，务必加一条 window_seconds=60 的请求数闸：
+      # 429 是**事后**惩罚（账号可能被冷却数小时），这条闸是**事前**规避。
+      # 商汤公测即此例——实测每账号实际通过的 rpm 中位 2、最大 8，网关每 Key
+      # 每分钟 3~6 次的正常分流就已压线，所以 providers.yaml 里给它设了 3。
     credentials:
       - id: anthropic-01
         env: ${ANTHROPIC_KEY_01_ENV:-ANTHROPIC_KEY_01}
