@@ -42,6 +42,7 @@ from app.retry.classifier import ErrorClass, ErrorClassifier, parse_retry_after
         (401, "authentication_error", ErrorClass.CREDENTIAL, False, True, False),
         (403, "permission_denied", ErrorClass.CREDENTIAL, False, True, False),
         (404, "model_not_found", ErrorClass.CLIENT, False, False, True),
+        (410, "model_gone", ErrorClass.CLIENT, False, False, True),
         (408, "timeout", ErrorClass.TRANSIENT, True, False, False),
         (409, "conflict_error", ErrorClass.CLIENT, False, False, False),
         (413, "context_length_exceeded", ErrorClass.CLIENT, False, False, False),
@@ -173,6 +174,34 @@ def test_error_to_error_preserves_client_status() -> None:
     assert error.http_status == 429
     assert error.provider == "fake"
     assert error.retry_after == 5.0
+
+
+def test_410_gone_is_reported_to_the_client_as_410_not_502() -> None:
+    """模型已下线时，客户端要看到 410 而不是被伪装成 502。
+
+    实测案例（2026-10-15）：NVIDIA 的 moonshotai/kimi-k3 EOL，报 410 Gone。
+    这条路径若走 400 兜底，``client_status`` 会退化成默认 502，
+    用户就得到一句莫名其妙的「Bad Gateway」，掩盖了「模型没了」这个事实。
+    """
+    info = ErrorClassifier().classify_status(
+        410,
+        body={
+            "error": {
+                "message": (
+                    "The model 'moonshotai/kimi-k3' has reached its end of "
+                    "life on 2026-10-15T08:00:00Z and is no longer available."
+                )
+            }
+        },
+    )
+    assert info.error_type == "model_gone"
+    assert info.error_class is ErrorClass.CLIENT
+    assert info.retryable is False
+    assert info.switch_credential is False
+    assert info.switch_provider is True
+
+    error = info.to_error(provider="nvidia", model="moonshotai/kimi-k3")
+    assert error.http_status == 410
 
 
 # --------------------------------------------------------------------------- #

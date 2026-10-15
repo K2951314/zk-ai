@@ -372,6 +372,20 @@ class ErrorClassifier:
                 cooldown_scope="credential", cooldown_seconds=0.0,
                 client_status=403, raw=raw,
             )
+        if status == 410:
+            # 410 Gone —— 上游明确说「这个模型已永久下线」。
+            # 实测案例（2026-10-15）：NVIDIA 的 moonshotai/kimi-k3 报
+            # 「The model ... has reached its end of life on 2026-10-15T08:00:00Z
+            #   and is no longer available」。
+            # 语义与 404 同类（持久的「没有这个东西」），不该按 400 处理：
+            # 按 400 兜底会让 switch_provider=False（不换供应商、直接失败），
+            # 且 is_quarantine_worthy 不认它 → 部署永远不被隔离，每次请求
+            # 都白赔一次上游往返（NVIDIA 实测 30s+）。
+            return ErrorInfo(
+                "model_gone", ErrorClass.CLIENT, 410, detail,
+                retryable=False, switch_credential=False, switch_provider=True,
+                client_status=410, raw=raw,
+            )
         if status == 404:
             # Ambiguous: could be a wrong model/endpoint. Do not burn keys.
             return ErrorInfo(

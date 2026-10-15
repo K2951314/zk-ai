@@ -135,15 +135,19 @@ def is_quarantine_worthy(info: ErrorInfo) -> bool:
     只认两类：
     * 反复的传输/上游故障（``transient`` / ``availability``）——单次是抖动，
       连续多次就是真坏了；
-    * 「模型/端点在上游不存在」（404 / ``model_not_found``）——这是持久的，
-      再怎么重试也不会好。
+    * 「模型/端点在上游不存在或已下线」（404 / ``model_not_found``、
+      410 / ``model_gone``）——这是持久的，再怎么重试也不会好。
 
     明确**不认**：
     * 429 限流（``throttle``）：偶发，且那是凭据层的处置范围；
     * 401/403（``credential``）：换把 Key 可能就好了，隔离整个部署是误伤；
     * 400/413/422（``client``）：调用方自己的错，不该赖部署。
+
+    ``model_gone``（410）为什么算：上游明确宣告模型已 EOL 下线，语义与 404
+    一样持久。2026-10-15 实测 NVIDIA 的 moonshotai/kimi-k3 报 410
+    （end of life），若不计入隔离，每次请求都会白赔一次 30s+ 的上游往返。
     """
-    if info.http_status == 404 or info.error_type == "model_not_found":
+    if info.http_status in (404, 410) or info.error_type in {"model_not_found", "model_gone"}:
         return True
     return info.error_class in {ErrorClass.TRANSIENT, ErrorClass.AVAILABILITY}
 

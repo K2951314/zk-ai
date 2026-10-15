@@ -48,7 +48,7 @@
     纯自动识别在信息论上不可行。两种模型安全性不对称：锚点误判为滚动 =
     少烧（安全）；滚动误判为锚点 = 烧穿（亏 K3 口粮）。故默认滚动模型。
   - 确认是固定锚点后：--anchors "1=03:30;3=07:15"（数字=Key 序号，1 即
-    SENSENOVA_API_KEY）切换为固定窗口爆发模式（边界后满血烧干再停靠），
+    SENSENOVA_API_KEY / SENSENOVA_API_KEY_01）切换为固定窗口爆发模式（边界后满血烧干再停靠），
     锚点持久化进 burn_state.json，CLI 传入优先于持久化值。
 
 用法：
@@ -652,6 +652,19 @@ def parse_week_anchors(spec: str) -> dict[int, float]:
     return out
 
 
+def _anchor_key_names(idx: int) -> list[str]:
+    """Key 序号 → 候选 env 变量名（按优先级）。
+
+    序号 1 历史上指不带后缀的 SENSENOVA_API_KEY（与 02 同账号），但 2026-10-05
+    统一改名后 01 号那把叫 SENSENOVA_API_KEY_01。两种都放进候选，先试带后缀的
+    新名、再退回无后缀的旧名，向后兼容、不改变其他序号的语义。
+    """
+    names = [f"SENSENOVA_API_KEY_{idx:02d}"]
+    if idx == 1:
+        names.append("SENSENOVA_API_KEY")
+    return names
+
+
 def apply_week_anchors(spec: str, keys: list[KeyState], log) -> int:
     """把 --week-anchors 应用到对应账号（数字 = Key 序号，同 apply_anchors）。"""
     if not spec.strip():
@@ -659,7 +672,7 @@ def apply_week_anchors(spec: str, keys: list[KeyState], log) -> int:
     mapping = parse_week_anchors(spec)
     seen: set[int] = set()
     for idx, ts in sorted(mapping.items()):
-        names = ["SENSENOVA_API_KEY"] if idx == 1 else [f"SENSENOVA_API_KEY_{idx:02d}"]
+        names = _anchor_key_names(idx)
         target = next((k.account for k in keys if k.name in names), None)
         if target is None:
             log(f"周锚点项 {idx!r} 没有匹配到已加载的 Key，已跳过", "WARN")
@@ -675,8 +688,8 @@ def apply_week_anchors(spec: str, keys: list[KeyState], log) -> int:
 def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
     """把 "1=03:30;3=07:15" 或 "2=10-07 23:10" 形式的窗口锚点应用到对应账号。
 
-    数字 = Key 序号（1 即不带后缀的 SENSENOVA_API_KEY，与 02 同账号）；
-    同账号多把 Key 共用一个锚点，冲突时取先出现的并告警。
+    数字 = Key 序号（1 优先匹配 SENSENOVA_API_KEY_01，退回不带后缀的
+    SENSENOVA_API_KEY；同账号多把 Key 共用一个锚点，冲突时取先出现的并告警）。
     两种格式：
       - HH:MM（旧）：取今天该时刻作为一次真实边界（此后按 +5h 递推）。
       - MM-DD HH:MM（新）：照抄商汤控制台「下次重置时间」，过去的日期
@@ -690,7 +703,7 @@ def apply_anchors(spec: str, keys: list[KeyState], log) -> int:
             log(f"锚点项 {item!r} 无法解析（应为 数字=HH:MM 或 数字=MM-DD HH:MM），已跳过", "WARN")
             continue
         idx = int(num_s)
-        names = ["SENSENOVA_API_KEY"] if idx == 1 else [f"SENSENOVA_API_KEY_{idx:02d}"]
+        names = _anchor_key_names(idx)
         target = next((k.account for k in keys if k.name in names), None)
         if target is None:
             log(f"锚点项 {item!r} 没有匹配到已加载的 Key，已跳过", "WARN")
@@ -1770,7 +1783,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--anchors", default="",
                    help="每账号的专属池窗口重置时刻（控制台显示的「重置时间」，本地 HH:MM）。"
                         "格式：--anchors \"1=03:30;3=07:15;5=22:05\"（数字=Key 序号，"
-                        "1 即 SENSENOVA_API_KEY，与 02 同账号共用）。不填=滚动窗口模型"
+                        "1=SENSENOVA_API_KEY_01，也兼容旧的无后缀名）。不填=滚动窗口模型"
                         "（保守安全）；填了=固定窗口爆发（边界后满血烧干再停靠）")
     # ---- 冷却/超时 ----
     opt("--cooldown-base", type=float, default=60, help="429 首次冷却秒数（指数退避）")

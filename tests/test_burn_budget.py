@@ -20,6 +20,7 @@ from scripts.burn_sensenova import (
     AccountState,
     Burner,
     KeyState,
+    apply_anchors,
     apply_week_anchors,
     is_flash_lite,
     is_quota_exhausted,
@@ -407,6 +408,36 @@ def test_apply_week_anchors_maps_key_index_to_account() -> None:
     assert keys[0].account.week_anchor_ts > 0
     assert keys[1].account.week_anchor_ts == 0.0
     assert any("99" in msg for msg, _ in logs)
+
+
+def test_apply_week_anchors_maps_key_index_one_to_suffixed_key() -> None:
+    """序号 1 必须能匹配 SENSENOVA_API_KEY_01（2026-10-05 统一改名后）。
+
+    回归（2026-10-15 服务器实测）：apply_* 原先把序号 1 硬编码成不带后缀的
+    SENSENOVA_API_KEY，改名后那把 Key 叫 SENSENOVA_API_KEY_01，于是配置里的
+    "1=..." 静默空转、01 号账号的 5h/周锚点全程不生效（服务器 burner.yaml 的
+    anchors/week_anchors 都以 "1=" 开头）。修法是候选名里同时放带后缀与无后缀两份，
+    先试带后缀的新名、再退回旧名。
+    """
+    keys = [KeyState(name="SENSENOVA_API_KEY_01", key="sk-a",
+                     account=AccountState(name="K01"))]
+    logs: list[tuple[str, str]] = []
+    n = apply_week_anchors("1=Thu 09:36", keys,
+                           lambda msg, level="INFO": logs.append((msg, level)))
+    assert n == 1, f"序号 1 应匹配到 SENSENOVA_API_KEY_01，日志：{logs}"
+    assert keys[0].account.week_anchor_ts > 0
+    assert not any("没有匹配到" in msg for msg, _ in logs)
+
+
+def test_apply_anchors_key_index_one_still_matches_legacy_unsuffixed_name() -> None:
+    """向后兼容：没有 _01 时，序号 1 仍应匹配旧的无后缀 SENSENOVA_API_KEY。"""
+    keys = [KeyState(name="SENSENOVA_API_KEY", key="sk-a",
+                     account=AccountState(name="K01"))]
+    logs: list[tuple[str, str]] = []
+    n = apply_anchors("1=15:10", keys,
+                      lambda msg, level="INFO": logs.append((msg, level)))
+    assert n == 1, f"序号 1 应退回匹配无后缀名，日志：{logs}"
+    assert keys[0].account.anchor_ts > 0
 
 
 def test_budget_uses_the_account_week_anchor_not_the_global_one() -> None:

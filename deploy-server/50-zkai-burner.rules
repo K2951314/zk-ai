@@ -1,0 +1,30 @@
+// ZK-AI：允许网关进程（www-data）管理 zkai-burner 服务。
+//
+// 背景（2026-10-15）：控制台「关闭/重启消耗器」按钮在这台服务器上从来没能工作过。
+// 根因有两道锁，两道都锁死了：
+//   1. /etc/sudoers.d/zkai-burner 授权的是 `ubuntu` 用户，而网关以 `www-data` 运行
+//      （zkai.service 里 User=www-data），www-data 根本不在白名单里。
+//   2. zkai.service 带 NoNewPrivileges=true，即使 sudoers 配对了，sudo 也会报
+//      `The "no new privileges" flag is set` 而起不来。
+// 走 polkit 可绕开这两道锁：systemctl 通过 D-Bus 请求 systemd 执行，不经过 sudo、
+// 也不需要 setuid。这里只放行 www-data 对 zkai-burner 这个 unit 的 manage-units。
+//
+// 权限边界：只匹配 zkai-burner，不含其他 unit；也不含 manage-unit-files
+// （那会允许改开机自启，属于更宽的权限，控制台用不到）。
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (subject.user !== "www-data") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    if (unit !== "zkai-burner.service" && unit !== "zkai-burner") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var verb = action.lookup("verb");
+    if (verb === "start" || verb === "stop" || verb === "restart") {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

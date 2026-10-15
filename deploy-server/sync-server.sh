@@ -75,18 +75,27 @@ if [ "${SKIP_BURNER:-0}" != "1" ]; then
   echo "==> 2/3 burner (conservative profile)"
   scp "$DEPLOY/burner.yaml" "$TARGET:/tmp/zkai-burner.yaml" >/dev/null
   scp "$DEPLOY/zkai-burner.service" "$TARGET:/tmp/zkai-burner.service" >/dev/null
+  scp "$DEPLOY/50-zkai-burner.rules" "$TARGET:/tmp/zkai-burner.rules" >/dev/null
   STEP2="set -e
 install -o root -g root -m 644 /tmp/zkai-burner.service /etc/systemd/system/zkai-burner.service
 mkdir -p /var/lib/zkai/burner
 chown www-data:www-data /var/lib/zkai/burner; chmod 750 /var/lib/zkai/burner
 [ -f /opt/zkai/config/burner.yaml ] && cp -a /opt/zkai/config/burner.yaml \"/opt/zkai/config/burner.yaml.bak-\$(date +%Y%m%d-%H%M%S)\"
 install -o www-data -g www-data -m 664 /tmp/zkai-burner.yaml /opt/zkai/config/burner.yaml
-rm -f /tmp/zkai-burner.yaml /tmp/zkai-burner.service
+# polkit 规则：网关（www-data）要能通过控制台 start/stop/restart 消耗器。
+# 不走 sudo——zkai.service 带 NoNewPrivileges=true，sudo 会直接报
+# \"The no new privileges flag is set\"；而 /etc/sudoers.d/zkai-burner 里
+# 授权的是 ubuntu 用户、不是 www-data。所以用 polkit 走 D-Bus。
+install -o root -g root -m 644 /tmp/zkai-burner.rules /etc/polkit-1/rules.d/50-zkai-burner.rules
+rm -f /tmp/zkai-burner.yaml /tmp/zkai-burner.service /tmp/zkai-burner.rules
 systemctl daemon-reload
+systemctl restart polkit || echo '[warn] polkit 重启失败，规则可能未生效'
 systemctl enable --now zkai-burner
 sleep 8
 systemctl is-active zkai-burner
-journalctl -u zkai-burner --no-pager | grep '配置来源' | tail -1 | grep -o 'concurrency=[0-9]*'"
+journalctl -u zkai-burner --no-pager | grep '配置来源' | tail -1 | grep -o 'concurrency=[0-9]*'
+# 自检：www-data 真的能管这个 unit（做一次只读查询即可证明 polkit 授权生效）
+sudo -u www-data systemctl show zkai-burner -p ActiveState"
   remote "$(printf '%s' "$STEP2" | base64 -w0)"
 fi
 

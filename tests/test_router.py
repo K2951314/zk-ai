@@ -792,6 +792,25 @@ def test_quarantine_only_counts_evidence_of_a_broken_deployment() -> None:
     assert is_quarantine_worthy(
         _info(status=404, body={"detail": "Function 'x' Not Found"})
     ) is True
+    # 410 Gone：上游明确说「这个模型已永久下线」，与 404 同类，必须计入。
+    # 实测动机（2026-10-15）：NVIDIA 的 moonshotai/kimi-k3 报
+    # 「The model ... has reached its end of life on 2026-10-15T08:00:00Z
+    #   and is no longer available」。旧逻辑不认 410 → 永不隔离 →
+    # 每次请求都白等 34.7s 才回落到下一个供应商。
+    assert is_quarantine_worthy(
+        _info(
+            status=410,
+            body={
+                "error": {
+                    "message": (
+                        "The model 'moonshotai/kimi-k3' has reached its end "
+                        "of life on 2026-10-15T08:00:00Z and is no longer "
+                        "available."
+                    )
+                }
+            },
+        )
+    ) is True
 
     # 不该计入：限流（偶发，属凭据层）、无权限（换把 Key 可能就好）、调用方的错
     assert is_quarantine_worthy(

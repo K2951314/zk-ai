@@ -266,7 +266,35 @@ Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner
 | `sync-server.sh` | 一键部署/同步脚本（幂等） |
 | `burner.yaml` | 服务器保守档 burner 配置 |
 | `zkai-burner.service` | burner 的 systemd 单元（限额+优先级） |
+| `50-zkai-burner.rules` | polkit 规则：让网关（www-data）能 start/stop/restart 消耗器 |
 | `Caddyfile` | Caddy 配置（`/zkai/*` 网关 API + `/ui/*` 控制台 + `/admin/*` 按 token 分流） |
+
+## 控制台为什么能管消耗器：polkit 而不是 sudo
+
+控制台「积分消耗器」页的启动/停止/重启按钮，走的是 `app/services/burner_service/restart.py`
+里的 `_run_systemctl_action()`。**2026-10-15 前这套在服务器上从来没能工作过**，
+根因是两道锁同时锁死：
+
+1. `/etc/sudoers.d/zkai-burner` 里授权的是 **`ubuntu`** 用户：
+   `ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop zkai-burner, ...`
+   但网关以 **`www-data`** 运行（`zkai.service` 的 `User=www-data`），根本不在白名单。
+2. `zkai.service` 带 **`NoNewPrivileges=true`**。即使 sudoers 配对了，sudo 也会报
+   `The "no new privileges" flag is set, which prevents sudo from running as root`。
+
+**修法是 polkit**（`50-zkai-burner.rules`）：systemctl 通过 D-Bus 请求 systemd 执行，
+不经过 sudo、也不需要 setuid，两道锁都绕开了。规则只放行 `www-data` 对
+`zkai-burner.service` 的 start/stop/restart，不含其他 unit，也不含
+`manage-unit-files`（那会允许改开机自启，控制台用不到）。
+
+装完必须 `systemctl restart polkit` 才生效。自检：
+
+```bash
+sudo -u www-data systemctl stop  zkai-burner   # 退出码 0、状态转 inactive
+sudo -u www-data systemctl start zkai-burner   # 退出码 0、状态转 active
+```
+
+⚠️ 规则文件必须 **UTF-8 无 BOM**（polkit 的 JS 引擎对 BOM 敏感）。
+`sync-server.sh` 用 `scp` 传原文件，不会引入 BOM。
 
 密钥一律不进这三个文件：SENSENOVA key 走 scp 到服务器 `.env`，
 token 从 `/opt/zkai/.env` 现取写进 `/etc/caddy/zkai.env`（root:caddy 640）；
