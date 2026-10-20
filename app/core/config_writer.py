@@ -411,6 +411,38 @@ def delete_credential_from_provider(path: Path, provider_id: str, credential_id:
     raise KeyError(f"credential '{credential_id}' not found in provider '{provider_id}'")
 
 
+def update_credential_in_provider(
+    path: Path,
+    provider_id: str,
+    credential_id: str,
+    fields: dict[str, Any],
+) -> None:
+    """Update selected fields of one credential in providers.yaml, in place.
+
+    ``fields`` holds only the keys to change; a ``None`` value removes the key,
+    so the legacy ``env`` spelling can be replaced by ``env_var`` without
+    leaving both behind. Comments and unrelated entries stay untouched.
+    """
+    doc = load_document(path)
+    providers = _list_of(doc, "providers")
+    index = _find(providers, "id", provider_id)
+    if index < 0:
+        raise KeyError(f"provider '{provider_id}' not found in {path.name}")
+    credentials = providers[index].get("credentials")
+    if not isinstance(credentials, CommentedSeq):
+        raise KeyError(f"provider '{provider_id}' has no credentials")
+    for cred in credentials:
+        if isinstance(cred, CommentedMap) and cred.get("id") == credential_id:
+            for key, value in fields.items():
+                if value is None:
+                    cred.pop(key, None)
+                else:
+                    cred[key] = value
+            atomic_write(path, doc)
+            return
+    raise KeyError(f"credential '{credential_id}' not found in provider '{provider_id}'")
+
+
 def upsert_provider(path: Path, provider_id: str, payload: dict[str, Any]) -> None:
     """Create-or-update one entry in ``providers.yaml`` (in place when it exists).
 
@@ -476,6 +508,29 @@ def upsert_env_var(path: Path, name: str, value: str) -> bool:
     _atomic_write_text(path, eol.join(lines) + eol)
     logger.info("env file updated: %s (%s)", path, name)
     return replaced
+
+
+def delete_env_var(path: Path, name: str) -> bool:
+    """Remove ``NAME=...`` from a dotenv file. Returns True when a line was removed.
+
+    Same text-splice discipline as :func:`upsert_env_var`: comments, ordering and
+    unrelated lines stay byte-identical. Deleting a credential must also remove
+    its key from ``.env``, otherwise the secret survives the delete and silently
+    revives the next time someone re-adds the same env name.
+    """
+    if not path.exists():
+        return False
+    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=")
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        raw = fh.read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines()
+    kept = [line for line in lines if not pattern.match(line)]
+    if len(kept) == len(lines):
+        return False
+    _atomic_write_text(path, eol.join(kept) + eol)
+    logger.info("env var removed: %s (%s)", path, name)
+    return True
 
 
 #: Credential ids here are short and human (``sensenova-01``).

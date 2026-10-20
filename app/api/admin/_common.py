@@ -182,6 +182,17 @@ class AddCredentialRequest(BaseModel):
     enabled: bool = True
 
 
+class UpdateCredentialRequest(BaseModel):
+    """Body for rotating or adjusting an existing credential in place."""
+
+    #: The new key itself; written to .env under the credential's env var.
+    value: str | None = None
+    #: Rename the env var holding the key (old name cleaned up when unused).
+    env_var: str | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+
+
 class ProviderUpsertRequest(BaseModel):
     """Body for creating/replacing a provider from the console."""
 

@@ -34,6 +34,7 @@ from app.core.config_writer import (
     looks_like_secret,
     upsert_env_var,
 )
+from app.core.config_writer import delete_env_var, update_credential_in_provider
 from app.core.config_writer import delete_provider as delete_provider_file
 from app.core.config_writer import upsert_provider as upsert_provider_file
 from app.models.provider import (
@@ -613,6 +614,104 @@ async def add_credential(
     }
 
 
+@router.put("/providers/{provider_id}/credentials/{credential_id}", summary="更新凭据（换 Key / 调参数）")
+async def update_credential(
+    provider_id: str,
+    credential_id: str,
+    payload: _common.UpdateCredentialRequest,
+    container: ContainerDep,
+) -> dict[str, Any]:
+    """Rotate a credential in place; persists across restarts.
+
+    The piece whose absence forced delete-then-readd: ``value`` lands in ``.env``
+    under the credential's env var (existing name, or ``env_var`` when renaming),
+    so an expired or leaked key is replaced without losing the entry's identity,
+    priority or fail counters. Renaming unifies the legacy ``env`` on ``env_var``.
+    """
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
+        )
+    current = next((c for c in provider.credentials if c.id == credential_id), None)
+    if current is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
+        )
+    old_name = current.env_var or (current.env.strip("${} ") if current.env else None)
+    new_name = payload.env_var or old_name
+    env_synced: str | None = None
+    if payload.value is not None:
+        if not new_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "message": "该凭据还没有环境变量名，先在 env_var 里指定一个再换 Key",
+                        "type": "invalid_credential",
+                    }
+                },
+            )
+        try:
+            replaced = upsert_env_var(_common._env_file(), new_name, payload.value)
+        except OSError as exc:
+            raise _file_write_failed(exc) from exc
+        # Live-export so the new key works on the next request, not after a reload.
+        os.environ[new_name] = payload.value
+        env_synced = f".env ({'updated' if replaced else 'appended'})"
+    fields: dict[str, Any] = {}
+    if payload.env_var is not None:
+        fields["env"] = None  # 统一走 env_var，清掉历史遗留的 env 写法
+        fields["env_var"] = payload.env_var
+    if payload.priority is not None:
+        fields["priority"] = payload.priority
+    if payload.enabled is not None:
+        fields["enabled"] = payload.enabled
+    synced = None
+    path = _source_file(container, "providers")
+    if path is not None and fields:
+        try:
+            update_credential_in_provider(path, provider_id, credential_id, fields)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": {"message": str(exc)}},
+            ) from exc
+        synced = path.name
+        container.refresh_config_watch()
+    # 改名后旧变量若再无凭据引用，顺手从 .env 清掉，杜绝残留复活。
+    if payload.env_var is not None and old_name and old_name != payload.env_var:
+        still_used = any(
+            (c.env_var or (c.env.strip("${} ") if c.env else None)) == old_name
+            for p in container.config.providers.values()
+            for c in p.credentials
+            if c.id != credential_id
+        )
+        if not still_used:
+            delete_env_var(_common._env_file(), old_name)
+            os.environ.pop(old_name, None)
+    for c in provider.credentials:
+        if c.id != credential_id:
+            continue
+        if payload.env_var is not None:
+            c.env = None
+            c.env_var = payload.env_var
+        if payload.priority is not None:
+            c.priority = payload.priority
+        if payload.enabled is not None:
+            c.enabled = payload.enabled
+    container.pool.register_provider(provider)
+    return {
+        "object": "credential",
+        "provider_id": provider_id,
+        "credential_id": credential_id,
+        "synced": synced,
+        "env_synced": env_synced,
+    }
+
+
 @router.delete("/providers/{provider_id}/credentials/{credential_id}", summary="删除凭据")
 async def delete_credential(
     provider_id: str, credential_id: str, container: ContainerDep
@@ -629,6 +728,12 @@ async def delete_credential(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
+    doomed = next((c for c in provider.credentials if c.id == credential_id), None)
+    env_name = (
+        doomed.env_var or (doomed.env.strip("${} ") if doomed.env else None)
+        if doomed is not None
+        else None
+    )
     synced = None
     path = _source_file(container, "providers")
     if path is not None:
@@ -637,7 +742,24 @@ async def delete_credential(
         container.refresh_config_watch()
     provider.credentials = [c for c in provider.credentials if c.id != credential_id]
     container.pool.register_provider(provider)
-    return {"deleted": credential_id, "provider_id": provider_id, "synced": synced}
+    # 密钥本体也要走：变量若再无任何凭据引用，就从 .env 删掉，
+    # 否则界面上删了、文件里还留着，重加同名凭据时旧 Key 又复活。
+    env_removed = False
+    if env_name:
+        still_used = any(
+            (c.env_var or (c.env.strip("${} ") if c.env else None)) == env_name
+            for p in container.config.providers.values()
+            for c in p.credentials
+        )
+        if not still_used:
+            env_removed = delete_env_var(_common._env_file(), env_name)
+            os.environ.pop(env_name, None)
+    return {
+        "deleted": credential_id,
+        "provider_id": provider_id,
+        "synced": synced,
+        "env_removed": env_removed,
+    }
 
 
 @router.post("/credentials/{credential_id}/enable", summary="启用凭据")
