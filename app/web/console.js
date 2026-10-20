@@ -1261,6 +1261,8 @@ async function loadUsage() {
 
 /* ================= 模型与别名 ================= */
 const CAP_DIMS = ["coding","reasoning","tool_use","vision","long_context","structured_output","speed","cost"];
+// 只保留八个合法维度，缺项按 5 分兜底：防止把上下文长度等元数据误塞进能力项
+const normCaps = (c) => Object.fromEntries(CAP_DIMS.map(k => [k, Number((c || {})[k] ?? 5)]));
 const CAP_ZH = {coding:"编程", reasoning:"推理", tool_use:"工具调用", vision:"视觉",
   long_context:"长上下文", structured_output:"结构化输出", speed:"速度", cost:"便宜度"};
 
@@ -1416,19 +1418,23 @@ function openModelModal(modelId, prefill) {
         <option value="false" ${m.enabled === false ? "selected" : ""}>禁用</option></select></label>
       <label style="grid-column:1/-1">描述<input type="text" id="mm-desc" value="${esc(m.description || "")}" placeholder="可空"></label>
     </div>
-    <h4 class="sec">能力评分（0–10，cost 越大代表越便宜）</h4>
+    <h4 class="sec">能力评分（0–10，cost 越大代表越便宜）——直接选档，已按预设与实测预填</h4>
     <div class="capgrid">${CAP_DIMS.map(k => {
-      // 上游只说一次实话的地方就不让手填：视觉/上下文由实测决定
+      // 上游只说一次实话的地方就不让改：视觉与推理由实测决定
       const locked = (k === "vision" && facts.vision_input !== undefined) ||
                      (k === "reasoning" && facts.reasoning !== undefined);
+      const cur = Math.round(Number(caps[k] || 0) * 2) / 2;
+      const opts = [];
+      for (let v = 0; v <= 10; v += 0.5) {
+        opts.push(`<option value="${v}"${Math.abs(v - cur) < 0.25 ? " selected" : ""}>${v.toFixed(1)}</option>`);
+      }
       if (locked) {
         const known = k === "vision" ? facts.vision_input : facts.reasoning;
         return `<label>${CAP_ZH[k]}
-          <input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}" disabled
-            title="供应商已${known ? "支持" : "不支持"}，此项由实测决定">
+          <select data-cap="${k}" disabled title="供应商已${known ? "支持" : "不支持"}，此项由实测决定">${opts.join("")}</select>
           <span class="chip muted">实测${known ? "支持" : "不支持"}</span></label>`;
       }
-      return `<label>${CAP_ZH[k]}<input type="number" min="0" max="10" step="0.5" data-cap="${k}" value="${caps[k]}"></label>`;
+      return `<label>${CAP_ZH[k]}<select data-cap="${k}">${opts.join("")}</select></label>`;
     }).join("")}
     </div>
     ${facts.reasoning_effort?.length ? `
@@ -1472,7 +1478,10 @@ function openModelModal(modelId, prefill) {
   $("#mm-save").onclick = async () => {
     collectDeps();
     const caps2 = {};
-    document.querySelectorAll("[data-cap]").forEach(i => caps2[i.dataset.cap] = Number(i.value));
+    document.querySelectorAll("[data-cap]").forEach(i => {
+      // 只提交八个合法维度：多余键会被后端校验判为 extra_forbidden
+      if (CAP_DIMS.includes(i.dataset.cap)) caps2[i.dataset.cap] = Number(i.value);
+    });
     const payload = {
       id: $("#mm-id").value.trim(),
       display_name: $("#mm-name").value.trim() || null,
@@ -1598,9 +1607,18 @@ async function openMarketModal(presetPid) {
           <td class="name"><b>${esc(x.suggested_model_id)}</b><span class="sub">${esc(x.upstream_model)}</span></td>
           <td class="small">${cell}</td>
           <td class="small">${fmtK(x.discovered?.context_window ?? x.preset.context_window)}
-            ${x.discovered_known ? '<span class="chip" title="来自供应商 API 实测">实测</span>' : '<span class="chip muted" title="没有实测数据，按经验值预估">预估</span>'}</td>
+            ${x.discovered_known
+              ? '<span class="chip" title="来自供应商 API 实测">实测</span>'
+              : (x.context_window_source === "official"
+                  ? '<span class="chip" title="来自模型社区官方资料页">官方</span>'
+                  : '<span class="chip muted" title="官方未公开，按模型名经验预估">预估</span>')}</td>
           <td class="small muted">${esc(x.preset.description)}</td>
-          <td class="small">${x.preset.input_price ? "$" + x.preset.input_price + "/" + x.preset.output_price : "-"}</td>
+          <td class="small">${x.preset.input_price
+            ? ("$" + x.preset.input_price + "/" + x.preset.output_price
+                + (x.preset.price_source === "reference"
+                    ? ' <span class="chip muted" title="第三方渠道挂牌价，非供应商结算价">参考</span>'
+                    : ''))
+            : '<span class="muted" title="官方与公开渠道都没有该模型单价">未公开</span>'}</td>
         </tr>`;
       }).join("");
       lastItems = items;
@@ -1625,7 +1643,7 @@ async function openMarketModal(presetPid) {
             description: p.description,
             enabled: true,
             context_window: x.discovered?.context_window || p.context_window,
-            capabilities: p.capabilities,
+            capabilities: normCaps(p.capabilities),
             // 实测事实随表单一起带过去：表单据此决定哪些参数可调、哪些直接定值
             discovered: x.discovered,
             facts_note: x.facts_note,

@@ -7,6 +7,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.logging import get_logger
+
+logger = get_logger("models.provider")
+
 #: Capability dimensions every model is scored on (0-10).
 CAPABILITY_NAMES: tuple[str, ...] = (
     "coding",
@@ -33,6 +37,17 @@ class CapabilityScores(BaseModel):
     structured_output: float = 5.0
     speed: float = 5.0
     cost: float = 5.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unknown(cls, data: Any) -> Any:
+        """只认八个合法维度，其余键丢弃并记日志。"""
+        if not isinstance(data, dict):
+            return data
+        dropped = [k for k in data if k not in CAPABILITY_NAMES]
+        if dropped:
+            logger.warning("capabilities 忽略非法维度 %s", ", ".join(map(str, dropped)))
+        return {k: v for k, v in data.items() if k in CAPABILITY_NAMES}
 
     @field_validator("*")
     @classmethod
@@ -157,6 +172,9 @@ class DeploymentConfig(BaseModel):
     #: USD per 1M tokens, informational (used for cost statistics).
     input_cost_per_mtok: float = 0.0
     output_cost_per_mtok: float = 0.0
+    #: 价格出处：official / reference / manual。参考价只用于估算量级，
+    #: 不得冒充官方结算价。
+    price_source: str | None = None
     #: Request parameters this deployment accepts; anything else is reported.
     supported_params: list[str] | None = None
     #: Free-form provider options merged into the outbound payload.

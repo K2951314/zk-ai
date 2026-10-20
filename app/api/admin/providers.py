@@ -291,6 +291,26 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
     }
     from app.models.discovery import model_facts
     from app.models.presets import preset_for
+    from app.models.pricing import lookup, reference_prices
+
+    # 上游的模型列表只说 id：描述、上下文窗口这些事实要去模型社区的资料页取。
+    # 取不到就不补（官方没说的不猜），网络问题也不能让整个市场失败。
+    official: dict[str, dict[str, Any]] = {}
+    if "modelscope" in (provider.base_url or "").lower():
+        try:
+            from app.models.catalogue_info import enrich_modelscope
+
+            official = await enrich_modelscope(sorted(catalogue))
+        except Exception as exc:  # noqa: BLE001 - 资料缺失不影响目录本身
+            logger.info("catalogue enrich failed for %s: %s", provider_id, exc)
+
+    # 参考价：上游目录不报价，去公开渠道取挂牌价。
+    # 口径必须标清：这是参考价，不是供应商给的结算价。
+    prices: dict[str, dict[str, Any]] = {}
+    try:
+        prices = await reference_prices()
+    except Exception as exc:  # noqa: BLE001 - 价格缺失不影响目录
+        logger.info("reference price fetch failed for %s: %s", provider_id, exc)
 
     data = []
     for upstream in sorted(catalogue):
@@ -300,11 +320,29 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         # preset value, and ``fallback`` records where each number came from so
         # the console can label it instead of presenting a guess as fact.
         facts = model_facts(catalogue[upstream])
+        info = official.get(upstream) or {}
         capabilities = dict(preset.capabilities)
         if facts.vision_input is not None:
             capabilities["vision"] = 10.0 if facts.vision_input else 0.0
         if facts.reasoning is not None:
             capabilities["reasoning"] = max(capabilities.get("reasoning", 0.0), 8.0)
+        # 取数优先级：供应商实测 > 社区官方资料 > 预置表猜测。
+        if info.get("vision") and capabilities.get("vision", 0.0) <= 0.0:
+            capabilities["vision"] = 8.0
+        if info.get("reasoning"):
+            capabilities["reasoning"] = max(capabilities.get("reasoning", 0.0), 8.0)
+        if info.get("tool_use"):
+            capabilities["tool_use"] = max(capabilities.get("tool_use", 0.0), 7.5)
+        quoted = lookup(prices, upstream) or {}
+        input_price = preset.input_price or float(quoted.get("input_cost_per_mtok") or 0.0)
+        output_price = preset.output_price or float(quoted.get("output_cost_per_mtok") or 0.0)
+        if preset.input_price:
+            price_source = "preset"
+        elif quoted:
+            price_source = "reference"
+        else:
+            price_source = None
+
         entry: dict[str, Any] = {
             "upstream_model": upstream,
             "suggested_model_id": _suggest_model_id(upstream),
@@ -312,18 +350,24 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
             or upstream in known_upstream,
             "preset": {
                 "family": preset.family,
-                "display_name": preset.display_name,
-                "context_window": preset.context_window,
+                "display_name": info.get("display_name") or preset.display_name,
+                "context_window": info.get("context_window") or preset.context_window,
                 "capabilities": capabilities,
-                "input_price": preset.input_price,
-                "output_price": preset.output_price,
-                "description": preset.description,
+                "input_price": input_price,
+                "output_price": output_price,
+                "price_source": price_source,
+                "description": info.get("description") or preset.description,
             },
+            "official": info,
             "discovered": facts.as_dict(),
             "discovered_known": facts.known,
             # Higher-fidelity-vendor presets are only a guess for StepFun's own
             # models; anything else keeps the preset context window.
-            "context_window_source": "provider" if facts.context_window else "preset",
+            "context_window_source": (
+                "provider" if facts.context_window
+                else "official" if info.get("context_window")
+                else "preset"
+            ),
         }
         if facts.known:
             entry["facts_note"] = facts.describe()
