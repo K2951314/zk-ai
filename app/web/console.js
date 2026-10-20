@@ -1400,12 +1400,12 @@ function openModelModal(modelId, prefill) {
     ${factsNote.length ? `
       <div class="facts-card">
         <div class="f-title">📋 供应商实测能力（表单已按这些实测值预填）</div>
-        <table class="small"><tbody>
+        <div class="mscrl"><table class="small"><tbody>
           ${factsNote.map(f => `<tr>
             <td style="white-space:nowrap;width:96px">${esc(f.label)}</td>
             <td style="white-space:nowrap;width:150px"><b>${esc(f.value)}</b></td>
             <td class="muted">${esc(f.meaning)}</td></tr>`).join("")}
-        </tbody></table>
+        </tbody></table></div>
       </div>` : ""}
     <div class="formgrid">
       <label>模型 ID（对外名）<input type="text" id="mm-id" value="${esc(m.id)}" ${modelId ? "disabled" : ""} placeholder="如 glm-5.3"></label>
@@ -2222,13 +2222,13 @@ function cgPreview() {
   if (!rows.length) {
     html += `<div class="small muted">与盘现状一致，写入是无变化（不会新建备份）。</div>`;
   } else {
-    html += `<table style="width:100%;font-size:var(--fs-12);border-collapse:collapse">
+    html += `<div class="mscrl"><table style="width:100%;font-size:var(--fs-12);border-collapse:collapse">
       <tr class="small muted"><td style="padding:2px 8px 2px 0">键</td><td>现值</td><td>改成</td></tr>`
       + rows.map(r2 =>
         `<tr><td style="padding:2px 8px 2px 0"><code>${esc(r2.label)}</code></td>`
         + `<td style="color:var(--muted)">${esc(r2.old)}</td>`
         + `<td><strong>${esc(r2.new)}</strong></td></tr>`).join("")
-      + `</table>`;
+      + `</table></div>`;
   }
   html += `</div>`;
   box.innerHTML = html;
@@ -2796,7 +2796,7 @@ async function recPreview(patch) {
     if (!rows.length) {
       html = '<div class="small muted">没有改动。</div>';
     } else {
-      html = '<table style="width:100%;font-size:var(--fs-12);border-collapse:collapse"><tr class="small muted">'
+      html = '<div class="mscrl"><table style="width:100%;font-size:var(--fs-12);border-collapse:collapse"><tr class="small muted">'
         + "<td>账号</td><td>字段</td><td>账本</td><td>你填的</td><td>差</td></tr>"
         + rows.map(a => {
           const cells = [];
@@ -2811,7 +2811,7 @@ async function recPreview(patch) {
           if (a.week_anchor && a.week_anchor.filled && a.week_anchor.filled !== a.week_anchor.current) push("周锚点", a.week_anchor);
           if (a.burning === false) cells.push(`<tr><td title="${esc(a.name)}">${esc(sName(a.name))}</td><td>参与</td><td class="muted">烧</td><td><strong>停靠</strong></td><td></td></tr>`);
           return cells.join("");
-        }).join("") + "</table>";
+        }).join("") + "</table></div>";
     }
     const cfg = d.config_changes || {};
     const cfgKeys = Object.keys(cfg);
@@ -3166,9 +3166,9 @@ function reportRender(stats, reqs, days) {
 
   <div class="card">
     <h4 class="sec">② 谁在干活、慢不慢</h4>
-    <table><thead><tr><th>模型</th><th>请求数</th><th>输入 tokens</th>
+    <div class="mscrl"><table><thead><tr><th>模型</th><th>请求数</th><th>输入 tokens</th>
       <th>占比</th><th>平均等</th><th>最长等</th></tr></thead>
-      <tbody>${modelRows || '<tr><td colspan="6" class="muted">暂无数据</td></tr>'}</tbody></table>
+      <tbody>${modelRows || '<tr><td colspan="6" class="muted">暂无数据</td></tr>'}</tbody></table></div>
     <div class="note">「平均等」是这个模型的真实响应时长。<b>Kimi K3 明显慢，是因为它本来就不是速度杯</b>
       （能力强但 speed 只有 6.0/10）；快的是 GLM / Step / DeepSeek 那几个（9.0+/10）。
       所以「慢」常常不是故障，是它分到了重活。</div>
@@ -3189,7 +3189,7 @@ function reportRender(stats, reqs, days) {
 
   <div class="card">
     <h4 class="sec">④ 为什么派给这个模型（规则说人话）</h4>
-    <table><thead><tr><th>如果你要…</th><th>网关会派</th><th>为什么</th></tr></thead><tbody>
+    <div class="mscrl"><table><thead><tr><th>如果你要…</th><th>网关会派</th><th>为什么</th></tr></thead><tbody>
       <tr><td>带图片的请求</td><td><b>Kimi K3</b> 或 <b>Step 5</b></td>
         <td>只有这两个「看得见图」（vision 能力 ≥8），其它模型结构上不可能入选</td></tr>
       <tr><td>超大请求（≥10 万 token）</td><td><b>GLM-5.3 / Step 5 / DeepSeek</b></td>
@@ -3200,7 +3200,7 @@ function reportRender(stats, reqs, days) {
         <td>K3 有「接活标准」：请求本身得是强推理（证明 / 为什么 / 根因）才够格接</td></tr>
       <tr><td>客户端直接写 <span class="mono">zk-k3</span></td><td><b>只用 Kimi K3</b></td>
         <td>你明确指定就听你的，网关不插手</td></tr>
-    </tbody></table>
+    </tbody></table></div>
     <div class="note ok">这套规则的用意：<b>强的模型只用来干它擅长的活</b>；
       跑命令、读日志、批量改写这类机械活交给又快又不要钱的模型。
       83% 的 token 走的是免费额度（商汤 / NVIDIA / 魔搭）。</div>

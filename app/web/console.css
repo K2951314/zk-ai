@@ -837,6 +837,15 @@
 
     /* 点击区域不小于 34px */
     button, .nav-item, #mnav a, select, input, textarea { min-height: 34px; }
+    /* ---- 7. narrow-screen fix (2026-10-20) ---- */
+    .tablewrap { max-height: none !important; overflow: visible !important; }
+    .tablewrap thead th { position: static !important; }
+    .tablewrap tbody td.acts, .tablewrap tbody td.acts-end,
+    .tablewrap th.acts, .tablewrap th.acts-end { position: static !important; }
+    .mscrl { overflow-x: auto; -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .mscrl > table { min-width: 520px; }
+    .mscrl > table td, .mscrl > table th { white-space: normal; word-break: break-all; }
   }
 
 /* ============================================================
