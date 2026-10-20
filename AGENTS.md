@@ -561,3 +561,35 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），要恢复需同时加回
   providers.yaml 的供应商与 models.yaml 的部署；`kimi-k3-nvidia` 仍保留，靠自动隔离兜底。
 
+## 服务器怎么同步代码（2026-10-20 定规矩）
+
+**`/opt/zkai` 现在是真正的 git 检出，同步走 git，不要再手工挑文件传。**
+
+```bash
+# 本地：改完 → 提交 → 推（HTTPS 被本机代理挡时改用 SSH pushurl，推完改回）
+git push origin main
+
+# 服务器（用户 ubuntu 有 sudo，仓库文件属 www-data）
+sudo git -c safe.directory=/opt/zkai -C /opt/zkai fetch origin main
+sudo git -c safe.directory=/opt/zkai -C /opt/zkai reset --hard origin/main
+sudo git -c safe.directory=/opt/zkai -C /opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data
+sudo systemctl restart zkai            # 配置热加载，但换代码要重启
+```
+
+- `reset --hard` 只动**被跟踪**的文件：`config/*.yaml`、`.env`、`data/`、`__pycache__`
+  全在 `.gitignore` 里，**不会被覆盖**。服务器上现役配置永远是它自己的那一份，
+  所以 `config/models.yaml` 这类**不受版本控制、但影响行为**的文件要单独同步
+  （本机 scp 不可用，用 `ssh host "cat > /tmp/x" < 文件` 或 base64 管道）。
+- 服务器监听 **8318**，本机是 8317 —— 探活别打错端口。
+- 同步前先留备份：`sudo tar czf /var/backups/zkai/code-$(date +%F-%H%M).tgz -C /opt/zkai
+  --exclude=.venv --exclude=data --exclude=.git --exclude=__pycache__ .`
+- **判断差异别凭 mtime**：本地工作区是 CRLF（`core.autocrlf=true`），服务器是 LF，
+  直接比 sha256 会满屏「不同」。要按**归一化换行后**的内容比，或用
+  `git hash-object` 把两边都过一遍 clean 过滤器再比。
+
+**历史教训（2026-10-20 三方同步时复盘）**：服务器曾经不是 git 检出，于是本地、GitHub、
+服务器三条线各自演进——GitHub 有商汤 rpm 闸、本地有 410 修复、服务器还留着 09-30 的
+文档和已废弃的自带迁移模块，`config/models.yaml` 更被控制台写回了更早的版本（少了
+`glm-5.2`，`zk-auto` 退化成 09-28 的别名套娃形态）。**没有版本控制的地方，就没人知道
+它落后在哪。** 现在 `/opt/zkai` 有 HEAD 了，下次一句 `git status` 就能看清。
+详见 `docs/三方同步-20261020.md`。
