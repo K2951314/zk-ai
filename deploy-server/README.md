@@ -15,18 +15,28 @@
 | 技能仓库 | `/opt/my-skills`，软链到 `~/.agents|.codex|.workbuddy-ai/skills` | 三个技能生效 |
 | 其他在跑 | `sq`（智能询价，335MB RSS）/ `tandian` / `postgres` / `caddy` | 未受影响 |
 
-## 一键同步
+## 同步走 git（2026-10-20 起，不再有一键脚本）
 
 ```bash
-# Git Bash 或 WSL 里跑（需要 bash + scp + ssh）
-cd /d/zhangkun/AI/ZK-AI        # 或对应挂载路径
-bash deploy-server/sync-server.sh
+# 本机：改完提交 → 推
+git push origin main
+
+# 服务器（/opt/zkai 是 git 检出）
+sudo git -c safe.directory=/opt/zkai -C /opt/zkai fetch origin main
+sudo git -c safe.directory=/opt/zkai -C /opt/zkai reset --hard origin/main
+sudo git -c safe.directory=/opt/zkai -C /opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data
+sudo systemctl restart zkai
 ```
 
-只跑某一步：`SKIP_BURNER=1 SKIP_CADDY=1 bash deploy-server/sync-server.sh`
-换服务器：`ZKAI_TARGET=ubuntu@<新IP> bash deploy-server/sync-server.sh`
+`reset --hard` 只动被跟踪的文件，`config/*.yaml` / `.env` / `data/` 都在 `.gitignore`
+里 —— **服务器上手工调过的配置不会被覆盖**。需要同步这些不受控文件时单独传
+（`ssh host "cat > /tmp/x" < 文件`，scp 在本机不可用）。
 
-幂等：密钥已存在会跳过；Caddyfile / burner.yaml / systemd 单元重复安装只会覆盖成同一份。
+⚠️ 这里**曾经**有一个 `sync-server.sh` 一键脚本，2026-10-20 已删除：它会
+`install` 强行覆盖 `/opt/zkai/config/burner.yaml`、`/etc/caddy/Caddyfile`、
+`zkai-burner.service`，并往 `.env` 追加 Key，把运营者在服务器上改的配置反复冲掉。
+**服务器上手工改过的东西，只有靠它不在版本控制里才能保住** —— 这就是为什么
+同步必须走 git 而不是全量覆盖脚本。
 
 ## 公网怎么调
 
@@ -187,8 +197,14 @@ ssh ubuntu@120.53.28.29 'systemctl show zkai-burner -p MemoryCurrent -p CPUUsage
 
 ```bash
 # 新服务器上先有：git clone + uv sync + .env（含 SENSENOVA_API_KEY_*）
-ZKAI_TARGET=ubuntu@<新IP> bash deploy-server/sync-server.sh
+# 代码同步走 git（见「同步走 git」一节），下面的 3 个文件按需手工安装
+sudo install -o www-data -g www-data -m 664 deploy-server/burner.yaml      /opt/zkai/config/burner.yaml
+sudo install -o root     -g root     -m 644 deploy-server/zkai-burner.service /etc/systemd/system/zkai-burner.service
+sudo install -o root     -g root     -m 644 deploy-server/50-zkai-burner.rules /etc/polkit-1/rules.d/50-zkai-burner.rules
+sudo systemctl daemon-reload && sudo systemctl restart polkit && sudo systemctl enable --now zkai-burner
 ```
+
+⚠️ 装 `burner.yaml` 前先把服务器现役的备份一份，别把服务器上调好的费率/锚点冲掉。
 
 然后把 `.env` 里的 `ZKAI_PUBLIC_BASE_URL` 改成新前缀（`https://<新IP>/zkai`）——
 **这一步不能省**：控制台「🌐 客户端接入」面板与 `/health` 的 `deploy` 块都按它生成
@@ -263,8 +279,7 @@ Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner
 
 | 文件 | 作用 |
 |---|---|
-| `sync-server.sh` | 一键部署/同步脚本（幂等） |
-| `burner.yaml` | 服务器保守档 burner 配置 |
+| `burner.yaml` | 服务器保守档 burner 配置（**安装前先备份服务器上的现役版**） |
 | `zkai-burner.service` | burner 的 systemd 单元（限额+优先级） |
 | `50-zkai-burner.rules` | polkit 规则：让网关（www-data）能 start/stop/restart 消耗器 |
 | `Caddyfile` | Caddy 配置（`/zkai/*` 网关 API + `/ui/*` 控制台 + `/admin/*` 按 token 分流） |
@@ -294,7 +309,7 @@ sudo -u www-data systemctl start zkai-burner   # 退出码 0、状态转 active
 ```
 
 ⚠️ 规则文件必须 **UTF-8 无 BOM**（polkit 的 JS 引擎对 BOM 敏感）。
-`sync-server.sh` 用 `scp` 传原文件，不会引入 BOM。
+传完先 `head -c 3 50-zkai-burner.rules | xxd` 确认不是 `efbbbf`。
 
 密钥一律不进这三个文件：SENSENOVA key 走 scp 到服务器 `.env`，
 token 从 `/opt/zkai/.env` 现取写进 `/etc/caddy/zkai.env`（root:caddy 640）；

@@ -313,8 +313,9 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
 
 ### 3.6.4 服务器部署（公网入口 / 三种调用形态）
 
-网关也可以固化在服务器上（阿里云 2C2G，`deploy-server/` 三个文件 + `sync-server.sh`
-一键同步）。**客户端要抄的地址由谁决定**是这里的核心问题：网关只听得到自己的
+网关也可以固化在服务器上（腾讯云 2C2G，`/opt/zkai` 是 git 检出，同步 = push 后
+在服务器上 `git fetch` + `git reset --hard`；`deploy-server/` 里的部署文件按需手工
+安装，不会自动覆盖服务器上改过的配置）。**客户端要抄的地址由谁决定**是这里的核心问题：网关只听得到自己的
 `host:port`，看不到 Caddy 加的 `/zkai` 前缀——用 `host:port` 猜出来的公网地址
 打不开，而运营者会把它抄给客户端。所以必须显式配置：
 

@@ -84,7 +84,7 @@ item_type = "dir"
 scope = "workspace"
 on_missing = "warn"
 sensitive = false
-note = "server 部署三件套：sync-server.sh（一键同步）、burner.yaml（保守档）、Caddyfile（公网入口）"
+note = "server 部署三件套：zkai-burner.service（单元）、burner.yaml（保守档）、Caddyfile（公网入口）；代码同步走 git，原 sync-server.sh 已于 2026-10-20 删除"
 
 [[items]]
 id = "config-burner"
