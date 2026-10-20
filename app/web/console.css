@@ -846,6 +846,28 @@
       border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
     .mscrl > table { min-width: 520px; }
     .mscrl > table td, .mscrl > table th { white-space: normal; word-break: break-all; }
+    /* ---- 8. narrow-screen fix round2 (2026-10-20) ---- */
+    /* 徽章与胶囊：基础层 nowrap 会把卡片横向顶出，窄屏必须允许断行收缩 */
+    .pill, .chip { white-space: normal !important; word-break: break-all; overflow-wrap: anywhere; max-width: 100%; }
+    /* 模型表部署链：td 内的 div 默认不收缩，允许其换行并约束宽度 */
+    .tablewrap tbody td > div { flex-wrap: wrap; max-width: 100%; overflow-wrap: anywhere; }
+    /* 烧录视图 note 区与行内代码：code/b 的 nowrap 长串会顶出视口 */
+    .note code, .note b, .note strong, td code, .small code { white-space: normal !important; word-break: break-all; overflow-wrap: anywhere; }
+    code { word-break: break-all; }
+    /* 工具栏（模型/别名页头部按钮行）窄屏换行防挤 */
+    .toolbar { flex-wrap: wrap; gap: 8px; }
+    .toolbar button { flex: 1 1 auto; min-width: 0; }
+    /* 标签/提示条（tag 类）同样允许断行 */
+    .tag { white-space: normal !important; word-break: break-all; }
+    /* ---- 9. narrow-screen fix round3 (2026-10-20) ---- */
+    /* 探针实测：td/div.note 等容器继承基础层 tbody td 的 nowrap，
+       把内部 inline 元素（b/code/chip/pill）拉成超长宽度并溢出。
+       这里把这些容器的换行强制复位为 normal。 */
+    .tablewrap tbody td { white-space: normal !important; }
+    .tablewrap tbody td > div, .tablewrap tbody td > span { white-space: normal !important; }
+    .note, .note * { white-space: normal !important; }
+    details.small, details.small * { white-space: normal !important; }
+    b, strong, code { white-space: normal !important; }
   }
 
 /* ============================================================
