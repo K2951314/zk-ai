@@ -495,6 +495,22 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   「写文件等托盘看」会永远不生效。响应带 `restart_mode`
   （`tray` / `systemd` / `manual`），界面据此提示。
 
+- **polkit 规则不进 git、不随代码同步，换机/重装后必须手工装**（2026-10-21
+  在 211.159.174.204 实测「修好的又坏了」）：控制台「停止/重启消耗器」在这台
+  新服务器上又报 `The "no new privileges" flag is set ... sudo`，退化成
+  「手动执行：sudo systemctl ...」。根因不是代码回退——`deploy-server/
+  50-zkai-burner.rules` 在仓库里好好的，而是**它从不随 `git reset --hard`
+  同步**，要单独 `install` 到 `/etc/polkit-1/rules.d/` 并 `systemctl restart
+  polkit`。这台服务器的 `/etc/polkit-1/rules.d/` 是空的（规则从没装过）。
+  `_run_systemctl_action()` 的顺序是「先裸 `systemctl`、失败才 `sudo -n`」：
+  装了 polkit，裸命令直接被 polkit 放行，永远碰不到 sudo；没装，裸命令被拒 →
+  掉 `sudo -n` → 撞 `zkai.service` 的 `NoNewPrivileges=true` → 报上面的错。
+  **这条报错本身就是「polkit 没生效」的信号**，别再当成 sudoers 配置问题去查。
+  装机/换机清单里必须有这一步（见 deploy-server/README「换服务器」一节），
+  验证一句话：`sudo -u www-data systemctl stop zkai-burner` 退出码 0 即装好。
+  同类「不进 git 的环境文件」还有：`.env`、`config/*.yaml`、systemd unit、
+  Caddyfile——**代码同步救不了它们，各自有各自的安装动作**。
+
 - **消耗器日志 SSE 的 `flush_interval -1` 四个分支都要有**：`/admin/*` 按认证分了
   四个 `reverse_proxy` 块，漏一个该路径下的 SSE 就被 Caddy 缓冲成一次性返回，
   「实时」变「日志滚完才给你」。另外 `_follow()` 的预热底料和游标必须同一次算出来
@@ -581,6 +597,11 @@ sudo systemctl restart zkai            # 配置热加载，但换代码要重启
   所以 `config/models.yaml` 这类**不受版本控制、但影响行为**的文件要单独同步
   （本机 scp 不可用，用 `ssh host "cat > /tmp/x" < 文件` 或 base64 管道）。
 - 服务器监听 **8318**，本机是 8317 —— 探活别打错端口。
+- **现役服务器是 `tandian211`（211.159.174.204，用户 ubuntu，SSH 别名
+  `tandian211`，key `~/.ssh/migrate_211`）**；旧的 120.53.28.29 已停用，
+  本地 `~/.ssh/config` 里那条是另一台内网机，别连错。
+- 服务器本地分支 2026-10-21 已从 `master` 改名 `main` 并 `--set-upstream-to=
+  origin/main`（之前 `reset --hard origin/main` 留下的命名不一致，已对齐）。
 - 同步前先留备份：`sudo tar czf /var/backups/zkai/code-$(date +%F-%H%M).tgz -C /opt/zkai
   --exclude=.venv --exclude=data --exclude=.git --exclude=__pycache__ .`
 - **判断差异别凭 mtime**：本地工作区是 CRLF（`core.autocrlf=true`），服务器是 LF，

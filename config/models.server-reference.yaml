@@ -1,0 +1,575 @@
+# ===========================================================================
+# ZK-AI —— 模型 / 部署 / 别名（服务器现役参考版，2026-10-21 拉取自 211.159.174.204）
+#
+# ⚠ 本文件只是**服务器现役配置的本地存档**，不进路由、不会被加载。
+#   运营者已拍板「以服务器现役为准」，本地 config/models.yaml 与服务器不一致时
+#   以这份为准去对齐本地；切勿把本地那份当「正确版」scp 回服务器覆盖。
+#   服务器现役文件的权威路径：/opt/zkai/config/models.yaml（不进 git）。
+# ===========================================================================
+# ===========================================================================
+# ZK-AI —— 模型 / 部署 / 别名（真实密钥版，后端为商汤 / NVIDIA / ModelScope）
+#
+# 所有模型 ID 均经 /v1/models 实测确认存在（2026-09-10）。
+#
+# 四层概念：
+#   model       对外暴露的名字，如 sensenova-6.8-flash-lite
+#   deployment  「哪个 provider 上的哪个上游模型」= 故障转移最小单位
+#   alias       稳定入口，如 zk-fast；换后端模型客户端不用动
+#
+# capabilities 是能力路由的 0-10 打分：
+#   coding / reasoning / tool_use / vision / long_context /
+#   structured_output / speed / cost        （cost 越大 = 越便宜）
+#
+# 字段分层（写错层会直接报 Extra inputs are not permitted）：
+#   模型级：context_window、capabilities、description
+#   部署级：priority、max_output_tokens、input_cost_per_mtok、options
+#
+# 价格字段（input_cost_per_mtok / output_cost_per_mtok，美元/百万 token）：
+#   用于「等价成本」统计——即使走的是免费公测渠道（商汤/NVIDIA/魔搭），
+#   也按模型公开牌价折算出「这趟如果花钱要多少」。付费渠道（如充值后的
+#   Kimi 官方）这里就是真实成本。estimate_cost 按命中的那个部署计价。
+#   单位是 USD；如习惯看人民币，控制台会同时显示 ≈¥。
+#   下面标了 `# 官方` 的来自仓库既有记录（.env.example），标 `# 参考` 的是
+#   同量级占位价，**请按各家官方价目表核对后修改**。
+# ===========================================================================
+
+models:
+  # -------------------------------------------------------------------------
+  # 商汤 6.8 Flash Lite —— 当前默认主力
+  # 多模态（text + image），速度快、免费，适合日常与看图
+  # -------------------------------------------------------------------------
+  - id: sensenova-6.8-flash-lite
+    enabled: true
+    context_window: 256000
+    capabilities:
+      coding: 7.0
+      reasoning: 7.0
+      tool_use: 8.0
+      vision: 9.0          # 支持图片输入
+      long_context: 7.0
+      structured_output: 7.5
+      speed: 9.5
+      cost: 10.0           # 商汤公测期免费
+    deployments:
+      - id: sen68-sensenova
+        provider_id: sensenova
+        model: sensenova-6.8-flash-lite    # 上游真实 model id
+        priority: 120
+        context_window: 256000
+        max_output_tokens: 32768
+        input_cost_per_mtok: 0.20          # 参考（商汤免费公测）
+        output_cost_per_mtok: 0.60         # 参考
+
+  # -------------------------------------------------------------------------
+  # Kimi K3 —— 你担心它有问题，所以把它降级、不做主力
+  # 但保留为「高难度任务」的备选，双部署：商汤（免费）优先，NVIDIA 兜底
+  # NVIDIA 上实测 429（预览期额度极少），故 priority 压到 40
+  # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Kimi K3 —— 主力模型（用户指定）
+  # 双部署：商汤（免费，但 K3 走独立的 token 套餐额度）优先，Kimi 官方兜底
+  #
+  # ⚠ 2026-09-10 实测：两个渠道的 K3 都在 429
+  #    商汤  : "token plan entitlement exhausted" = K3 专属套餐额度用尽
+  #            （商汤各把 Key 按账号共享额度，同账号的会一起挂）
+  #    NVIDIA: "Too Many Requests" = 预览期全局限流，与用量无关
+  #   → 别名里的 fallback 链配得很长就是为了扛这个：K3 挂了自动落到
+  #     GLM-5.2 / DeepSeek / 6.8 Flash Lite，调用方不会失败
+  #   → 想要稳定用 K3：去 platform.moonshot.cn 充点钱，然后在 providers.yaml
+  #     重新加回 moonshot 供应商、在下面 kimi-k3 的 deployments 里加回
+  #     kimi-k3-moonshot（2026-09-29 已整块删除：无 Key，3,102 次尝试 0 成功，
+  #     纯粹是 no_available_credential 噪音）
+  # -------------------------------------------------------------------------
+  - id: kimi-k3
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 9.5
+      reasoning: 9.5
+      tool_use: 9.0
+      vision: 9.5
+      long_context: 10.0
+      structured_output: 8.5
+      speed: 6.0
+      cost: 9.0
+    deployments:
+      - id: kimi-k3-sensenova
+        provider_id: sensenova
+        model: kimi-k3
+        priority: 130              # 高于其它模型 → 别名里排在前面
+        context_window: 1000000
+        # 「旗舰的接活标准」2026-09-28 改写：原来是
+        #   request_requires: {reasoning: 4.0}
+        # 即只有请求文本命中 step-by-step / 证明 / 根因 / 架构权衡 这类**关键词**
+        # 才放行。实测这是「分类器总是不可用」的根因：capability.py 的
+        # _REASONING_HINTS 匹配不到，请求的 reasoning 权重就停在 zk-auto 别名
+        # 地板的 2.0 < 4.0，三个 K3 部署全部 gated_out——于是「你好」、短代码、
+        # 工具回执永远落到同一个模型，而显式调 kimi-k3 还会触发
+        # 「全部门槛失败、回退无门槛排序」的告警。
+        # 关键词是软信号，不能当硬门槛；机械流量现在由形状改写接管
+        # （app/routing/agent_auto.py：有工具结果 -> zk-long、超长 -> zk-long、
+        #  批量工具 -> zk-long、有图 -> zk-vision），K3 物理上就不在那些链里。
+        # 这里留空 = 让能力分说话，K3 的 reasoning 9.5 / coding 9.5 自然会赢下
+        # 值得它做的请求。
+        request_requires: {}
+        # K3 是推理模型：先思考后回答，输出上限要给足
+        max_output_tokens: 32768
+        input_cost_per_mtok: 2.78          # 官方（¥20/MTok ÷7.2，见 .env.example）
+        output_cost_per_mtok: 13.89        # 官方（¥100/MTok ÷7.2）
+      - id: kimi-k3-nvidia
+        provider_id: nvidia
+        model: moonshotai/kimi-k3     # NVIDIA 上必须带厂商前缀
+        priority: 40                  # 预览期限流严重，排在最后
+        context_window: 1000000
+        request_requires: {}     # 见 kimi-k3-sensenova 上的说明（2026-09-28）
+        max_output_tokens: 32768
+        input_cost_per_mtok: 2.78          # 参考（与官方牌价对齐）
+        output_cost_per_mtok: 13.89        # 参考
+        # ⛔ 2026-10-15 禁用：NVIDIA 上的 moonshotai/kimi-k3 **已 EOL 下线**。
+        #   上游原话：「The model 'moonshotai/kimi-k3' has reached its end of life
+        #   on 2026-10-15T08:00:00Z and is no longer available.」(HTTP 410)
+        #   ⚠ 410 不是超时，调 timeout 救不了——而且它放在链上时每次请求
+        #   都要等一次 NVIDIA 往返（实测 34.7s）才拿到 410，纯浪费墙钟。
+        #   K3 现在只剩商汤这一条路（kimi-k3-sensenova）。NVIDIA 若日后重新
+        #   上线 K3（换 model id），把 enabled 改回 true。
+        #   （分类器/隔离器已同步支持 410：见 app/retry/classifier.py 的
+        #    "model_gone" 与 app/routing/scheduler.py 的 is_quarantine_worthy。）
+        enabled: false
+
+  # -------------------------------------------------------------------------
+  # GLM-5.3 —— 智谱新旗舰（NVIDIA NIM 上新，2026-09-17 实测已可调用）
+  # 大杯：能力对标/超越 GLM-5.2，工具调用实测正常
+  # 注意：NVIDIA 预览期偶发 ReadTimeout（长上下文更明显），priority 先别太高
+  # -------------------------------------------------------------------------
+  - id: glm-5.3
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 9.5
+      reasoning: 9.0
+      tool_use: 8.5
+      vision: 0.0
+      long_context: 10.0
+      structured_output: 8.5
+      speed: 6.5
+      cost: 9.5           # NVIDIA 预览期免费
+    deployments:
+      - id: glm53-nvidia
+        provider_id: nvidia
+        model: z-ai/glm-5.3          # NVIDIA 上必须带厂商前缀
+        priority: 100
+        context_window: 1000000
+        max_output_tokens: 32768
+        input_cost_per_mtok: 1.00    # 参考（对齐 GLM-5.2 智谱旗舰档）
+        output_cost_per_mtok: 4.00   # 参考
+
+  # -------------------------------------------------------------------------
+  # GLM-5.3 Flash —— 5.3 的速度杯，实测首包快、工具调用正常
+  # -------------------------------------------------------------------------
+  - id: glm-5.3-flash
+    enabled: true
+    context_window: 256000
+    capabilities:
+      coding: 8.5
+      reasoning: 8.5
+      tool_use: 8.5
+      vision: 0.0
+      long_context: 8.0
+      structured_output: 8.5
+      speed: 9.0
+      cost: 10.0
+    deployments:
+      - id: glm53flash-nvidia
+        provider_id: nvidia
+        model: z-ai/glm-5.3-flash
+        priority: 100
+        context_window: 256000
+        max_output_tokens: 32768
+        input_cost_per_mtok: 0.30    # 参考（flash 档量级）
+        output_cost_per_mtok: 1.20   # 参考
+
+  # -------------------------------------------------------------------------
+  # Qwen3.8 Flash Next —— 魔搭社区，每日免费额度，国内直连
+  # -------------------------------------------------------------------------
+  - id: qwen38-flash-next
+    enabled: true
+    context_window: 256000
+    capabilities:
+      coding: 7.5
+      reasoning: 7.5
+      tool_use: 8.0
+      vision: 0.0
+      long_context: 8.0
+      structured_output: 8.0
+      speed: 9.0
+      cost: 9.5
+    deployments:
+      - id: qwen38-modelscope
+        provider_id: modelscope
+        # 2026-09-29 核对魔搭 /v1/models 后的修正：真实 id 是 `Qwen/Qwen3.8-Flash-Next`
+        # （带组织前缀），原来漏了前缀才报 400 "Invalid model id"。实测改后 200 OK。
+        enabled: true
+        model: Qwen/Qwen3.8-Flash-Next
+        priority: 90
+        context_window: 256000
+        max_output_tokens: 32768
+        input_cost_per_mtok: 0.40          # 参考（通义量级）
+        output_cost_per_mtok: 1.20         # 参考
+
+  # 2026-09-29 按日日新 Token Plan 官方公告（2026-09-22）修正：
+  #   「DeepSeek V4.1 Flash 正式上线，**Model ID：deepseek-flash**」
+  # 所以 V4.1 Flash 的正确 id 是 **`deepseek-flash`**，不是 `deepseek-v4.1-flash`。
+  # 目录里那个 `deepseek-v4.1-flash` 是**陈旧条目**（403 套餐无权限），别用。
+  # 实测：deepseek-flash 200 OK（首次 429 是消耗器抢 tpm，重试即通）。
+  #
+  # 另：`deepseek-v4-pro` 将于 **2026-10-08 下线**，过渡期内平台把它**自动
+  # 重定向到 deepseek-flash**。本配置没用 v4-pro，无需动作。
+  - id: deepseek-flash
+    display_name: DeepSeek V4.1 Flash
+    enabled: true
+    context_window: 1048576
+    capabilities:
+      coding: 7.0
+      reasoning: 8.0
+      tool_use: 7.5
+      vision: 0.0
+      long_context: 5.0
+      structured_output: 7.5
+      speed: 9.0
+      cost: 9.5
+    deployments:
+      - id: deepseek-flash-sensenova
+        provider_id: sensenova
+        model: deepseek-flash
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 1048576
+        max_output_tokens: 32768
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.0
+        output_cost_per_mtok: 0.0
+        options: {}
+        tags: []
+    description: 商汤 Token Plan 内的 DeepSeek V4.1 Flash（公告 id：deepseek-flash）
+    owned_by: sensenova
+
+  # 2026-09-29 新增：NVIDIA 整体失效后（实测 0/3 全死）补回 GLM 档位。
+  # 商汤公测可调用列表里有 glm-5.2，实测 200 OK。能力与 glm-5.3 同档，
+  # 作为 glm-5.3（原在 NVIDIA，现已禁用）的替代。
+  - id: glm-5.2
+    display_name: glm-5.2
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 9.0
+      reasoning: 9.0
+      tool_use: 8.5
+      vision: 0.0
+      long_context: 8.5
+      structured_output: 8.5
+      speed: 7.0
+      cost: 8.0
+    deployments:
+      - id: glm52-sensenova
+        provider_id: sensenova
+        model: glm-5.2
+        enabled: true
+        priority: 90
+        weight: 1.0
+        context_window: 1000000
+        max_output_tokens: 32768
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.62
+        output_cost_per_mtok: 2.42
+        price_source: reference
+        options: {}
+        tags: []
+    description: 智谱 GLM-5.2（商汤公测额度内）
+    owned_by: sensenova
+
+# ---------------------------------------------------------------------------
+# 别名：客户端只认这些稳定名字
+#   strategy: capability | priority | speed | cost
+#   requires: 硬门槛（不满足的模型直接淘汰）
+#   weights:  覆盖打分权重
+# ---------------------------------------------------------------------------
+  - id: deepseek-ai/DeepSeek-V4.1-Flash
+    display_name: ds-4.1
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 5.0
+      reasoning: 5.0
+      tool_use: 5.0
+      vision: 5.0
+      long_context: 5.0
+      structured_output: 5.0
+      speed: 5.0
+      cost: 5.0
+    deployments:
+      - id: deepseek-ai/DeepSeek-V4.1-Flash
+        provider_id: modelscope
+        model: deepseek-ai/DeepSeek-V4.1-Flash
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 128000
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.056
+        output_cost_per_mtok: 0.12
+        price_source: reference
+        options: {}
+        tags: []
+  - id: step-5-preview
+    display_name: Step 5 Preview
+    enabled: true
+    context_window: 1024000
+    capabilities:
+      coding: 8.5
+      reasoning: 8.5
+      tool_use: 8.0
+      vision: 10.0
+      long_context: 10.0
+      structured_output: 8.0
+      speed: 5.5
+      cost: 7.0
+    deployments:
+      - id: step-5-preview-StepFun
+        provider_id: StepFun
+        model: step-5-preview
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 1000000
+        max_output_tokens: 32768
+        capabilities: {}
+        input_cost_per_mtok: 0.97
+        output_cost_per_mtok: 2.78
+        options: {}
+        tags: []
+  - id: MiMo-V2.6-Flash
+    display_name: mimo-v2.6-flash
+    enabled: true
+    context_window: 1048576
+    capabilities:
+      coding: 7.0
+      reasoning: 7.0
+      tool_use: 7.5
+      vision: 0.0
+      long_context: 5.0
+      structured_output: 7.5
+      speed: 9.0
+      cost: 9.5
+    deployments:
+      - id: MiMo-V2.6-Flash-ADM
+        provider_id: ADM
+        model: MiMo-V2.6-Flash
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 1048576
+        max_output_tokens: 32768
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.14
+        output_cost_per_mtok: 0.28
+        price_source: reference
+        options: {}
+        tags: []
+    description: 未收录模型（按名字推断）
+    owned_by: ADM
+  - id: DeepSeek-V4.1-Flash
+    display_name: deepseek-v4.1-flash
+    enabled: true
+    context_window: 1048576
+    capabilities:
+      coding: 7.0
+      reasoning: 7.0
+      tool_use: 7.5
+      vision: 0.0
+      long_context: 5.0
+      structured_output: 7.5
+      speed: 9.0
+      cost: 9.5
+    deployments:
+      - id: DeepSeek-V4.1-Flash-ADM
+        provider_id: ADM
+        model: DeepSeek-V4.1-Flash
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 1048576
+        max_output_tokens: 32768
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.056
+        output_cost_per_mtok: 0.12
+        price_source: reference
+        options: {}
+        tags: []
+    description: 未收录模型（按名字推断）
+    owned_by: ADM
+  - id: Qwen3.8-Flash-Next
+    display_name: Qwen3.8 Flash Next
+    enabled: true
+    context_window: 262144
+    capabilities:
+      coding: 8.0
+      reasoning: 8.0
+      tool_use: 8.5
+      vision: 0.0
+      long_context: 8.0
+      structured_output: 8.5
+      speed: 9.0
+      cost: 9.5
+    deployments:
+      - id: Qwen3.8-Flash-Next-ADM
+        provider_id: ADM
+        model: Qwen3.8-Flash-Next
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 262144
+        max_output_tokens: 32768
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.4
+        output_cost_per_mtok: 1.2
+        options: {}
+        tags: []
+    description: 通义轻量档（魔搭上游 id 带 Qwen/ 前缀）
+    owned_by: ADM
+  - id: DeepSeek-V4.1-Flash-1017
+    display_name: deepseek-v4.1-flash-1017
+    enabled: true
+    context_window: 1000000
+    capabilities:
+      coding: 7.0
+      reasoning: 7.0
+      tool_use: 7.5
+      vision: 0.0
+      long_context: 5.0
+      structured_output: 7.5
+      speed: 9.0
+      cost: 9.5
+    deployments:
+      - id: DeepSeek-V4.1-Flash-1017-modelscope
+        provider_id: modelscope
+        model: deepseek-ai/DeepSeek-V4.1-Flash-1017
+        enabled: true
+        priority: 100
+        weight: 1.0
+        context_window: 1000000
+        max_output_tokens: 128000
+        capabilities: {}
+        request_requires: {}
+        input_cost_per_mtok: 0.3
+        output_cost_per_mtok: 1.2
+        price_source: reference
+        options: {}
+        tags: []
+    description: 未收录模型（按名字推断）
+    owned_by: modelscope
+aliases:
+  # 默认入口 —— Kimi K3 优先，挂了自动落到 GLM-flash / DeepSeek / Qwen。
+  # 注意 targets 的**顺序**就是优先级：K3 排第一。
+  # ⚠ glm-5.3 大杯被移出兜底链（2026-09-19）：NVIDIA 预览期 >60s 挂起被
+  #   内部重试翻倍成 120s+/次，把 max_total_attempts 预算烧光后 DeepSeek /
+  #   Qwen 根本轮不到（实测 agent 任务整条链全灭）。要直连用模型名 glm-5.3。
+  - name: zk-auto
+    description: 默认入口：接口模型 step-5-preview 先答，其余按能力权重兜底
+    strategy: capability
+    targets:
+      - deepseek-flash
+      - DeepSeek-V4.1-Flash-1017
+      - kimi-k3
+      - glm-5.3
+    weights: {coding: 2.0, reasoning: 2.0, speed: 1.0, cost: 1.0}
+    # 平时让能力分说话（推理请求才够格 kimi-k3 的 reasoning>=4 门槛，
+    # 机械请求自然落到便宜模型）。控制台「🤖 ChatGPT」热切换时代码会
+    # 临时置 true 把所选模型钉到链首（app/api/admin.py），与这里无关。
+    pin_first: false
+    # 接口模型（2026-09-28 新增）：永远排第一、手动指定、随时可改。
+    # 背景：glm-5.3 在 NVIDIA 上持续 60s 超时，zk-long 打头时每个长上下文请求
+    # 都要白等三轮 60 秒才故障转移，客户端几分钟收不到一个字节。
+    # 现在用 step-5-preview 顶上（StepFun 实测稳定），glm-5.3 退到链尾当备用；
+    # 后面仍由能力路由按内容排序，接口模型挂掉/超时就自动往下走。
+    # 换模型只改这一行，或 POST /admin/aliases 热改，不用重排 targets。
+    # 2026-09-29 审查：原为 deepseek-v4.1-flash，但实测该模型返回 503
+    # 「model is not available in the current token plan」——套餐里没有它，
+    # 63 次尝试 0 成功。接口模型必须是**真能答**的那个，否则每个请求先撞它
+    # 一次再往下走。step-5-preview 实测 99.8% 成功率、均 8.6s。
+    enabled: true
+    requires: {}
+    fallback_to_local: false
+
+  # 固定只用 Kimi K3（不兜底，K3 挂了就直接报错，方便你看清它的状态）
+    front_model: deepseek-flash
+  - name: zk-k3
+    description: 只用 Kimi K3（商汤 → NVIDIA，不兜底到别的模型；K3 挂了直接报错）
+    strategy: priority
+    targets:
+      - deepseek-flash
+      - DeepSeek-V4.1-Flash-1017
+      - kimi-k3
+      - glm-5.3
+    enabled: true
+    requires: {}
+    weights: {}
+    fallback_to_local: false
+    pin_first: false
+
+  # 长会话入口（2026-09-26 新增）
+  #  背景：DB 实测 zk-k3 上 2,956 条请求平均 input 228,745 tokens、
+  #  output 仅 357（640:1），累计 6.76 亿 input tokens——占全站 9.44 亿的 72%。
+  #  根因是 zk-k3 单目标死钉 kimi-k3（最慢档，speed 6.0），长会话无处分流。
+  #
+  #  ⚠ 设计取舍（调了三轮权重后才想清楚）：**zk-long 故意不含 kimi-k3。**
+  #  试过把 K3 和 glm-5.3 放进同一条 capability 链让它俩竞争，结果无论权重怎么调
+  #  都是一边倒——K3 在 reasoning/coding/long_context 上全面 ≥ glm-5.3，
+  #  线性加权必然让一个恒赢，没有"K3 优先但适度分担"的中间态。
+  #  而一旦压低 reasoning 把 glm 拉上来，强推理任务就会离开 K3，那是质量倒退。
+  #  所以分流交给客户端按任务性质选，不由网关猜：
+  #    - 读多写少、批量、格式转换 → zk-long（快模型，K3 的活不在这）
+  #    - 深度推理、复杂代码、看不清的难题 → zk-k3（旗舰，慢但值）
+    front_model: deepseek-flash
+  - name: zk-long
+    description: 长会话/批量：Step 5 与 GLM-5.2、DeepSeek 分担，不含 K3（要 K3 请用 zk-k3）
+    strategy: capability
+    targets:
+      - step-5-preview
+      - glm-5.2
+      - deepseek-flash
+      - deepseek-ai/DeepSeek-V4.1-Flash
+    weights: {long_context: 5.0, reasoning: 3.0, speed: 2.0, cost: 2.0}
+    # 接口模型：manual override，见 zk-auto 同字段的长注释。
+    # glm-5.3 原为 targets[0]，但它在 NVIDIA 上稳定 60s 超时（2026-09-28 实测
+    # 连续 3 次），打头等于每个请求先赔 180 秒。改用 step-5-preview 顶，
+    # glm-5.3 留在链里当备用——NVIDIA 恢复了它照样能被选中。
+    # 2026-09-29 审查：原为 deepseek-v4.1-flash，但实测该模型返回 503
+    # 「model is not available in the current token plan」——套餐里没有它，
+    # 63 次尝试 0 成功。接口模型必须是**真能答**的那个，否则每个请求先撞它
+    # 一次再往下走。step-5-preview 实测 99.8% 成功率、均 8.6s。
+    front_model: step-5-preview
+    requires: {}
+    enabled: true
+    fallback_to_local: false
+    pin_first: false
+
+  # 看图 / OCR
+  - name: zk-vision
+    description: 看图/OCR：Kimi K3（原生视觉）→ 6.8 Flash Lite
+    strategy: capability
+    targets:
+      - deepseek-flash
+      - kimi-k3
+      - step-5-preview
+    requires: {vision: 8.0}       # 硬门槛：无视觉能力的模型直接出局
+    weights: {vision: 5.0, speed: 1.0}
+    enabled: true
+    fallback_to_local: false
+    pin_first: false
