@@ -272,7 +272,9 @@
 
   /* ---------- 视图容器 ---------- */
   main { flex: 1; padding: 16px 18px 56px; width: 100%; }
-  section.view { display: none; max-width: 1480px; margin: 0 auto; }
+  /* 桌面端内容铺满，不用 max-width 居中——居中会让内容挤在中间、两侧大片空白，
+     信息密度低的控制台看着不像成熟网页（2026-10-21 运营者反馈）。 */
+  section.view { display: none; width: 100%; }
   section.view.active { display: block; }
 
   /* ---------- 页头 / 工具条 ---------- */
@@ -289,38 +291,43 @@
 
   /* ---------- 卡片 / KPI ---------- */
   .grid { display: grid; gap: 12px; }
-  .kpis { grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); margin-bottom: 16px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); margin-bottom: 16px; }
+  /* KPI 紧凑横条：标签+数值+副文案横排一行、高度由内容定，不竖叠出大片空白。
+     窄屏（860px 块）里副文案 flex-basis:100% 自动换行退成两段。 */
   .kpi {
     background: var(--surface); border: 1px solid var(--line);
-    border-radius: var(--radius-card); padding: 13px 15px; box-shadow: var(--shadow-sm);
+    border-radius: var(--radius-card); padding: 11px 15px; box-shadow: var(--shadow-sm);
+    display: flex; align-items: baseline; gap: 12px;
   }
-  .kpi .k-label { font-size: var(--fs-12); color: var(--muted); margin-bottom: 5px; }
+  .kpi .k-label { font-size: var(--fs-12); color: var(--muted); flex: none; }
   /* KPI 数字用 20px 而非 24px：本控制台一屏 5~6 个 KPI，24px 会把标签
      挤成两行；20px 配 650 字重已足够抢占视线（参考站同级也是 20）。 */
   .kpi .k-value {
     font-size: var(--fs-20); font-weight: 650; line-height: 1.25; letter-spacing: -.2px;
-    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-family: var(--mono); font-variant-numeric: tabular-nums; flex: none;
   }
-  .kpi .k-sub { font-size: var(--fs-12); color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  .kpi .k-sub { font-size: var(--fs-12); color: var(--muted); line-height: 1.5; margin-left: auto; text-align: right; }
   .kpi.is-ok .k-value { color: var(--ok); }
   .kpi.is-warn .k-value { color: var(--warn); }
   .kpi.is-err .k-value { color: var(--err); }
   .card {
     background: var(--surface); border: 1px solid var(--line);
-    border-radius: var(--radius-card); padding: 14px 16px; box-shadow: var(--shadow-sm);
+    border-radius: var(--radius-card); padding: 12px 15px; box-shadow: var(--shadow-sm);
   }
   .card > h3 { font-size: var(--fs-14); margin-bottom: 8px; }
-  .cards { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); margin-bottom: 16px; }
+  /* 供应商卡片：窄栅格让一排多放、高度由内容定（align-items:start 防止
+     内容短的卡被等比拉高出空白）。 */
+  .cards { grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); margin-bottom: 16px; align-items: start; }
   .prov-card .p-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .prov-card .p-name { font-weight: 650; font-size: var(--fs-13); }
   .prov-card .p-url {
     font-size: var(--fs-11); color: var(--muted); word-break: break-all;
-    margin-bottom: 8px; line-height: 1.5;
+    margin-bottom: 6px; line-height: 1.5;
   }
-  .prov-card .p-models { font-size: var(--fs-12); color: var(--text-2); line-height: 1.7; }
+  .prov-card .p-models { font-size: var(--fs-12); color: var(--text-2); line-height: 1.6; }
 
   h4.sec {
-    margin: 20px 0 9px; font-size: var(--fs-13); color: var(--text-2); font-weight: 600;
+    margin: 16px 0 8px; font-size: var(--fs-13); color: var(--text-2); font-weight: 600;
     display: flex; align-items: center; gap: 8px;
   }
   h4.sec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
