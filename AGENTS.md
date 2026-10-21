@@ -532,6 +532,16 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 ## 手机版控制台改造（2026-10-04）
 
+- **桌面端别用 max-width 居中，KPI 布局要看个数选**（2026-10-22 两轮运营者反馈）：
+  ①`section.view` 曾用 `max-width:1480px; margin:0 auto`，内容只有 ~900px 宽时两侧
+  大片留白，被批「大片空白、不像成熟网页」——已改成 `width:100%` 铺满。
+  ②KPI 第一版改成「标签+值+副文案横排一行」，对总览页（2 个 KPI、副文案短）合适，
+  但消耗器页有 **6 个 KPI、副文案长**（「入761/出2292；积分每百万 token；账本口径」），
+  横条被长副文案撑得高低不齐，又被批「卡片那么高」。**定稿是扁平竖排**：
+  第一行标签（小字）、第二行数值（20px 等宽）、第三行副文案**单行截断**
+  （`white-space:nowrap; text-overflow:ellipsis`），高度统一且矮。
+  教训：**「横条省高度」只在 KPI 少、副文案短时成立；KPI 多或副文案长就必须竖排+截断**，
+  改 KPI 布局前先看消耗器页那 6 个长副文案能不能放下。
 - **三件事同时成立，少一个就只是「桌面仪表盘被撞窄」**：底部四条挤指可及的 Tab（总览/模型/消耗器/更多，其余收进抽屉）、表格卡片化（`tbody td::before` + `data-label`，列名显示在值左侧）、长页面手风琴。前端只有一个断点：`@media (max-width: 860px)`，桌面端不变（`#mnav` 默认 `display: none`，只在媒体查询里打开）。
 - **固定定位的底部 Tab 会被子元素带飞**：实测到一个 392px 的 `modelscope → deepseek-ai/...` 把 `#mnav` 带到 869px，Tab 翻到屏幕外。所以三层都要：根节点 `overflow-x: hidden`、`td > * { min-width: 0 }`、长串 `word-break: break-all`（`break-word` 在没空格的链路上仍不断行）。
 - **弹窗的关闭按钮不许藏在可能被 `display:none` 的区块里**（2026-10-05 事故）：
@@ -602,6 +612,16 @@ sudo systemctl restart zkai            # 配置热加载，但换代码要重启
   本地 `~/.ssh/config` 里那条是另一台内网机，别连错。
 - 服务器本地分支 2026-10-21 已从 `master` 改名 `main` 并 `--set-upstream-to=
   origin/main`（之前 `reset --hard origin/main` 留下的命名不一致，已对齐）。
+- **服务器 origin 必须用 HTTPS，不能用 SSH**（2026-10-21 实测）：origin 曾是
+  `git@github.com:...`，但服务器 `ubuntu` 用户**没有配任何 GitHub deploy key**
+  （`~/.ssh` 只有 known_hosts），于是 `sudo git fetch` 永远
+  `Permission denied (publickey)`——「同步走 git」其实从没真正拉成功过，
+  全靠手工传文件。这个仓库是**公开仓库**（本机 `git ls-remote
+  https://github.com/K2951314/zk-ai.git` 无需认证即可读），已改
+  `git remote set-url origin https://github.com/K2951314/zk-ai.git`，
+  fetch 即刻恢复。**push 仍走本地（本机有 key），服务器只需要 fetch**，
+  所以服务器不必配 push 权限。若哪天仓库转私有，HTTPS 拉取也要 token，
+  到时给 ubuntu 配一个 read-only deploy key 再切回 SSH。
 - 同步前先留备份：`sudo tar czf /var/backups/zkai/code-$(date +%F-%H%M).tgz -C /opt/zkai
   --exclude=.venv --exclude=data --exclude=.git --exclude=__pycache__ .`
 - **判断差异别凭 mtime**：本地工作区是 CRLF（`core.autocrlf=true`），服务器是 LF，

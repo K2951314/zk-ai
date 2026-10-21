@@ -290,23 +290,27 @@
   }
 
   /* ---------- 卡片 / KPI ---------- */
-  .grid { display: grid; gap: 12px; }
-  .kpis { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); margin-bottom: 16px; }
-  /* KPI 紧凑横条：标签+数值+副文案横排一行、高度由内容定，不竖叠出大片空白。
-     窄屏（860px 块）里副文案 flex-basis:100% 自动换行退成两段。 */
+  .grid { display: grid; gap: 10px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(208px, 1fr)); margin-bottom: 14px; }
+  /* KPI 扁平竖排：第一行 标签（左）+ 数值（右）同一行，第二行副文案单行截断。
+     高度统一且矮——消耗器页 6 个 KPI、副文案长短不一，横条会被长副文案撑得
+     高低不齐（2026-10-22 运营者反馈「卡片那么高太影响阅读」）。 */
   .kpi {
     background: var(--surface); border: 1px solid var(--line);
-    border-radius: var(--radius-card); padding: 11px 15px; box-shadow: var(--shadow-sm);
-    display: flex; align-items: baseline; gap: 12px;
+    border-radius: var(--radius-card); padding: 9px 13px 8px; box-shadow: var(--shadow-sm);
+    display: flex; flex-direction: column; justify-content: center; gap: 2px;
   }
-  .kpi .k-label { font-size: var(--fs-12); color: var(--muted); flex: none; }
+  .kpi .k-label { font-size: var(--fs-11); color: var(--muted); line-height: 1.3; }
   /* KPI 数字用 20px 而非 24px：本控制台一屏 5~6 个 KPI，24px 会把标签
      挤成两行；20px 配 650 字重已足够抢占视线（参考站同级也是 20）。 */
   .kpi .k-value {
-    font-size: var(--fs-20); font-weight: 650; line-height: 1.25; letter-spacing: -.2px;
-    font-family: var(--mono); font-variant-numeric: tabular-nums; flex: none;
+    font-size: var(--fs-20); font-weight: 650; line-height: 1.15; letter-spacing: -.2px;
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
   }
-  .kpi .k-sub { font-size: var(--fs-12); color: var(--muted); line-height: 1.5; margin-left: auto; text-align: right; }
+  .kpi .k-sub {
+    font-size: var(--fs-11); color: var(--muted); line-height: 1.35;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .kpi.is-ok .k-value { color: var(--ok); }
   .kpi.is-warn .k-value { color: var(--warn); }
   .kpi.is-err .k-value { color: var(--err); }
