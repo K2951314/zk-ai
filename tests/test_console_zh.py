@@ -466,6 +466,12 @@ def test_console_links_to_the_report_page() -> None:
     assert 'href="/ui/report"' not in text, "体检已改为内置视图，不再用 a 跳转"
 
 
+def test_console_links_to_the_agent_page() -> None:
+    text = _raw_html("index.html")
+    assert 'href=\"/ui/agent\"' in text
+    assert "Agent 任务台" in text
+
+
 def test_agent_page_renders_spawn_cards_in_chinese() -> None:
     """子任务派发的卡片必须有，且保持中文 + 单文件零依赖。
 
