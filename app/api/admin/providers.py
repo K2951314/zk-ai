@@ -31,10 +31,11 @@ from app.core.config import load_app_config
 from app.core.config_writer import (
     append_credential_to_provider,
     delete_credential_from_provider,
+    delete_env_var,
     looks_like_secret,
+    update_credential_in_provider,
     upsert_env_var,
 )
-from app.core.config_writer import delete_env_var, update_credential_in_provider
 from app.core.config_writer import delete_provider as delete_provider_file
 from app.core.config_writer import upsert_provider as upsert_provider_file
 from app.models.provider import (
@@ -302,7 +303,7 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
             from app.models.catalogue_info import enrich_modelscope
 
             official = await enrich_modelscope(sorted(catalogue))
-        except Exception as exc:  # noqa: BLE001 - 资料缺失不影响目录本身
+        except Exception as exc:
             logger.info("catalogue enrich failed for %s: %s", provider_id, exc)
 
     # 参考价：上游目录不报价，去公开渠道取挂牌价。
@@ -310,7 +311,7 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
     prices: dict[str, dict[str, Any]] = {}
     try:
         prices = await reference_prices()
-    except Exception as exc:  # noqa: BLE001 - 价格缺失不影响目录
+    except Exception as exc:
         logger.info("reference price fetch failed for %s: %s", provider_id, exc)
 
     data = []

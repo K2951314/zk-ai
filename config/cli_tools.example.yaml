@@ -1,0 +1,81 @@
+# ZK-AI 外部 CLI 执行体配置模板（可提交；本地现役配置是 config/cli_tools.yaml，gitignore）
+#
+# 复制到 config/cli_tools.yaml 后按需修改。这个文件是统领大脑的「执行体花名册」：
+# 父 agent 派任务时只说角色（如 cli-coder），具体调哪个 CLI、用什么模型、
+# 免费还是收费，全部由这里决定——模型看不到也改不了这张表。
+#
+# 四层防护（从里到外）：
+#   1. 本表 enabled 开关：整个工具下线的总闸
+#   2. cost_tier 档位：事前定档，审批卡片上会显示给操作者
+#   3. 两阶段审批：每次委派先渲染「派给谁、干什么」预览，批准后才执行
+#   4. 用量记账 + 日汇总阈值：事后可查可刹住（cli_usage 表，阶段 3 落地）
+
+tools:
+  # -------------------------------------------------------------------------
+  # Qwen Code —— 本机已装（npm 全局 @qwen-code/qwen-code，命令名是 qwen）
+  # 原生支持 OpenAI 兼容后端：--auth-type openai + --openai-base-url +
+  # --openai-api-key，可以直接指向本机 zkai 网关。
+  # backend: gateway  = 走 zkai 网关（用网关的别名与免费池，计量进网关）
+  # backend: official = 走官方 qwen-oauth 登录（用官方免费额度，需先交互登录）
+  # ⚠ 命令名是 qwen 不是 qwen-code（cli-entry.js 注册的 bin 名）
+  # ⚠ approval_mode 只允许 plan/default：yolo/auto-edit 之类自动同意模式
+  #    等于让外部工具绕过 zkai 自己的两阶段审批卡，注册表会硬拦
+  # ⚠ base_url 不填时默认 127.0.0.1:8317（Windows 开发机标准端口）；
+  #    本服务器网关实际在 8318，现役配置里要显式写上
+  # -------------------------------------------------------------------------
+  qwen:
+    enabled: false                # 端到端验证通过后再打开（见 docs/2026-10-22-cli-probe.md）
+    command: qwen
+    backend: gateway              # gateway / official
+    base_url: http://127.0.0.1:8318/v1   # 本服务器网关端口；Windows 开发机是 8317
+    api_key: zk-local             # 本机网关当前不校验，占位即可
+    model: zk-auto                # backend=gateway 时填网关别名；official 时填官方模型名
+    cost_tier: free               # free / cheap / paid —— 审批卡片上会显示
+    timeout: 300                  # 单次委派硬上限（秒，允许 10~1800）
+    approval_mode: default        # plan=只分析不动手 / default=写改要它自己再确认
+
+  # -------------------------------------------------------------------------
+  # Claude Code —— 未安装，装好后把 enabled 打开
+  # 非交互模式：claude -p "任务"（--print）；模型用 --model 指定
+  # 收费：走 Anthropic 订阅/API 额度，cost_tier 如实标 paid
+  # -------------------------------------------------------------------------
+  claude:
+    enabled: false
+    command: claude
+    backend: official
+    model: claude-sonnet-4-5
+    cost_tier: paid
+    timeout: 300
+    approval_mode: default
+
+  # -------------------------------------------------------------------------
+  # Codex CLI —— 未安装，装好后把 enabled 打开
+  # 非交互模式：codex exec "任务"
+  # 可走官方登录，也可配 base_url 指向 zkai 网关（参考 chatgpt_service.py
+  # 对 ~/.codex/config.toml 的写法）
+  # -------------------------------------------------------------------------
+  codex:
+    enabled: false
+    command: codex
+    backend: official
+    model: gpt-5-codex
+    cost_tier: paid
+    timeout: 300
+    approval_mode: default
+
+# ---------------------------------------------------------------------------
+# 角色 -> 执行体映射（父 agent 派单时只看到角色名与能力描述）
+# 设计约束（与 app/services/agent/roles.py 内部角色同一套哲学）：
+#   模型说「我要个写代码的」，具体给谁由这张表决定，不由模型指定——
+#   否则等于让模型绕过成本档位自己挑收费渠道。
+# ---------------------------------------------------------------------------
+roles:
+  cli-coder:
+    tool: qwen                    # 写代码/改代码的默认执行体
+    hint: 写代码、改代码、调试（外部 CLI 执行）
+  cli-reviewer:
+    tool: claude                  # 评审/把关（装好 claude 后启用）
+    hint: 代码评审、方案把关（外部 CLI 执行）
+  cli-grinder:
+    tool: qwen                    # 机械批量活，用免费档跑
+    hint: 机械改写、批量整理（外部 CLI 执行）

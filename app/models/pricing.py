@@ -94,7 +94,7 @@ async def reference_prices(force: bool = False) -> dict:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
             response = await client.get(_SOURCE, headers={"User-Agent": "zkai-gateway"})
         if response.status_code != 200:
-            raise ValueError("HTTP %s" % response.status_code)
+            raise ValueError(f"HTTP {response.status_code}")
         table = _parse(response.json())
     except (httpx.HTTPError, ValueError) as exc:
         logger.info("reference price fetch failed: %s", exc)

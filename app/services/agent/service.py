@@ -32,6 +32,8 @@ from app.core.errors import ZKAIError
 from app.core.logging import get_logger
 from app.database.repository import AgentRepository
 from app.models.request import ChatCompletionRequest, ChatMessage, ToolCall
+from app.services.agent.cli import CliRegistry, load_cli_registry
+from app.services.agent.cli import delegate as cli_delegate
 from app.services.agent.confirm import SessionApprovals
 from app.services.agent.prompts import build_system_prompt
 from app.services.agent.roles import describe_roles, resolve_alias
@@ -70,6 +72,8 @@ class _Running:
     approvals: SessionApprovals = field(default_factory=SessionApprovals)
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
     cancelled: bool = False
+    #: 本会话启动时的外部执行体花名册快照；空册 = delegate_cli 不出现
+    cli_registry: CliRegistry = field(default_factory=CliRegistry)
     # ---- 子任务派发 ----------------------------------------------------- #
     #: 父服务的引用；非 None = 这是子会话，不允许再派发（工具箱里也没有那个 schema）。
     parent: AgentService | None = None
@@ -174,6 +178,7 @@ class AgentService:
             parent=parent,
             parent_session=parent_session,
             depth=depth,
+            cli_registry=load_cli_registry(self.settings),
         )
         self._running[session_id] = run
         self._spawn(run, resume=False)
@@ -191,7 +196,7 @@ class AgentService:
         if row["status"] not in _RESUMABLE_STATUSES:
             raise ZKAIError(f"会话状态 {row['status']} 不能继续", http_status=409)
         run = _Running(session_id=session_id, workspace=Path(row["workspace"]),
-                       model=row["model"])
+                       model=row["model"], cli_registry=load_cli_registry(self.settings))
         self._running[session_id] = run
         await self.repo.add_message(session_id, role="user", kind="task", content=content)
         await self.repo.update_status(session_id, "running", error=None)
@@ -346,6 +351,10 @@ class AgentService:
         # 子会话拿不到 spawn_subagent——递归派发由「根本不发这个 schema」兜底，
         # 而不是靠 prompt 里写「你不许用」。
         schemas = ROOT_TOOL_SCHEMAS if run.parent is None else TOOL_SCHEMAS
+        # delegate_cli 只在根会话出现（子会话不许派外部执行体，防链式烧额度），
+        # 且注册表为空时连 schema 都不发——模型根本不知道有这个东西。
+        if run.parent is None and run.cli_registry.known_roles():
+            schemas = [*schemas, cli_delegate.build_schema(run.cli_registry)]
         steps = 0
         in_tokens = 0
         out_tokens = 0
@@ -517,6 +526,8 @@ class AgentService:
         try:
             if name in SUPERVISOR_TOOLS:
                 return await self._spawn_child(run, args)
+            if name == cli_delegate.TOOL_NAME:
+                return await self._delegate_cli(run, toolbox, args)
             if name in SAFE_TOOLS:
                 return await toolbox.perform(name, args)
             if name not in DANGEROUS_TOOLS:
@@ -553,6 +564,50 @@ class AgentService:
             return await toolbox.perform(name, args)
         except ToolError as exc:
             return ToolOutcome(ok=False, output=f"工具执行失败：{exc}")
+    # ------------------------------------------------------------------ #
+    # 外部执行体委派（delegate_cli）
+    # ------------------------------------------------------------------ #
+    async def _delegate_cli(
+        self, run: _Running, toolbox: ToolBox, args: dict[str, Any]
+    ) -> ToolOutcome:
+        """delegate_cli 的实现：走与危险工具相同的两阶段审批，批准后拉起子进程。"""
+        self._require_root(run)
+        if not run.cli_registry.known_roles():
+            raise ToolError(
+                "外部执行体功能未启用（config/cli_tools.yaml 未配置或无可用执行体）。"
+            )
+        session_id = run.session_id
+        if not run.approvals.skipped(cli_delegate.TOOL_NAME):
+            prepared = cli_delegate.prepare(run.cli_registry, toolbox, args)
+            preview = str((prepared.display or {}).get("command") or "")
+            approval = run.approvals.register(
+                cli_delegate.TOOL_NAME, args, preview, prepared.display
+            )
+            await self.repo.update_status(session_id, "waiting_approval")
+            seq = await self.repo.add_message(
+                session_id,
+                role="assistant",
+                kind="approval",
+                content=preview or "请求执行 delegate_cli",
+                data={"approval_id": approval.id, "tool": cli_delegate.TOOL_NAME, "args": args},
+            )
+            self._emit(run, {
+                "type": "approval_request",
+                "seq": seq,
+                "approval_id": approval.id,
+                "tool": cli_delegate.TOOL_NAME,
+                "preview": preview,
+                "display": prepared.display,
+                "args": args,
+            })
+            await approval.event.wait()
+            await self.repo.update_status(session_id, "running")
+            if not approval.approved:
+                return ToolOutcome(
+                    ok=False,
+                    output="用户拒绝了此操作。请调整方案后重试，或直接给出结论。",
+                )
+        return await cli_delegate.perform(run.cli_registry, toolbox, args)
 
     # ------------------------------------------------------------------ #
     # 子任务派发

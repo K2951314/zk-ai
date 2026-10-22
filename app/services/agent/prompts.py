@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 
 from app.core.config import Settings
+from app.services.agent.cli import load_cli_registry
 from app.services.agent.roles import describe_roles
 
 
@@ -34,6 +35,17 @@ def build_system_prompt(
 - 派出去之后你会一直等它跑完，所以一次只派一个、只派真正需要另一种专长的活。
 - 看懂子任务结论后，最终总结要说清你怎么用它，不要把它的原文原封不动转给我。"""
     )
+    delegate_rule = ""
+    if not is_child and settings is not None:
+        cli_roles = load_cli_registry(settings).describe_roles()
+        if cli_roles:
+            delegate_rule = f"""
+# 委派外部执行体
+- 你可以用 delegate_cli(role, task) 把一段活儿交给本机的外部 AI 工具去做，它的结论会回传给你。
+- 当前可用执行体角色：{cli_roles}。role 只能从这里挑，写错了系统会把清单再告诉你一次。
+- task 必须自成一体：执行体看不到你的对话历史，也看不到你读过的文件。
+- 每次委派都要用户批准，批准卡片上会写清执行体、模型与成本档位；能免费档搞定的活优先派免费档。
+- 执行体报「额度耗尽」时改派其他角色重试；报「未登录」时不要重试，在总结里说明需要人工登录。"""
     closing = (
         "子会话：你的最后一段话会被当成任务结论回传给派你出来的人，"
         "所以要自成一体：说清做了什么、结果是什么、有什么要注意的。"
@@ -50,6 +62,7 @@ def build_system_prompt(
 write_file / run_command（危险，需要用户批准后才会执行）
 - 单个任务最多 {max_steps} 步工具调用，超限会被强制停止，请规划好节奏
 {spawn_rule}
+{delegate_rule}
 # 工作规则
 1. 先读后改：修改文件前必须先用 read_file 看清现状，改动保持最小、聚焦。
 2. 路径一律用相对工作区的路径；工作区之外的路径会被拒绝。

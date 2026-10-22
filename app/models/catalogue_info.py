@@ -86,7 +86,7 @@ def _describe(data: dict, mid: str) -> dict:
             bits.append("、".join(tasks[:3]))
         downloads = data.get("Downloads")
         if isinstance(downloads, int) and downloads > 0:
-            bits.append("社区下载 %d 次" % downloads)
+            bits.append(f"社区下载 {downloads} 次")
         desc = "｜".join(bits)
     lowered = (text + " " + " ".join(tasks)).lower()
     return {

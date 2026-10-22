@@ -300,7 +300,7 @@ function renderSessionList(sessions) {
     div.querySelector(".del").onclick = async (e) => {
       e.stopPropagation();
       if (!confirm("删除该会话及其全部记录？")) return;
-      try { await api(`/admin/agent/sessions/${s.id}`, { method: "DELETE" }); await loadSessions(); }
+      try { await api(`/zkadmin/agent/sessions/${s.id}`, { method: "DELETE" }); await loadSessions(); }
       catch (err) { toast(err.message); }
     };
     list.appendChild(div);
@@ -412,7 +412,7 @@ function renderApprovalCard(m) {
       const approved = btn.dataset.act !== "deny";
       const remember = btn.dataset.act === "remember";
       try {
-        await api(`/admin/agent/sessions/${state.current}/approvals/${d.approval_id}`, {
+        await api(`/zkadmin/agent/sessions/${state.current}/approvals/${d.approval_id}`, {
           method: "POST", body: JSON.stringify({ approved, remember }),
         });
         row.querySelector(".approval-actions").remove();
@@ -451,7 +451,7 @@ async function connectEvents(sessionId) {
   const ctrl = new AbortController();
   state.streamCtrl = ctrl;
   try {
-    const res = await fetch(`/admin/agent/sessions/${sessionId}/events`, {
+    const res = await fetch(`/zkadmin/agent/sessions/${sessionId}/events`, {
       headers: { "X-Admin-Token": TOKEN, Accept: "text/event-stream" },
       signal: ctrl.signal,
     });
@@ -545,7 +545,7 @@ function handleEvent(ev) {
 // ---------------------------------------------------------------- actions
 async function loadSessions() {
   try {
-    const data = await api("/admin/agent/sessions");
+    const data = await api("/zkadmin/agent/sessions");
     renderSessionList(data.sessions);
   } catch (err) { toast(err.message); }
 }
@@ -553,12 +553,12 @@ async function loadSessions() {
 async function openSession(id) {
   state.current = id;
   try {
-    const detail = await api(`/admin/agent/sessions/${id}`);
+    const detail = await api(`/zkadmin/agent/sessions/${id}`);
     state.session = detail.session;
     state.messages = detail.messages;
     renderTranscript();
     setHeader();
-    renderSessionList((await api("/admin/agent/sessions")).sessions);
+    renderSessionList((await api("/zkadmin/agent/sessions")).sessions);
     if (detail.session.status === "running" || detail.session.status === "waiting_approval") {
       connectEvents(id);
     }
@@ -567,7 +567,7 @@ async function openSession(id) {
 
 async function loadModels() {
   try {
-    const data = await api("/admin/agent/models");
+    const data = await api("/zkadmin/agent/models");
     const sel = $("modelSel");
     sel.innerHTML = "";
     for (const alias of data.aliases) {
@@ -587,7 +587,7 @@ $("composer").onsubmit = async (e) => {
   if (!text) return;
   try {
     if (!state.current) {
-      const created = await api("/admin/agent/sessions", {
+      const created = await api("/zkadmin/agent/sessions", {
         method: "POST",
         body: JSON.stringify({ task: text, model: $("modelSel").value || null }),
       });
@@ -600,7 +600,7 @@ $("composer").onsubmit = async (e) => {
       connectEvents(state.current);
       loadSessions();
     } else {
-      await api(`/admin/agent/sessions/${state.current}/messages`, {
+      await api(`/zkadmin/agent/sessions/${state.current}/messages`, {
         method: "POST", body: JSON.stringify({ content: text }),
       });
       input.value = "";
@@ -635,7 +635,7 @@ $("newBtn").onclick = () => {
 $("cancelBtn").onclick = async () => {
   if (!state.current) return;
   try {
-    await api(`/admin/agent/sessions/${state.current}/cancel`, { method: "POST" });
+    await api(`/zkadmin/agent/sessions/${state.current}/cancel`, { method: "POST" });
     toast("已请求取消");
   } catch (err) { toast(err.message); }
 };
