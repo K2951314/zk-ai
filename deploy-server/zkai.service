@@ -11,6 +11,9 @@ WorkingDirectory=/opt/zkai
 ExecStart=/opt/zkai/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8318
 Restart=always
 RestartSec=3
+# 优雅关闭最多等 15 秒——有长请求在飞时 uvicorn 会等连接关完，
+# 不设上限的话 systemctl restart 可能卡在 deactivating 很久。
+TimeoutStopSec=15
 # NoNewPrivileges 挡的是 sudo/setuid 提权；polkit 走 D-Bus 不受影响。
 # 控制台一键重启依赖 50-zkai.rules 放行 www-data manage-units。
 NoNewPrivileges=true
