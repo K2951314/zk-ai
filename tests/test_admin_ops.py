@@ -59,6 +59,21 @@ class TestCredentialGuards:
         assert r.status_code == 200
         assert r.json()["deleted"] == "key-1"
         assert all(c.id != "key-1" for c in harness.container.config.providers["fake"].credentials)
+        # pool 里也必须清掉——register_provider 只加不删，靠 reconcile 补
+        assert harness.container.pool.get("key-1") is None
+
+    async def test_rename_clears_old_id_from_pool(self, api) -> None:
+        """改名后旧 id 不能残留在 pool 里。"""
+        client, harness = api
+        await client.post("/zkadmin/credentials/key-1/disable", headers=ADMIN)
+        r = await client.put(
+            "/zkadmin/providers/fake/credentials/key-1",
+            json={"new_id": "key-1-reborn"},
+            headers=ADMIN,
+        )
+        assert r.status_code == 200
+        assert harness.container.pool.get("key-1") is None
+        assert harness.container.pool.get("key-1-reborn") is not None
 
     async def test_cannot_rename_enabled_key(self, api) -> None:
         client, _ = api

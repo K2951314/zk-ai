@@ -228,7 +228,7 @@ function syncedNote(resp) {
  */
 const MODAL_IDS = [
   "#model-modal", "#alias-modal", "#limits-modal", "#market-modal",
-  "#addkey-modal", "#providers-modal", "#chatgpt-modal", "#auth",
+  "#addkey-modal", "#providers-modal", "#chatgpt-modal", "#rename-cred-modal", "#auth",
 ];
 /** 打开一个弹窗，并关掉其它所有遮罩（父弹窗由调用方负责收尾）。 */
 function openModal(sel) {
@@ -689,6 +689,44 @@ function bindRowClicks(root) {
     tr.onclick = () => openDrawer(tr.dataset.rid));
 }
 
+/* ================= 凭据改名弹窗 =================
+ * 显示名（id）和变量名（env_var）都能改，改变量名时 .env 里的密钥值
+ * 会自动搬到新名字下（后端处理），旧变量无引用时清掉。 */
+function openRenameCredModal(id, pid, curEnv) {
+  const modal = $("#rename-cred-modal");
+  modal.innerHTML = `<div class="card wide">
+    <h3>改名 Key「${esc(id)}」</h3>
+    <div class="modal-sub">仅限已禁用的 Key。改变量名时 .env 里的密钥值会自动搬到新名字，旧变量无引用时清掉。</div>
+    <div class="formgrid">
+      <label>显示名（ID）<input type="text" id="rc-id" value="${esc(id)}" placeholder="如 sensenova-01"></label>
+      <label>变量名（.env）<input type="text" id="rc-env" value="${esc(curEnv)}" placeholder="如 SENSENOVA_API_KEY_01">
+        <span class="small muted">密钥值在 .env 里以这个名字存放</span></label>
+    </div>
+    <div class="modal-actions">
+      <button class="primary" id="rc-save">💾 保存</button>
+      <button id="rc-cancel">取消</button>
+    </div>
+  </div>`;
+  openModal("#rename-cred-modal");
+  $("#rc-cancel").onclick = () => closeModal("#rename-cred-modal");
+  $("#rc-save").onclick = async () => {
+    const nextId = $("#rc-id").value.trim();
+    const nextEnv = $("#rc-env").value.trim();
+    if (!nextId) { toast("显示名不能为空", "err"); return; }
+    if (nextId === id && nextEnv === curEnv) { closeModal("#rename-cred-modal"); return; }
+    const body = {};
+    if (nextId !== id) body.new_id = nextId;
+    if (nextEnv !== curEnv) body.env_var = nextEnv || null;
+    const r = await api(`/admin/providers/${encodeURIComponent(pid)}/credentials/${encodeURIComponent(id)}`, {
+      method: "PUT", json: body,
+    });
+    if (r.error) { toast(r.error.message || "改名失败", "err"); return; }
+    toast(`Key 已改名${nextId !== id ? ` → ${nextId}` : ""}${nextEnv !== curEnv ? `（变量 ${nextEnv || "(已清)"}）` : ""}`, "ok");
+    closeModal("#rename-cred-modal");
+    loadPool();
+  };
+}
+
 /* ================= 凭据池 ================= */
 async function loadPool() {
   const resp = await api("/admin/credentials");
@@ -799,16 +837,11 @@ async function loadPool() {
       loadPool();
     });
   document.querySelectorAll("#view-pool button[data-rename-cred]").forEach(btn =>
-    btn.onclick = async () => {
+    btn.onclick = () => {
       const id = btn.dataset.renameCred, pid = btn.dataset.pid;
-      const next = prompt(`把 Key「${id}」改名为（仅限已禁用）：`, id);
-      if (!next || next.trim() === "" || next.trim() === id) return;
-      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/credentials/${encodeURIComponent(id)}`, {
-        method: "PUT", json: { new_id: next.trim() },
-      });
-      if (r.error) { toast(r.error.message || "改名失败", "err"); return; }
-      toast(`Key 已改名为 ${next.trim()}`, "ok");
-      loadPool();
+      const cred = (state.pool?.credentials || []).find(x => x.id === id && x.provider_id === pid);
+      const curEnv = cred ? (cred.secret_ref || "").replace(/^\$\{|\}$/g, "") : "";
+      openRenameCredModal(id, pid, curEnv);
     });
 }
 

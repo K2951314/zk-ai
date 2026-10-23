@@ -705,6 +705,21 @@ async def update_credential(
     old_name = current.env_var or (current.env.strip("${} ") if current.env else None)
     new_name = payload.env_var or old_name
     env_synced: str | None = None
+    # 改 env_var 但没给新 Key：把旧变量的值搬到新名字，否则改完名密钥就丢了。
+    if (
+        payload.value is None
+        and payload.env_var is not None
+        and old_name
+        and payload.env_var != old_name
+    ):
+        old_val = os.environ.get(old_name)
+        if old_val is not None:
+            try:
+                upsert_env_var(_common._env_file(), payload.env_var, old_val)
+            except OSError as exc:
+                raise _file_write_failed(exc) from exc
+            os.environ[payload.env_var] = old_val
+            env_synced = f".env (renamed {old_name} → {payload.env_var})"
     if payload.value is not None:
         if not new_name:
             raise HTTPException(
@@ -768,6 +783,8 @@ async def update_credential(
             c.priority = payload.priority
         if payload.enabled is not None:
             c.enabled = payload.enabled
+    # reconcile 先清掉旧 id 的池内残留（改名场景），register 再把新 id 装进去。
+    container.pool.reconcile(container.config.providers)
     container.pool.register_provider(provider)
     return {
         "object": "credential",
@@ -825,6 +842,9 @@ async def delete_credential(
         synced = path.name
         container.refresh_config_watch()
     provider.credentials = [c for c in provider.credentials if c.id != credential_id]
+    # reconcile 清掉 pool 残留——register_provider 只加不删，不调这步的话
+    # 界面上删了、池里还在，下一秒照样被派活。
+    container.pool.reconcile(container.config.providers)
     container.pool.register_provider(provider)
     # 密钥本体也要走：变量若再无任何凭据引用，就从 .env 删掉，
     # 否则界面上删了、文件里还留着，重加同名凭据时旧 Key 又复活。
