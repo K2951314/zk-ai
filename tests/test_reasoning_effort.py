@@ -214,8 +214,13 @@ class TestOfficialSpecs:
         assert "最大输出" in labels
         assert "推理力度" in labels
         assert "工具调用" in labels
-        # 未收录模型不该编造官方规格
-        assert preset_for("totally-made-up-model-9000").official_facts() == []
+        assert "牌价 $/Mtok" in labels
+        # 未收录模型：只有预估上下文，不编造 max_output / 档位 / 工具支持
+        unknown = preset_for("totally-made-up-model-9000").official_facts()
+        unknown_labels = {r["label"] for r in unknown}
+        assert "最大输出" not in unknown_labels
+        assert "推理力度" not in unknown_labels
+        assert any("预估" in r["value"] for r in unknown)
 
 
 class TestPerProviderAndHighestEffort:
@@ -260,3 +265,30 @@ class TestPerProviderAndHighestEffort:
         assert highest_effort(("low", "medium", "high", "xhigh", "max")) == "max"
         assert highest_effort(("high", "ultra")) == "ultra"
         assert highest_effort(("medium", "high", "xhigh")) == "xhigh"
+
+    def test_nvidia_glm53_effort_vocabulary(self) -> None:
+        """NVIDIA 上的 GLM-5.3 只有 low/high/max，与商汤 GLM-5.2 的 7 档不同。"""
+        from app.models.presets import preset_for
+
+        p = preset_for("glm-5.3", "nvidia")
+        assert p.reasoning_efforts == ("low", "high", "max")
+        assert p.reasoning_effort_default == "max"
+        assert p.spec_source == "official"
+
+    def test_stepfun_37_has_three_levels(self) -> None:
+        from app.models.presets import preset_for
+
+        p = preset_for("step-3.7-flash", "stepfun")
+        assert p.reasoning_efforts == ("low", "medium", "high")
+        assert p.reasoning_effort_default == "medium"
+        assert p.supports_tools is True
+
+    def test_partial_facts_still_show_with_estimate_tag(self) -> None:
+        from app.models.presets import preset_for
+
+        rows = preset_for("nemotron-3-super", "nvidia").official_facts()
+        labels = {r["label"] for r in rows}
+        assert "工具调用" in labels
+        assert "使用须知" in labels
+        # nemotron 上下文口径冲突 → 标预估
+        assert any("预估" in r["value"] for r in rows if r["label"] == "上下文窗口")

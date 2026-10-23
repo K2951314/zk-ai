@@ -9,7 +9,7 @@ def test_exact_match() -> None:
     preset = match_preset("glm-5.3")
     assert preset is not None
     assert preset.display_name == "GLM-5.3"
-    assert preset.context_window == 1_000_000
+    assert preset.context_window == 1_048_576
 
 
 def test_vendor_prefix_stripped() -> None:

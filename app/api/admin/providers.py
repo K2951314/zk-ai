@@ -400,8 +400,10 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         }
         if facts.known:
             entry["facts_note"] = facts.describe()
-        if preset.spec_source == "official":
-            entry["official_facts"] = preset.official_facts()
+        # 官方规格：有核实值就展示（partial 也摊开），不再要求整条都是 official
+        official_rows = preset.official_facts()
+        if official_rows:
+            entry["official_facts"] = official_rows
         data.append(entry)
     return {"object": "list", "provider_id": provider_id, "data": data}
 

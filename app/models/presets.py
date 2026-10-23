@@ -59,15 +59,16 @@ class ModelPreset:
     def official_facts(self) -> list[dict[str, str]]:
         """官方规格只读行（表单展示用）。
 
-        只在 ``spec_source == "official"`` 时给出——预估值冒充官方规格是撒谎。
+        **有核实值的字段就显示**，不再整段 all-or-nothing——部分核实也要摊开，
+        只在 ``spec_source != "official"`` 时在行尾标「预估」。没核实的字段直接不出现。
         """
-        if self.spec_source != "official":
-            return []
+        estimated = self.spec_source != "official"
+        tag = "（预估）" if estimated else ""
         rows: list[dict[str, str]] = []
         if self.context_window:
             rows.append({
                 "label": "上下文窗口",
-                "value": f"{self.context_window:,} tokens",
+                "value": f"{self.context_window:,} tokens{tag}",
                 "meaning": "官方文档写的一次请求最大输入长度",
             })
         if self.max_output_tokens is not None:
@@ -76,7 +77,7 @@ class ModelPreset:
                 limit += f"（最大 {self.max_output_tokens_max:,}）"
             rows.append({
                 "label": "最大输出",
-                "value": limit,
+                "value": f"{limit}{tag}",
                 "meaning": "官方默认 max_tokens；括号内为可设上限",
             })
         if self.reasoning_efforts:
@@ -97,6 +98,12 @@ class ModelPreset:
                 "label": "结构化输出",
                 "value": "支持" if self.supports_structured_output else "不支持",
                 "meaning": "JSON / Schema 结构化输出",
+            })
+        if self.input_price or self.output_price:
+            rows.append({
+                "label": "牌价 $/Mtok",
+                "value": f"入 {self.input_price} / 出 {self.output_price}",
+                "meaning": "官方或公开渠道单价，仅用于成本估算",
             })
         for note in self.spec_notes:
             rows.append({"label": "使用须知", "value": note, "meaning": "官方文档原文口径"})
@@ -130,6 +137,20 @@ _PRESETS: tuple[ModelPreset, ...] = (
             "max_tokens 范围 [1, 65536]，默认 65535",
             "思考模式默认开启；reasoning_effort=none 或 thinking=disabled 可关",
         ),
+    ),
+    ModelPreset(
+        family="sensenova-6.7-flash-lite",
+        display_name="商汤 6.7 Flash Lite",
+        context_window=256_000,
+        capabilities={
+            "coding": 6.5, "reasoning": 6.5, "tool_use": 7.5, "vision": 9.0,
+            "long_context": 7.0, "structured_output": 7.0, "speed": 9.0, "cost": 10.0,
+        },
+        input_price=0.15, output_price=0.50,
+        description="商汤上一代 Flash Lite",
+        providers=("sensenova",),
+        provider="sensenova",
+        spec_source="estimated",
     ),
     ModelPreset(
         family="deepseek-flash",
@@ -324,30 +345,54 @@ _PRESETS: tuple[ModelPreset, ...] = (
     ModelPreset(
         family="step-3.7-flash",
         display_name="Step 3.7 Flash",
-        # StepFun GET /models + 官方文档：256K 上下文
+        # platform.stepfun.com：256K 上下文；max_tokens 范围 1~131072
         context_window=262_144,
         capabilities={
             "coding": 8.0, "reasoning": 8.0, "tool_use": 8.0, "vision": 10.0,
             "long_context": 8.0, "structured_output": 8.0, "speed": 9.0, "cost": 9.0,
         },
-        description="阶跃速度杯：256K 上下文 + 图像输入 + 思考模式",
+        input_price=0.20, output_price=1.15,
+        description="阶跃速度杯：256K 上下文 + 图像/视频 + 三档思考",
         providers=("stepfun",),
+        provider="stepfun",
+        max_output_tokens=4_096,
+        max_output_tokens_max=131_072,
         spec_source="official",
+        reasoning_efforts=("low", "medium", "high"),
+        reasoning_effort_default="medium",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "reasoning_effort 三档 low/medium/high；Chat 用 reasoning_effort，"
+            "Messages 用 output_config.effort",
+            "max_tokens 范围 1~131072，思考 token 计入其中",
+            "支持图像/视频输入；JSON Mode 与 Schema 结构化输出",
+        ),
     ),
     ModelPreset(
         family="step-3.5-flash",
         display_name="Step 3.5 Flash",
+        # platform.stepfun.com：256K 上下文，196B MoE（激活 11B）
         context_window=262_144,
         capabilities={
             "coding": 7.5, "reasoning": 7.5, "tool_use": 7.5, "vision": 0.0,
             "long_context": 8.0, "structured_output": 7.5, "speed": 9.0, "cost": 9.0,
         },
-        description="阶跃上一代速度杯：256K 上下文，纯文本",
+        description="阶跃上一代速度杯：256K 上下文，纯文本，196B MoE",
         providers=("stepfun",),
+        provider="stepfun",
         spec_source="official",
+        # 官方 Step Plan 文档：step-3.5-flash-2603 仅 low/high；标准版档位待核对
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "196B 总参 / 11B 激活，Sparse MoE，面向 agent 与 coding",
+            "思考档位：3.5-flash-2603 仅 low/high，三档版见 3.7-flash",
+        ),
     ),
     # --- 通义 Qwen（qwen.ai 官方博客 / ModelScope）--------------------------- #
-    # 原生 262144，YaRN 可扩到 1M。推荐输出：推理 262144 + 正文 131072（1M 内）。
+    # 原生 262144，YaRN 可扩到 1M。支持 enable_thinking / preserve_thinking / reasoning_effort。
+    # 推荐输出：推理 262144 + 正文 131072（1M 内）。
     ModelPreset(
         family="qwen3.8-flash-next",
         display_name="Qwen3.8 Flash Next",
@@ -359,9 +404,18 @@ _PRESETS: tuple[ModelPreset, ...] = (
         input_price=0.40, output_price=1.20,
         description="通义新一代轻量档（原生 256K，可 YaRN 扩 1M）",
         providers=("modelscope",),
+        provider="modelscope",
         max_output_tokens=131_072,
         max_output_tokens_max=262_144,
         spec_source="official",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "默认思考模式；enable_thinking / preserve_thinking / reasoning_effort 三参数控思考",
+            "思考模式采样推荐 temperature=1.0 top_p=0.95 top_k=20；非思考 0.7/0.80/20",
+            "多轮 agent 降低推理强度不一定省总时间——失败重试会吃掉收益",
+            "长文超 256K 用 YaRN 扩展，静态 YaRN 对短文有精度代价",
+        ),
     ),
     ModelPreset(
         family="qwen38-flash-next",
@@ -374,24 +428,42 @@ _PRESETS: tuple[ModelPreset, ...] = (
         input_price=0.40, output_price=1.20,
         description="魔搭社区每日免费额度，国内直连",
         providers=("modelscope",),
+        provider="modelscope",
         max_output_tokens=131_072,
         max_output_tokens_max=262_144,
         spec_source="official",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "默认思考模式；enable_thinking / preserve_thinking / reasoning_effort 控思考",
+            "思考模式采样推荐 temperature=1.0 top_p=0.95 top_k=20",
+        ),
     ),
-    # --- NVIDIA / 智谱旧档（来源混杂，标 estimated）-------------------------- #
+    # --- NVIDIA（build.nvidia.com / NIM）------------------------------------ #
+    # GLM-5.3 on NVIDIA：context 1,048,576；reasoning_effort **仅 low/high/max**，
+    # 默认 max——与商汤 GLM-5.2 的 7 档词表不一样，所以必须按供应商拆。
     ModelPreset(
         family="glm-5.3",
         display_name="GLM-5.3",
-        # NVIDIA 上新，官方公开页未给精确 max_tokens，上下文按同系 GLM-5.2 的 1M
-        context_window=1_000_000,
+        context_window=1_048_576,
         capabilities={
             "coding": 9.5, "reasoning": 9.0, "tool_use": 8.5, "vision": 0.0,
             "long_context": 10.0, "structured_output": 8.5, "speed": 6.5, "cost": 9.5,
         },
         input_price=1.00, output_price=4.00,
-        description="智谱旗舰（NVIDIA 上新）",
+        description="智谱旗舰（NVIDIA 上新）· NIM 口径",
         providers=("nvidia",),
-        spec_source="estimated",
+        provider="nvidia",
+        spec_source="official",
+        reasoning_efforts=("low", "high", "max"),
+        reasoning_effort_default="max",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "NVIDIA modelcard：reasoning_effort 仅 low/high/max，默认 max（不是商汤那套 7 档）",
+            "1,048,576 上下文，DSA 稀疏注意力；支持 function/tool calling",
+            "chat template 的 clear_thinking 默认 false",
+        ),
     ),
     ModelPreset(
         family="glm-5.3-flash",
@@ -404,34 +476,32 @@ _PRESETS: tuple[ModelPreset, ...] = (
         input_price=0.30, output_price=1.20,
         description="GLM-5.3 的速度杯",
         providers=("nvidia",),
+        provider="nvidia",
         spec_source="estimated",
+        supports_tools=True,
     ),
-    ModelPreset(
-        family="sensenova-6.7-flash-lite",
-        display_name="商汤 6.7 Flash Lite",
-        context_window=256_000,
-        capabilities={
-            "coding": 6.5, "reasoning": 6.5, "tool_use": 7.5, "vision": 9.0,
-            "long_context": 7.0, "structured_output": 7.0, "speed": 9.0, "cost": 10.0,
-        },
-        input_price=0.15, output_price=0.50,
-        description="商汤上一代 Flash Lite",
-        providers=("sensenova",),
-        spec_source="estimated",
-    ),
-    # NVIDIA 官方博客称 native 1M 上下文；max output 官方未写死，不填。
+    # NVIDIA 官方称 native 1M；NIM 目录实测 262,144——两者冲突，按 NIM 目录写，
+    # 用「预估」标注。支持 reasoning_effort（NIM supported_parameters 已列）。
     ModelPreset(
         family="nemotron-3-super",
         display_name="Nemotron 3 Super",
-        context_window=1_000_000,
+        context_window=262_144,
         capabilities={
             "coding": 7.0, "reasoning": 7.5, "tool_use": 7.5, "vision": 0.0,
             "long_context": 8.0, "structured_output": 7.0, "speed": 7.0, "cost": 8.0,
         },
-        input_price=0.50, output_price=1.50,
-        description="NVIDIA 免费额度兜底（官方称 native 1M 上下文）",
+        input_price=0.09, output_price=0.45,
+        description="NVIDIA 免费额度兜底（120B MoE / 12B 激活）",
         providers=("nvidia",),
+        provider="nvidia",
         spec_source="estimated",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "NIM supported_parameters 含 reasoning_effort / reasoning / structured_output / tools",
+            "上下文：官方博客称 native 1M，NIM 目录标 262,144——以实际接入端点为准",
+            "Mamba-Transformer 混合 MoE，120B 总参 / 12B 激活",
+        ),
     ),
 )
 
