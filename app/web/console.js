@@ -2025,7 +2025,7 @@ async function deleteAlias(name) {
 /* ================= 客户端接入（本机 config.toml / 公网调用） =================
  * 一个面板两种形态：
  *   - 网关在服务器上：看不到本机 ~/.codex，写 config.toml 没有意义。面板默认
- *     渲染「公网调用」——base_url、令牌取值命令、五种客户端的可复制片段；
+ *     渲染「公网调用」——base_url、令牌值、五种客户端的可复制片段；
  *     本机那段整块隐藏（不是禁用：禁用的按钮仍会让人以为点一下就能成）。
  *   - 网关在本机：保持原来的「写入 ~/.codex/config.toml」为主。
  * ==================================================================== */
@@ -2244,7 +2244,7 @@ async function openChatGptModal() {
       </div>
       <div class="modal-actions" style="margin-top:0">
         <button id="cg-btn-copyurl">📋 复制 base_url</button>
-        <button id="cg-btn-copytoken">📋 复制取值命令</button>
+        <button id="cg-btn-copytoken">📋 复制令牌值</button>
         <span class="small muted" id="cg-token-note"></span>
       </div>
 
@@ -2342,7 +2342,7 @@ async function openChatGptModal() {
   $("#cg-btn-copytoken").onclick = () => {
     const tok = cgTokenValue();
     if (!tok) { toast("网关未设置 ZKAI_API_TOKEN（.env 里没有）", "err"); return; }
-    cgCopy(`${cgTokenName()}="${tok}"`, "ZKAI_API_TOKEN 值已复制");
+    cgCopy(tok, "令牌值已复制");
   };
   $("#cg-btn-copysnip").onclick = () => cgCopy($("#cg-snippet").textContent, "配置片段已复制");
   try {
@@ -2381,7 +2381,7 @@ function cgFill(r) {
   $("#cg-pub-base").value = cgPublicUrl();
   $("#cg-pub-token").value = `${cgTokenName()}="${cgTokenValueHint()}"`;
   $("#cg-token-note").textContent = dep.api_token_set
-    ? "点「📋 复制取值命令」复制 ZKAI_API_TOKEN 的真值（网关 .env 里的），可直接粘贴给客户端。"
+    ? "点「📋 复制令牌值」复制 ZKAI_API_TOKEN 的真值（网关 .env 里的），可直接粘贴给客户端。"
     : "网关未设 ZKAI_API_TOKEN，当前不校验客户端令牌（仅适合回环监听）。";
 
   // ---- 本机区：远程部署时整块隐藏 ----
@@ -2407,20 +2407,26 @@ function cgFill(r) {
 
   // ---- 状态行 ----
   const bits = [];
-  bits.push(r.config_exists ? "config.toml：存在" : "config.toml：不存在（保存后会新建）");
-  bits.push(r.desired ? "期望配置：已保存" : "期望配置：未保存");
-  const drift = (r.drift || []).length;
-  bits.push(drift ? `本机与期望配置有 <strong style="color:var(--err)">${drift}</strong> 处不一致`
-                  : "本机与期望配置一致");
-  if (r.config_parse_error) {
-    bits.push(`<span style="color:var(--err)">config.toml 解析失败：${esc(r.config_parse_error)}</span>`);
-  }
-  const auth = r.auth || {};
-  if (auth.exists) {
-    bits.push(auth.has_openai_key ? "auth.json：有 OpenAI 登录态" : "auth.json：存在（无 OpenAI Key）");
+  if (dep.is_remote) {
+    // 远程部署：本机 config.toml 没有意义，不显示路径和 drift
+    bits.push("远程部署：客户端配置需在各台电脑上单独写入");
+    bits.push(r.desired ? "期望配置：已保存" : "期望配置：未保存");
+  } else {
+    bits.push(r.config_exists ? "config.toml：存在" : "config.toml：不存在（保存后会新建）");
+    bits.push(r.desired ? "期望配置：已保存" : "期望配置：未保存");
+    const drift = (r.drift || []).length;
+    bits.push(drift ? `本机与期望配置有 <strong style="color:var(--err)">${drift}</strong> 处不一致`
+                    : "本机与期望配置一致");
+    if (r.config_parse_error) {
+      bits.push(`<span style="color:var(--err)">config.toml 解析失败：${esc(r.config_parse_error)}</span>`);
+    }
+    const auth = r.auth || {};
+    if (auth.exists) {
+      bits.push(auth.has_openai_key ? "auth.json：有 OpenAI 登录态" : "auth.json：存在（无 OpenAI Key）");
+    }
+    $("#cg-path").textContent = dep.codex_config_path || r.path || "";
   }
   $("#cg-status").innerHTML = bits.join(" · ");
-  $("#cg-path").textContent = dep.codex_config_path || r.path || "";
 
   $("#cg-btn-syncenv").style.display =
     (dep.is_remote || r.env_key_visible === false) ? "" : "none";
