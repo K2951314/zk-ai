@@ -1,8 +1,19 @@
-# 服务器部署（ubuntu@120.53.28.29）
+# 服务器部署（地址会变，只改一处变量）
 
 把 ZK-AI 的「网关 + 积分消耗器 + 公网入口」稳定跑在腾讯云轻量（2C2G / Ubuntu 24.04）上。
 本机（Windows）与服务器**同时**运行，互不影响：本机账本在 `data/`，服务器账本在
 `/var/lib/zkai/burner/`，两边各自独立记账。
+
+**服务器地址经常变动，全文只用变量，不写死 IP。** 下面所有命令先设：
+
+```bash
+# 二选一：SSH 别名（推荐，换机只改 ~/.ssh/config）或直接写当前公网 IP
+export SERVER=tandian211          # 等价于 ubuntu@<当前公网>
+# export SERVER=ubuntu@<新公网IP>  # 换服务器时改成新地址，其它命令不用动
+```
+
+现役机器的 SSH 别名与密钥见 `~/.ssh/config`（`tandian211` → key `migrate_211`）。
+旧地址（如 120.53.28.29）已停用，文档里不再出现具体 IP。
 
 ## 现状一览（部署后实测）
 
@@ -21,16 +32,21 @@
 # 本机：改完提交 → 推
 git push origin main
 
-# 服务器（/opt/zkai 是 git 检出）
-sudo git -c safe.directory=/opt/zkai -C /opt/zkai fetch origin main
-sudo git -c safe.directory=/opt/zkai -C /opt/zkai reset --hard origin/main
-sudo git -c safe.directory=/opt/zkai -C /opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data
-sudo systemctl restart zkai
+# 服务器（/opt/zkai 是 git 检出）——地址用 $SERVER，换机不用改命令
+ssh $SERVER "sudo git -c safe.directory=/opt/zkai -C /opt/zkai fetch origin main"
+ssh $SERVER "sudo git -c safe.directory=/opt/zkai -C /opt/zkai reset --hard origin/main"
+ssh $SERVER "sudo git -c safe.directory=/opt/zkai -C /opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data"
+ssh $SERVER "sudo systemctl restart zkai"
 ```
+
+⚠️ 服务器在国内，`git fetch origin` 直连 GitHub 常超时。拉不动时改走
+**bundle**（本机打包 → `ssh $SERVER "cat > /tmp/zkai.bundle" < 文件` 传上去 →
+服务器 `git fetch /tmp/zkai.bundle HEAD:refs/remotes/bundle/main` +
+`reset --hard refs/remotes/bundle/main`）。
 
 `reset --hard` 只动被跟踪的文件，`config/*.yaml` / `.env` / `data/` 都在 `.gitignore`
 里 —— **服务器上手工调过的配置不会被覆盖**。需要同步这些不受控文件时单独传
-（`ssh host "cat > /tmp/x" < 文件`，scp 在本机不可用）。
+（`ssh $SERVER "cat > /tmp/x" < 文件`，scp 在本机不可用）。
 
 ⚠️ 这里**曾经**有一个 `sync-server.sh` 一键脚本，2026-10-20 已删除：它会
 `install` 强行覆盖 `/opt/zkai/config/burner.yaml`、`/etc/caddy/Caddyfile`、
@@ -41,7 +57,7 @@ sudo systemctl restart zkai
 ## 公网怎么调
 
 ```bash
-curl https://120.53.28.29/zkai/v1/chat/completions \
+curl "https://$SERVER/zkai/v1/chat/completions" \
   -H "Authorization: Bearer <ZKAI_API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"model":"zk-auto","messages":[{"role":"user","content":"你好"}],"max_tokens":256}'
@@ -50,7 +66,7 @@ curl https://120.53.28.29/zkai/v1/chat/completions \
 **控制台（浏览器打开）**：
 
 ```
-https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>
+https://<服务器地址>/ui/?token=<ZKAI_ADMIN_TOKEN>
 ```
 
 - `/ui` 控制台总览，`/ui/report` 体检报告，`/ui/agent` Agent 任务台。
@@ -63,7 +79,7 @@ https://120.53.28.29/ui/?token=<ZKAI_ADMIN_TOKEN>
 
 
 
-- base_url 填 `https://120.53.28.29/zkai/v1`（OpenAI SDK 用 `base_url`，路径别带 `/zkai/v1` 之外的前缀）。
+- base_url 填 `https://<服务器地址>/zkai/v1`（OpenAI SDK 用 `base_url`，路径别带 `/zkai/v1` 之外的前缀）。
 - PowerShell：`-TimeoutSec 420`，网关整条链预算 300s，客户端必须比它大。
 - token 就是 `/etc/zkai.env` 的 `ZKAI_API_TOKEN`（与本机 `.env` 同一份值）。
 
@@ -155,8 +171,8 @@ anchors 是按账号逐个填的）**不复制**到服务器。服务器从零�
 改 `/opt/zkai/config/burner.yaml` 就行，**支持热加载**（下个汇总周期生效），不用重启：
 
 ```bash
-ssh ubuntu@120.53.28.29 'sudo -n true'
-ssh ubuntu@120.53.28.29 "grep -E '^(concurrency|per_account_start|per_account_max):' /opt/zkai/config/burner.yaml"
+ssh $SERVER 'sudo -n true'
+ssh $SERVER "grep -E '^(concurrency|per_account_start|per_account_max):' /opt/zkai/config/burner.yaml"
 ```
 
 ⚠️ `burn_sensenova.py` 的 `parse_args()` 里 `load_config()` **不接** `--config-file`，
@@ -170,19 +186,19 @@ ssh ubuntu@120.53.28.29 "grep -E '^(concurrency|per_account_start|per_account_ma
 
 ```bash
 # 状态一条龙
-ssh ubuntu@120.53.28.29 'systemctl is-active zkai zkai-burner caddy sq tandian'
+ssh $SERVER 'systemctl is-active zkai zkai-burner caddy sq tandian'
 
 # 网关健康 / provider / credential
-ssh ubuntu@120.53.28.29 'curl -sS http://127.0.0.1:8318/health'
+ssh $SERVER 'curl -sS http://127.0.0.1:8318/health'
 
 # burner 实时
-ssh ubuntu@120.53.28.29 'journalctl -u zkai-burner -f'
+ssh $SERVER 'journalctl -u zkai-burner -f'
 
 # burner 摘要（每 60s 一行：周期积分、成功率、账号停靠数）
-ssh ubuntu@120.53.28.29 'journalctl -u zkai-burner --no-pager | grep 周期 | tail -3'
+ssh $SERVER 'journalctl -u zkai-burner --no-pager | grep 周期 | tail -3'
 
 # 资源占用（确认没把整机拖垮）
-ssh ubuntu@120.53.28.29 'systemctl show zkai-burner -p MemoryCurrent -p CPUUsageNSec; free -m'
+ssh $SERVER 'systemctl show zkai-burner -p MemoryCurrent -p CPUUsageNSec; free -m'
 ```
 
 ## 换机 / 迁移边界

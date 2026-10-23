@@ -622,7 +622,7 @@ def validate(desired: ChatGptConfig, settings: Any = None) -> list[str]:
     if not _PROVIDER_NAME_RE.match(desired.model_provider or ""):
         errors.append("model_provider 只能是字母/数字/下划线/连字符（config.toml 表名）")
     if not desired.base_url or not _URL_RE.match(desired.base_url):
-        errors.append("base_url 要以 http(s):// 开头，例如 https://120.53.28.29/zkai/v1")
+        errors.append("base_url 要以 http(s):// 开头，例如 https://<服务器地址>/zkai/v1")
     if desired.wire_api not in WIRE_APIS:
         errors.append(f"wire_api 只能是 {WIRE_APIS} 之一")
     if not _ENV_NAME_RE.match(desired.env_key or ""):

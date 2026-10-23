@@ -321,7 +321,7 @@ ZK-AI 提供**原生 Anthropic Messages 端点** `POST /v1/messages`
 
 ```bash
 # .env 或 config/config.yaml 的 deploy 段
-ZKAI_PUBLIC_BASE_URL=https://120.53.28.29/zkai
+ZKAI_PUBLIC_BASE_URL=https://<服务器地址>/zkai
 ```
 
 留空 = 本机部署，回落到 `http://<ZKAI_HOST>:<ZKAI_PORT>`；配了 = 远程，控制台
@@ -332,7 +332,7 @@ config.toml」整块隐藏**（那是服务器的文件系统，不是打开控�
 |---|---|---|
 | 本机回环 | `http://127.0.0.1:8317/v1` | 网关与客户端同一台机器；可写 `~/.codex/config.toml` |
 | 服务器回环 | `http://127.0.0.1:8318/v1` | SSH 进服务器后本地调用（`sq` / `tandian` 走这条，不过 Caddy、不耗公网带宽） |
-| 公网 | `https://120.53.28.29/zkai/v1` | 任何地方；必须带 `Bearer <ZKAI_API_TOKEN>` |
+| 公网 | `https://<服务器地址>/zkai/v1` | 任何地方；必须带 `Bearer <ZKAI_API_TOKEN>` |
 
 要点：
 
