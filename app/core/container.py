@@ -43,6 +43,10 @@ logger = get_logger("container")
 #: 所以这个值只决定「最坏多久落一次盘」，双重点节流无害。
 _RATE_LIMIT_FLUSH_SECONDS = 30.0
 
+#: 凭据运行时状态（计数器/冷却/禁用原因）镜像周期。这是取证证据不是热路径，
+#: 60s 足够；池子只有几十个对象，一次全量写对 SQLite 毫无压力。
+_CREDENTIAL_MIRROR_SECONDS = 60.0
+
 
 @dataclass
 class Container:
@@ -71,6 +75,8 @@ class Container:
     config_watcher: ConfigWatcher | None = None
     #: Set while the rate-limit flush loop is running.
     _flush_task: asyncio.Task[None] | None = None
+    #: Set while the credential runtime mirror loop is running.
+    _cred_mirror_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ #
     async def startup(self) -> None:
@@ -140,6 +146,13 @@ class Container:
         self.ready = False
         await self.stop_config_watch()
         await self.stop_rate_limit_flush()
+        await self.stop_credential_mirror()
+        # 关闭前最后镜像一次凭据状态：断路器刚禁用的 Key、正在冷却的 Key，
+        # 不等下一个 60s 周期就落盘。
+        try:
+            await self.config_repository.mirror_credential_runtime(self.pool.all())
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("关闭前镜像凭据运行时状态失败")
         self.rate_limiter.flush(force=True)
         await self.health_service.stop()
         await self.router.aclose()
@@ -190,6 +203,49 @@ class Container:
             await task
 
     # ------------------------------------------------------------------ #
+    # 凭据运行时状态的周期镜像
+    # ------------------------------------------------------------------ #
+    def start_credential_mirror(self) -> None:
+        """Persist live credential counters on a timer.
+
+        Why this exists (2026-10-23 对抗式审查 #7): ``mirror_credential_runtime``
+        existed with zero callers — a credential that was rate-limited into a
+        cooldown, or disabled by the circuit breaker, came back **healthy** after
+        every restart. The operator saw "这把 Key 昨晚被限流了" in the console,
+        restarted, and the evidence was gone. Counters are in-memory truth; the
+        DB row is the only thing that survives a process that (per the rate-limit
+        flush comment above) essentially never shuts down gracefully.
+
+        Same shape as the rate-limit flush: self-limiting, no-op when nothing
+        changed is NOT guaranteed here, so the interval is deliberately coarse
+        (60s) — this is forensic evidence, not a hot path.
+        """
+        if self._cred_mirror_task is not None:
+            return
+        self._cred_mirror_task = asyncio.create_task(
+            self._credential_mirror_loop(), name="zkai-credential-mirror"
+        )
+        logger.info("凭据运行时状态周期镜像已启动：每 %.0fs", _CREDENTIAL_MIRROR_SECONDS)
+
+    async def _credential_mirror_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_CREDENTIAL_MIRROR_SECONDS)
+            try:
+                await self.config_repository.mirror_credential_runtime(self.pool.all())
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("凭据运行时状态镜像失败（下个周期再试）")
+
+    async def stop_credential_mirror(self) -> None:
+        task, self._cred_mirror_task = self._cred_mirror_task, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    # ------------------------------------------------------------------ #
     # Configuration reload (shared by the console endpoint and the file watch)
     # ------------------------------------------------------------------ #
     async def reload_config(self) -> dict[str, Any]:
@@ -207,7 +263,29 @@ class Container:
         """
         from app.routing.aliases import AliasRegistry
 
-        config = load_app_config(self.settings)
+        # YAML 解析 / router 重建 / pool 注册都是阻塞 CPU+IO——放在事件循环里
+        # 会让重载瞬间（配置文件越大越久）全部在途请求 Stall。丢进线程跑，
+        # 事件循环继续服务请求。（2026-10-23 对抗式审查 #6）
+        def _rebuild() -> Any:
+            config = load_app_config(self.settings)
+            self.router.reload(config, alias_registry=AliasRegistry(config.aliases.values()))
+            # 冷却策略（cooldown: 段）也在热更新范围内。2026-10-13 实测事故：
+            # 运营者把 throughput 从 account 改成 credential，日志里却仍出现
+            # "429 (throughput) has account-wide cooldown -> failing over instead of
+            # rotating keys"——改前改后行为一模一样。根因是 CooldownPolicy 只在
+            # build_container 里构造过一次，reload 重建了 router/别名/凭据却没有
+            # 重建它，于是「改完 YAML 自动生效」对这一个文件段是句空话（必须整进程
+            # 重启才生效）。后果正是运营者报的那个：商汤一把 Key 429 就停靠同账号
+            # 兄弟 Key 并直接故障转移，其余 8 把健康 Key 一次都没被试过。
+            # 用同一个 from_mapping，与 build_container 的构造路径完全一致。
+            self.pool.policy = CooldownPolicy.from_mapping(config.raw.get("cooldown"))
+            self.pool.tracker.policy = self.pool.policy
+            for provider in config.providers.values():
+                self.pool.register_provider(provider)
+            pruned = self.pool.reconcile(config.providers)
+            return config, pruned
+
+        config, pruned = await asyncio.to_thread(_rebuild)
 
         # Re-apply quota rules that could not reach providers.yaml (file is
         # otherwise authoritative: models/aliases edits were written back to it).
@@ -218,30 +296,23 @@ class Container:
             await self.config_repository.provider_rate_limit_overrides(),
         )
 
-        self.router.reload(config, alias_registry=AliasRegistry(config.aliases.values()))
         self.config = config
         self.model_service.config = config
         self.health_service.config = config
         self.usage_service.config = config
         self.rate_limiter.configure(config.providers)
-        # 冷却策略（cooldown: 段）也在热更新范围内。2026-10-13 实测事故：
-        # 运营者把 throughput 从 account 改成 credential，日志里却仍出现
-        # "429 (throughput) has account-wide cooldown -> failing over instead of
-        # rotating keys"——改前改后行为一模一样。根因是 CooldownPolicy 只在
-        # build_container 里构造过一次，reload 重建了 router/别名/凭据却没有
-        # 重建它，于是「改完 YAML 自动生效」对这一个文件段是句空话（必须整进程
-        # 重启才生效）。后果正是运营者报的那个：商汤一把 Key 429 就停靠同账号
-        # 兄弟 Key 并直接故障转移，其余 8 把健康 Key 一次都没被试过。
-        # 用同一个 from_mapping，与 build_container 的构造路径完全一致。
-        self.pool.policy = CooldownPolicy.from_mapping(config.raw.get("cooldown"))
-        self.pool.tracker.policy = self.pool.policy
-        for provider in config.providers.values():
-            self.pool.register_provider(provider)
-        # The pool is in-memory state: dropping a credential/provider from YAML
-        # and reloading must remove it here too, not just from the DB mirror.
-        pruned = self.pool.reconcile(config.providers)
         if pruned:
             logger.info("config reload pruned %d stale credential(s) from the pool", pruned)
+
+        # 重载后重新镜像 DB：YAML 里新增/改名的供应商、凭据、模型（市场加模型、
+        # 手改文件）此前只进内存，DB 镜像要等下次重启才更新——控制台列表和统计
+        # 一直显示旧数据。（2026-10-23 对抗式审查 #5）
+        # 失败只记日志不中断重载：内存配置已经生效，DB 镜像下个周期/重启会补上。
+        try:
+            await self.config_repository.sync_config(config)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("config reload: failed to re-mirror configuration into the database")
+
         # The watcher's baseline must move with the config it just loaded, or the
         # next poll would see the same change again and reload forever.
         self.refresh_config_watch()

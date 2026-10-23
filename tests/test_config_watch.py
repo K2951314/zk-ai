@@ -459,3 +459,56 @@ async def test_a_cooldown_edit_changes_the_failover_decision(tmp_path: Path) -> 
         assert rewritten2.switch_provider is False
     finally:
         await container.shutdown()
+
+
+async def test_reload_config_re_mirrors_the_database(tmp_path: Path) -> None:
+    """热重载后 DB 镜像必须跟上：YAML 新增/删除的条目不能等重启才可见。
+
+    2026-10-23 对抗式审查 #5：reload_config 原来只重建内存，DB 镜像停在
+    启动时的快照——控制台列表和统计对「改完 YAML 自动生效」显示旧数据。
+    """
+    container = await _container_in(tmp_path)
+    try:
+        repo = container.config_repository
+        # 这个 harness 不跑 startup()，DB 初始为空——正好隔离验证：
+        # reload_config 自己就要把镜像补齐（不等重启）。
+        assert {row["id"] for row in await repo.list_models()} == set()
+
+        (tmp_path / "models.yaml").write_text(_MODELS_B, encoding="utf-8")
+        await container.reload_config()
+
+        after = {row["id"] for row in await repo.list_models()}
+        assert after == {"m2"}, "重载后 DB 镜像要换成新配置"
+        assert container.router.aliases.names() == ["zk-two"]
+    finally:
+        await container.shutdown()
+
+
+async def test_credential_mirror_loop_persists_runtime_counters(tmp_path: Path) -> None:
+    """凭据运行时计数器要能周期落盘——否则重启即失忆（审查 #7）。
+
+    不真等 60s：直接驱动一次镜像调用 + 验证 start/stop 生命周期。
+    """
+    container = await _container_in(tmp_path)
+    try:
+        repo = container.config_repository
+        runtime = container.pool.get("p1-01")
+        assert runtime is not None
+        container.pool.report_success("p1-01")  # 计数器 +1（pool 是唯一写入方）
+
+        # 周期循环的启动/停止生命周期
+        container.start_credential_mirror()
+        assert container._cred_mirror_task is not None
+        container.start_credential_mirror()  # 幂等
+        assert container._cred_mirror_task is not None
+
+        # 先同步镜像行（这个 harness 不跑 startup），再驱动一次（不等 60s sleep）
+        await repo.sync_config(container.config)
+        await repo.mirror_credential_runtime(container.pool.all())
+        rows = {r["id"]: r for r in await repo.list_credentials()}
+        assert rows["p1-01"]["success_count"] >= 1, "计数器要落库"
+
+        await container.stop_credential_mirror()
+        assert container._cred_mirror_task is None
+    finally:
+        await container.shutdown()

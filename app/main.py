@@ -97,6 +97,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # 限流账本以前只在优雅关闭时落盘，而这个网关从未优雅关闭过——
         # 于是 per-account 的 token 配额守卫已经空转了好几天而没人发现。
         container.start_rate_limit_flush()
+        # 凭据的失败/冷却/禁用计数器同理：不周期镜像的话，重启即失忆，
+        # 「昨晚被限流的 Key」重启后看起来完好无损（2026-10-23 审查 #7）。
+        container.start_credential_mirror()
         try:
             yield
         finally:

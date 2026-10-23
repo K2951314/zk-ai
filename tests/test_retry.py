@@ -337,7 +337,12 @@ async def test_max_deployments_limits_failover_depth(provider_config, fake_adapt
 
 
 async def test_cancellation_is_recorded_and_re_raised(provider_config, fake_adapter) -> None:
-    """Client disconnect mid-attempt must not be swallowed."""
+    """Client disconnect mid-attempt must not be swallowed.
+
+    同步方式从「睡 0.05s 赌机器够快」改成**等适配器真的被进入**（FakeAdapter
+    在延迟前记录调用）——满载全量套件下旧写法会让 0.05s 睡过头，5s 延迟先
+    跑完，cancel 落到已完成的任务上变成 no-op，测试假红（2026-10-24 实测）。
+    """
     harness = await build_harness(make_config(providers=[provider_config]),
                                   adapters={"fake": fake_adapter})
     try:
@@ -346,7 +351,12 @@ async def test_cancellation_is_recorded_and_re_raised(provider_config, fake_adap
         request = ChatCompletionRequest(model="fake-model", messages=[{"role": "user", "content": "x"}])
         fake_adapter.queue(Behavior(text="never returned", delay=5.0))
         task = asyncio.create_task(harness.service.chat(request, request_id="req-cancel"))
-        await asyncio.sleep(0.05)
+        # 等到适配器被真正进入（调用已记录）再取消——与机器快慢无关
+        for _ in range(500):
+            if harness.all_calls():
+                break
+            await asyncio.sleep(0.01)
+        assert harness.all_calls(), "适配器一直没被进入，测试前提不成立"
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
