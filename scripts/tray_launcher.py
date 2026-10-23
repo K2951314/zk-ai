@@ -102,6 +102,8 @@ _SILENT_AFTER = 90.0
 RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_restart.request"
 STOP_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_stop.request"
 START_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_start.request"
+#: 网关一键重启（控制台 /admin/gateway/restart 写，托盘心跳接手）。
+GATEWAY_RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "gateway_restart.request"
 _ALIVE_MARKER = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_alive"
 _HEARTBEAT_EVERY = 3.0
 
@@ -404,6 +406,18 @@ class TrayLauncher:
         except OSError:
             return
 
+    def _consume_gateway_restart(self) -> None:
+        """控制台「一键重启网关」：读请求文件、删掉、重启子进程。"""
+        if self._mode != "gateway":
+            return
+        try:
+            if GATEWAY_RESTART_REQUEST.exists():
+                GATEWAY_RESTART_REQUEST.unlink()
+                logger.info("gateway restart requested by the console")
+                self.restart_child()
+        except OSError:
+            pass
+
     def _heartbeat_loop(self) -> None:
         while self._running:
             time.sleep(_HEARTBEAT_EVERY)
@@ -417,6 +431,8 @@ class TrayLauncher:
                                 time.strftime("%Y-%m-%d %H:%M:%S") + "\n",
                                 encoding="utf-8",
                             )
+                else:
+                    self._consume_gateway_restart()
                 self._refresh()
             except Exception:
                 logger.exception("tray heartbeat failed for %s", self._mode)

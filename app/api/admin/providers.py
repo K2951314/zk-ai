@@ -672,6 +672,36 @@ async def update_credential(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
+    # 改名（id / env_var）只允许在禁用态操作——防误改在用中的 Key。
+    # 判据是**运行时状态**（pool），不是 YAML 的 enabled（那只是配置开关）。
+    runtime = container.pool.get(credential_id)
+    is_disabled = (runtime is not None and not runtime.enabled) or not current.enabled
+    renaming = bool(payload.new_id) or (
+        payload.env_var is not None and payload.env_var != (current.env_var or "")
+    )
+    if renaming and not is_disabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": {
+                    "message": "只能改名已禁用的 Key——先禁用再改名，避免误操作正在服务的凭据",
+                    "type": "credential_in_use",
+                }
+            },
+        )
+    if payload.new_id and payload.new_id != credential_id and (
+        looks_like_secret(payload.new_id)
+        or any(c.id == payload.new_id for c in provider.credentials)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "message": "新 id 不合法（像密钥，或与现有凭据重复）",
+                    "type": "invalid_credential",
+                }
+            },
+        )
     old_name = current.env_var or (current.env.strip("${} ") if current.env else None)
     new_name = payload.env_var or old_name
     env_synced: str | None = None
@@ -694,6 +724,8 @@ async def update_credential(
         os.environ[new_name] = payload.value
         env_synced = f".env ({'updated' if replaced else 'appended'})"
     fields: dict[str, Any] = {}
+    if payload.new_id and payload.new_id != credential_id:
+        fields["id"] = payload.new_id
     if payload.env_var is not None:
         fields["env"] = None  # 统一走 env_var，清掉历史遗留的 env 写法
         fields["env_var"] = payload.env_var
@@ -727,6 +759,8 @@ async def update_credential(
     for c in provider.credentials:
         if c.id != credential_id:
             continue
+        if payload.new_id and payload.new_id != credential_id:
+            c.id = payload.new_id
         if payload.env_var is not None:
             c.env = None
             c.env_var = payload.env_var
@@ -738,7 +772,7 @@ async def update_credential(
     return {
         "object": "credential",
         "provider_id": provider_id,
-        "credential_id": credential_id,
+        "credential_id": payload.new_id or credential_id,
         "synced": synced,
         "env_synced": env_synced,
     }
@@ -748,7 +782,11 @@ async def update_credential(
 async def delete_credential(
     provider_id: str, credential_id: str, container: ContainerDep
 ) -> dict[str, Any]:
-    """Remove a credential from a provider's pool at runtime; persists across restarts."""
+    """Remove a credential from a provider's pool at runtime; persists across restarts.
+
+    **只允许删除已禁用的 Key**——在用中的删掉等于线上少一条故障转移路，
+    容易是误操作。先禁用再删，两步走。
+    """
     provider = container.config.providers.get(provider_id)
     if provider is None:
         raise HTTPException(
@@ -761,6 +799,20 @@ async def delete_credential(
             detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
     doomed = next((c for c in provider.credentials if c.id == credential_id), None)
+    runtime = container.pool.get(credential_id)
+    is_disabled = (runtime is not None and not runtime.enabled) or (
+        doomed is not None and not doomed.enabled
+    )
+    if doomed is not None and not is_disabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": {
+                    "message": "只能删除已禁用的 Key——先禁用再删除，避免误删正在服务的凭据",
+                    "type": "credential_in_use",
+                }
+            },
+        )
     env_name = (
         doomed.env_var or (doomed.env.strip("${} ") if doomed.env else None)
         if doomed is not None

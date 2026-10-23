@@ -16,6 +16,7 @@ from app.api.admin._common import (
     _delete_file_entry,
     _write_alias_file,
     _write_model_file,
+    logger,
     router,
 )
 from app.api.deps import ContainerDep
@@ -271,3 +272,18 @@ async def reload_config(container: ContainerDep) -> dict[str, Any]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"message": str(exc), "type": "config_error"}},
         ) from exc
+
+
+@router.post("/gateway/restart", summary="一键重启网关")
+async def restart_gateway(container: ContainerDep) -> dict[str, Any]:
+    """按部署形态重启网关：systemd（服务器）/ 托盘（本机）/ 手动兜底。
+
+    控制台一键搞定，不用再 SSH 到服务器敲 systemctl。本机网关不能重启
+    自己，写请求文件由托盘心跳接手（约 3 秒）。
+    """
+    from app.services import gateway_restart
+
+    data_dir = container.settings.resolved_data_dir
+    result = gateway_restart.restart_gateway(data_dir)
+    logger.info("gateway restart requested via console: %s", result)
+    return {"object": "gateway_restart", **result}

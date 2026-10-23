@@ -533,6 +533,7 @@ async function loadOverview() {
     <div class="toolbar">
       <button class="primary" id="ov-health">▶ 立即健康检查</button>
       <button id="ov-reload">↻ 重载配置</button>
+      <button id="ov-restart">🔄 重启网关</button>
       <button id="ov-clear">🧹 清空全部冷却</button>
     </div>
     ${attentionPanel(providers.data, health.config?.warnings || [], health.config)}
@@ -588,6 +589,15 @@ async function loadOverview() {
   $("#ov-reload").onclick = async () => {
     const r = await api("/admin/config/reload", { method: "POST" });
     toast(`配置已热重载：${r.models} 模型 / ${r.providers.length} 供应商`, "ok"); refresh();
+  };
+  $("#ov-restart").onclick = async () => {
+    if (!confirm("确定重启网关？（正在跑的请求可能中断，约 2–5 秒恢复）")) return;
+    const r = await api("/admin/gateway/restart", { method: "POST" });
+    if (r.error) { toast(r.error.message || "重启请求失败", "err"); return; }
+    toast(r.message || "已请求重启网关", r.ok ? "ok" : "err");
+    if (r.command) toast(`手动命令：${r.command}`, "err");
+    // 网关重启后接口会短暂 502，延迟刷新
+    setTimeout(() => refresh(), 4000);
   };
   $("#ov-clear").onclick = async () => {
     const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
@@ -716,6 +726,11 @@ async function loadPool() {
     else actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">启用</button>`);
     if (c.status === "cooldown" || c.status === "unhealthy")
       actions.push(`<button class="mini" data-act="enable" data-id="${esc(c.id)}">解除冷却</button>`);
+    // 改名 / 删除只对已禁用的 Key 开放——防误操作正在服务的凭据
+    if (c.status === "disabled") {
+      actions.push(`<button class="mini" data-rename-cred="${esc(c.id)}" data-pid="${esc(c.provider_id)}">改名</button>`);
+      actions.push(`<button class="mini danger" data-del-cred="${esc(c.id)}" data-pid="${esc(c.provider_id)}">删除</button>`);
+    }
     return `<tr><td class="acts"><span class="cell-id"><b>${esc(c.id)}</b>${pin}</span></td>
       <td class="cell-sub">${c.tags.map(esc).join(" ")}</td>
       <td>${esc(c.provider_id)}</td>
@@ -772,6 +787,27 @@ async function loadPool() {
     btn.onclick = async () => {
       await api(`/admin/credentials/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.act}`, { method: "POST" });
       toast(`${btn.dataset.id} 已${btn.dataset.act === "enable" ? "启用" : "禁用"}`, "ok");
+      loadPool();
+    });
+  document.querySelectorAll("#view-pool button[data-del-cred]").forEach(btn =>
+    btn.onclick = async () => {
+      const id = btn.dataset.delCred, pid = btn.dataset.pid;
+      if (!confirm(`确定删除 Key ${id}？（仅限已禁用；会从 .env 清掉对应变量）`)) return;
+      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/credentials/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (r.error) { toast(r.error.message || "删除失败", "err"); return; }
+      toast(`Key ${id} 已删除`, "ok");
+      loadPool();
+    });
+  document.querySelectorAll("#view-pool button[data-rename-cred]").forEach(btn =>
+    btn.onclick = async () => {
+      const id = btn.dataset.renameCred, pid = btn.dataset.pid;
+      const next = prompt(`把 Key「${id}」改名为（仅限已禁用）：`, id);
+      if (!next || next.trim() === "" || next.trim() === id) return;
+      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/credentials/${encodeURIComponent(id)}`, {
+        method: "PUT", json: { new_id: next.trim() },
+      });
+      if (r.error) { toast(r.error.message || "改名失败", "err"); return; }
+      toast(`Key 已改名为 ${next.trim()}`, "ok");
       loadPool();
     });
 }
@@ -1973,9 +2009,9 @@ function cgTokenValueHint() {
 }
 
 function cgTokenValue() {
-  // 当前会话的管理令牌就是 ZKAI_API_TOKEN 同值——登录时运营者已输入过，
-  // 这里直接复用，不用去服务器 .env 里读。
-  return state.token || "";
+  // 取的是 ZKAI_API_TOKEN（网关 api_token），不是管理令牌——两者可能不同
+  // （ZKAI_ADMIN_TOKEN 可另设）。admin 已鉴权，接口把真值下发。
+  return (cgState && cgState.gateway && cgState.gateway.api_token) || "";
 }
 
 function cgModel() {
@@ -2255,8 +2291,8 @@ async function openChatGptModal() {
   $("#cg-btn-copyurl").onclick = () => cgCopy(cgPublicUrl(), "base_url 已复制");
   $("#cg-btn-copytoken").onclick = () => {
     const tok = cgTokenValue();
-    if (!tok) { toast("当前会话没有管理令牌——先点右上角 🔑 登录", "err"); return; }
-    cgCopy(`${cgTokenName()}="${tok}"`, "令牌已复制（当前会话值）");
+    if (!tok) { toast("网关未设置 ZKAI_API_TOKEN（.env 里没有）", "err"); return; }
+    cgCopy(`${cgTokenName()}="${tok}"`, "ZKAI_API_TOKEN 值已复制");
   };
   $("#cg-btn-copysnip").onclick = () => cgCopy($("#cg-snippet").textContent, "配置片段已复制");
   try {
@@ -2295,7 +2331,7 @@ function cgFill(r) {
   $("#cg-pub-base").value = cgPublicUrl();
   $("#cg-pub-token").value = `${cgTokenName()}="${cgTokenValueHint()}"`;
   $("#cg-token-note").textContent = dep.api_token_set
-    ? "网关已设 ZKAI_API_TOKEN。点「📋 复制取值命令」复制的是当前会话的管理令牌（同值），可直接粘贴给客户端。"
+    ? "点「📋 复制取值命令」复制 ZKAI_API_TOKEN 的真值（网关 .env 里的），可直接粘贴给客户端。"
     : "网关未设 ZKAI_API_TOKEN，当前不校验客户端令牌（仅适合回环监听）。";
 
   // ---- 本机区：远程部署时整块隐藏 ----

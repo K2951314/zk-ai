@@ -144,6 +144,9 @@ async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
             "port": container.settings.port,
             "host": container.settings.host,
             "api_token_set": bool(gateway_token),
+            # 「复制取值命令」要取的是 ZKAI_API_TOKEN 的真值，不是管理令牌——
+            # 两者可能不同（ZKAI_ADMIN_TOKEN 可另设）。admin 已鉴权，可下发。
+            "api_token": gateway_token or "",
         },
         # 部署形态：远程部署时写本机 config.toml 没有意义（那是服务器的文件
         # 系统，不是打开控制台那台电脑的），面板据此只渲染公网调用那段。

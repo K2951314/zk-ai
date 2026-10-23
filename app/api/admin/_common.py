@@ -189,6 +189,8 @@ class UpdateCredentialRequest(BaseModel):
     value: str | None = None
     #: Rename the env var holding the key (old name cleaned up when unused).
     env_var: str | None = None
+    #: 改凭据 id（仅在凭据处于 disabled 状态时允许）。
+    new_id: str | None = None
     priority: int | None = None
     enabled: bool | None = None
 
