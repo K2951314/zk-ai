@@ -83,6 +83,7 @@ class ModelService:
             "description": model.description,
             "context_window": model.context_window,
             "capabilities": model.capabilities.as_dict(),
+            "strategy": model.strategy,
             "deployments": [
                 {
                     "id": deployment.id,

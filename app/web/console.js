@@ -606,6 +606,12 @@ async function loadOverview() {
 }
 function byCount(map, k) { return (map && map[k]) ?? 0; }
 function fmtK(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : num(n); }
+
+const STRATEGY_LABEL = {
+  capability: "能力优先", priority: "优先级", speed: "速度优先",
+  cost: "成本优先", round_robin: "轮询", weighted: "加权随机",
+};
+const strategyLabel = s => STRATEGY_LABEL[s] || s || "默认";
 function fmtTokens(n) { n = Number(n) || 0;
   return n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : num(n); }
 const CNY_RATE = 7.2;   // USD→CNY 展示换算，牌价以 USD 存储，这里只是给人看的近似
@@ -1369,7 +1375,7 @@ async function loadModels() {
   const aliasRows = Object.entries(al.data || {}).map(([name, a]) => `
     <tr><td class="acts"><div class="row-flex"><button class="mini" data-edit-alias="${esc(name)}" title="编辑别名 ${esc(name)}">编辑</button><button class="mini danger" data-del-alias="${esc(name)}" title="删除别名 ${esc(name)}">删除</button></div></td>
     <td class="name"><b>${esc(name)}</b>${a.description ? `<span class="sub">${esc(a.description)}</span>` : ""}</td>
-    <td>${esc(a.strategy)}</td>
+    <td>${esc(strategyLabel(a.strategy))}</td>
     <td>${(a.targets || []).map(esc).join(" → ")}</td>
     <td class="small">${a.front_model
         ? `<span class="chip" title="接口模型：永远排第一；关闭后越过首位按正常权重排序">📌 ${esc(a.front_model)}</span>`
@@ -1417,7 +1423,7 @@ async function loadModels() {
       <td>${c.eligible ? pill("healthy") : pill("disabled")}</td></tr>`).join("");
     $("#pv-out").innerHTML = `
       <div class="small muted" style="margin-bottom:6px">${esc(r.reason || "")}
-      ${r.alias ? ` · 别名 ${esc(r.alias)}` : ""} · 策略 ${esc(r.strategy || "-")}</div>
+      ${r.alias ? ` · 别名 ${esc(r.alias)}` : ""} · 策略 ${esc(strategyLabel(r.strategy))}</div>
       <div class="tablewrap"><table><thead><tr><th>#</th><th>部署</th><th>供应商</th><th>上游模型</th><th>入选</th></tr></thead>
       <tbody>${plan}</tbody></table></div>
       <details class="raw"><summary>原始数据</summary><pre>${esc(JSON.stringify(r, null, 1).slice(0, 4000))}</pre></details>`;
@@ -1943,7 +1949,7 @@ function openAliasModal(name) {
     <div class="formgrid">
       <label>别名<input type="text" id="am-name" value="${esc(name || "")}" ${name ? "disabled" : ""} placeholder="如 zk-auto"></label>
       <label>策略<select id="am-strategy">${["capability","priority","speed","cost","round_robin","weighted"]
-        .map(s => `<option ${s === a.strategy ? "selected" : ""}>${s}</option>`).join("")}</select></label>
+        .map(s => `<option value="${s}" ${s === a.strategy ? "selected" : ""}>${STRATEGY_LABEL[s] || s}</option>`).join("")}</select></label>
       <label>启用 <select id="am-enabled">
         <option value="true" ${a.enabled !== false ? "selected" : ""}>启用</option>
         <option value="false" ${a.enabled === false ? "selected" : ""}>禁用</option></select></label>
