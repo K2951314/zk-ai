@@ -814,6 +814,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             unsupported.extend(extra.keys())
             for key, value in extra.items():
                 payload.setdefault(key, value)
+
+        # 推理等级默认档（reasoning_effort）：只在客户端没显式指定时注入。
+        # 客户端优先——Codex 的 reasoning.effort / 裸参数 reasoning_effort 都走
+        # extra_params 进来，这里绝不能盖掉。空值 = 不指定，让上游用默认。
+        if "reasoning_effort" not in payload and deployment.reasoning_effort:
+            payload["reasoning_effort"] = deployment.reasoning_effort
         return payload, sorted(set(unsupported))
 
     def allowed_params(self, deployment: DeploymentConfig) -> set[str]:

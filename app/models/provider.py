@@ -180,6 +180,14 @@ class DeploymentConfig(BaseModel):
     #: Free-form provider options merged into the outbound payload.
     options: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
+    #: 推理等级（reasoning effort）：模型自己支持的思考投入档位，与积分/配额无关。
+    #: ``reasoning_efforts`` = 可选档位（官方文档/探测，如 ["none","low","high","max"]；
+    #: ``None`` = 未确认；空表 = 明确不支持调档）。``reasoning_effort`` = 运营者选的
+    #: 默认下发值；空 = 不指定。``reasoning_effort_default`` = 官方默认档（展示用）。
+    #: 客户端请求里显式带了 effort 时以客户端为准。
+    reasoning_effort: str | None = None
+    reasoning_efforts: list[str] | None = None
+    reasoning_effort_default: str | None = None
 
     @property
     def supports_vision(self) -> bool:

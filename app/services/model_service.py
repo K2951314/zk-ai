@@ -98,6 +98,9 @@ class ModelService:
                     "input_cost_per_mtok": deployment.input_cost_per_mtok,
                     "output_cost_per_mtok": deployment.output_cost_per_mtok,
                     "supported_params": deployment.supported_params,
+                    "reasoning_effort": deployment.reasoning_effort,
+                    "reasoning_efforts": deployment.reasoning_efforts,
+                    "reasoning_effort_default": deployment.reasoning_effort_default,
                     "tags": deployment.tags,
                 }
                 for deployment in model.deployments

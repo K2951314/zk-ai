@@ -1263,8 +1263,6 @@ async function loadUsage() {
 const CAP_DIMS = ["coding","reasoning","tool_use","vision","long_context","structured_output","speed","cost"];
 // 只保留八个合法维度，缺项按 5 分兜底：防止把上下文长度等元数据误塞进能力项
 const normCaps = (c) => Object.fromEntries(CAP_DIMS.map(k => [k, Number((c || {})[k] ?? 5)]));
-const CAP_ZH = {coding:"编程", reasoning:"推理", tool_use:"工具调用", vision:"视觉",
-  long_context:"长上下文", structured_output:"结构化输出", speed:"速度", cost:"便宜度"};
 
 async function loadModels() {
   if (!(state.providers || []).length) {
@@ -1359,6 +1357,64 @@ function providerOptions(sel) {
   return (state.providers || []).map(p =>
     `<option value="${esc(p.id)}" ${p.id === sel ? "selected" : ""}>${esc(p.id)}</option>`).join("");
 }
+/* 推理等级（reasoning effort）：模型自己支持的思考投入档位，与积分无关。
+ * 档位名以官方文档 / 供应商公布的为准，这里只做中文展示映射。 */
+const EFFORT_ZH = {
+  none: "关闭", minimal: "极简", low: "低", medium: "中", high: "高",
+  xhigh: "超高", ultra: "超高", "ultra-high": "超高", "ultra_high": "超高",
+  very_high: "超高",
+  max: "极致", extreme: "极致", highest: "极致",
+};
+function effortZh(name) {
+  const key = String(name || "").toLowerCase();
+  const zh = EFFORT_ZH[key];
+  return zh ? `${zh} (${name})` : String(name || "");
+}
+// 思考强度从弱到强；none 是关思考，不是「最弱」，不算进最高档
+const EFFORT_RANK = {
+  none: 0, minimal: 1, low: 2, medium: 3, high: 4,
+  xhigh: 5, ultra: 5, max: 6, extreme: 6,
+};
+function highestEffort(efforts) {
+  const list = (efforts || []).filter(e => e && String(e).toLowerCase() !== "none");
+  if (!list.length) return "";
+  return list.reduce((a, b) =>
+    (EFFORT_RANK[String(b).toLowerCase()] ?? -1) > (EFFORT_RANK[String(a).toLowerCase()] ?? -1) ? b : a);
+}
+function effortOptions(selected, efforts, defaultEffort) {
+  // 运营者默认上最高档；显式传 selected 时用 selected
+  const cur = selected || highestEffort(efforts) || "";
+  const opts = [
+    `<option value="" ${!cur ? "selected" : ""}>默认（不指定${defaultEffort ? "，官方默认 " + esc(defaultEffort) : ""}）</option>`,
+  ].concat((efforts || []).map(e =>
+    `<option value="${esc(e)}" ${e === cur ? "selected" : ""}>${esc(effortZh(e))}</option>`
+  ));
+  return opts.join("");
+}
+function effortControlHtml(d) {
+  const efforts = Array.isArray(d.reasoning_efforts) ? d.reasoning_efforts : null;
+  const def = d.reasoning_effort_default || "";
+  if (efforts && efforts.length) {
+    return `<label>推理等级
+      <select data-df="reasoning_effort">${effortOptions(d.reasoning_effort, efforts, def)}</select>
+      <span class="small muted" title="客户端请求里已指定 reasoning_effort 时以客户端为准；越高越慢也越准">
+        ${def ? `官方默认 ${esc(def)} · ` : ""}客户端指定时优先</span>
+      <input type="hidden" data-df="reasoning_efforts" value="${esc(efforts.join(","))}"></label>`;
+  }
+  if (efforts && efforts.length === 0) {
+    return `<label>推理等级
+      <span class="chip muted">不支持调整</span>
+      <span class="small muted">该模型不支持调整推理等级，始终使用上游默认</span>
+      <input type="hidden" data-df="reasoning_efforts" value=""></label>`;
+  }
+  // 档位未知：不挡路——允许按官方文档手填档位（商汤 /models 不回档位字段）
+  return `<label>推理等级（按官方文档填档位）
+    <input type="text" data-df="reasoning_efforts_manual" value=""
+      placeholder="逗号分隔，如 none, low, high, max" style="width:100%">
+    <select data-df="reasoning_effort">${effortOptions(d.reasoning_effort, [], "")}</select>
+    <button class="mini" type="button" data-effort-fetch>从供应商获取</button>
+    <span class="small muted">留空则不指定，用上游默认；有档位就填上再选档</span></label>`;
+}
 function depCardHtml(d, idx) {
   d = d || {};
   return `<div class="dep-card" data-dep-idx="${idx}">
@@ -1378,6 +1434,7 @@ function depCardHtml(d, idx) {
       <label>启用 <select data-df="enabled">
         <option value="true" ${d.enabled !== false ? "selected" : ""}>启用</option>
         <option value="false" ${d.enabled === false ? "selected" : ""}>禁用</option></select></label>
+      ${effortControlHtml(d)}
     </div>
   </div>`;
 }
@@ -1390,23 +1447,27 @@ function openModelModal(modelId, prefill) {
   const m = src || prefill || {id: "", enabled: true, context_window: 128000, capabilities: {}, deployments: []};
   const facts = prefill?.discovered || {};   // 供应商 API 实测（可能为空）
   const factsNote = prefill?.facts_note || [];
-  const caps = Object.fromEntries(CAP_DIMS.map(k => [k, (m.capabilities || {})[k] ?? 5]));
+  const officialFacts = prefill?.official_facts || [];
+  // 能力评分不再让手选——路由分值来自预设/实测，保存时原样带回 m.capabilities
+  const caps = normCaps(m.capabilities);
   let deps = (m.deployments || []).map(d => Object.assign({}, d));
   if (!deps.length && !modelId) deps = [{}];
   const modal = $("#model-modal");
-  modal.innerHTML = `<div class="card wide">
-    <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建模型" : "新建模型")}</h3>
-    <div class="modal-sub">改完立即生效，并同步写回配置文件（重启后仍在）。</div>
-    ${factsNote.length ? `
+  const factsPanel = (title, rows) => (rows && rows.length) ? `
       <div class="facts-card">
-        <div class="f-title">📋 供应商实测能力（表单已按这些实测值预填）</div>
+        <div class="f-title">${title}</div>
         <div class="mscrl"><table class="small"><tbody>
-          ${factsNote.map(f => `<tr>
+          ${rows.map(f => `<tr>
             <td style="white-space:nowrap;width:96px">${esc(f.label)}</td>
             <td style="white-space:nowrap;width:150px"><b>${esc(f.value)}</b></td>
             <td class="muted">${esc(f.meaning)}</td></tr>`).join("")}
         </tbody></table></div>
-      </div>` : ""}
+      </div>` : "";
+  modal.innerHTML = `<div class="card wide">
+    <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建模型" : "新建模型")}</h3>
+    <div class="modal-sub">改完立即生效，并同步写回配置文件（重启后仍在）。规格数字以官方文档为准，能力评分不再手选。</div>
+    ${factsPanel("📘 官方文档规格（表单已按这些值预填）", officialFacts)}
+    ${factsPanel("📋 供应商实测能力（探测结果，压过预设）", factsNote)}
     <div class="formgrid">
       <label>模型 ID（对外名）<input type="text" id="mm-id" value="${esc(m.id)}" ${modelId ? "disabled" : ""} placeholder="如 glm-5.3"></label>
       <label>显示名<input type="text" id="mm-name" value="${esc(m.display_name || "")}" placeholder="可空"></label>
@@ -1418,28 +1479,6 @@ function openModelModal(modelId, prefill) {
         <option value="false" ${m.enabled === false ? "selected" : ""}>禁用</option></select></label>
       <label style="grid-column:1/-1">描述<input type="text" id="mm-desc" value="${esc(m.description || "")}" placeholder="可空"></label>
     </div>
-    <h4 class="sec">能力评分（0–10，cost 越大代表越便宜）——直接选档，已按预设与实测预填</h4>
-    <div class="capgrid">${CAP_DIMS.map(k => {
-      // 上游只说一次实话的地方就不让改：视觉与推理由实测决定
-      const locked = (k === "vision" && facts.vision_input !== undefined) ||
-                     (k === "reasoning" && facts.reasoning !== undefined);
-      const cur = Math.round(Number(caps[k] || 0) * 2) / 2;
-      const opts = [];
-      for (let v = 0; v <= 10; v += 0.5) {
-        opts.push(`<option value="${v}"${Math.abs(v - cur) < 0.25 ? " selected" : ""}>${v.toFixed(1)}</option>`);
-      }
-      if (locked) {
-        const known = k === "vision" ? facts.vision_input : facts.reasoning;
-        return `<label>${CAP_ZH[k]}
-          <select data-cap="${k}" disabled title="供应商已${known ? "支持" : "不支持"}，此项由实测决定">${opts.join("")}</select>
-          <span class="chip muted">实测${known ? "支持" : "不支持"}</span></label>`;
-      }
-      return `<label>${CAP_ZH[k]}<select data-cap="${k}">${opts.join("")}</select></label>`;
-    }).join("")}
-    </div>
-    ${facts.reasoning_effort?.length ? `
-      <div class="small muted" style="margin-top:8px">该模型的思考强度可调：${facts.reasoning_effort.map(esc).join(" / ")}
-      <span title="请求时用 reasoning_effort 参数指定，越强越慢也越准">（是什么？）</span></div>` : ""}
     <h4 class="sec">部署（哪个供应商、上游模型叫什么）</h4>
     <div id="mm-deps"></div>
     <div class="toolbar" style="margin-top:10px"><button id="mm-add-dep">➕ 加部署</button></div>
@@ -1454,12 +1493,48 @@ function openModelModal(modelId, prefill) {
     document.querySelectorAll("[data-dep-del]").forEach(b => b.onclick = () => {
       collectDeps(); deps.splice(Number(b.dataset.depDel), 1); renderDeps();
     });
+    document.querySelectorAll("[data-effort-fetch]").forEach(b => b.onclick = () => {
+      const idx = Number(b.closest(".dep-card").dataset.depIdx);
+      fetchEfforts(idx);
+    });
+    // 手填档位时同步刷新下方下拉，免得只有「默认」一项可选
+    document.querySelectorAll("[data-df='reasoning_efforts_manual']").forEach(inp => {
+      inp.oninput = () => {
+        const card = inp.closest(".dep-card");
+        const sel = card.querySelector("[data-df='reasoning_effort']");
+        if (!sel) return;
+        const keep = sel.value;
+        const efforts = inp.value.split(",").map(s => s.trim()).filter(Boolean);
+        sel.innerHTML = effortOptions(keep, efforts, "");
+      };
+    });
   };
+  // 表单里没放的部署字段必须原样带回，否则控制台一保存就把 YAML 里的
+  // options / supported_params / 接活标准 / 推理档位证据抹掉（extra_forbid
+  // 也要求别把 upstream_model 这类只读键混进 payload）。
+  const DEP_PRESERVE = [
+    "weight", "capabilities", "request_requires", "price_source",
+    "supported_params", "options", "tags", "reasoning_effort_default",
+  ];
+  const parseEfforts = (raw) => String(raw || "")
+    .split(",").map(s => s.trim()).filter(Boolean);
   const collectDeps = () => {
     document.querySelectorAll("#mm-deps .dep-card").forEach((card, i) => {
       const f = k => card.querySelector(`[data-df="${k}"]`);
       const numv = k => { const v = f(k).value.trim(); return v === "" ? null : Number(v); };
-      deps[i] = {
+      const prev = deps[i] || {};
+      const effortSel = card.querySelector('[data-df="reasoning_effort"]');
+      const effortManual = card.querySelector('[data-df="reasoning_efforts_manual"]');
+      const effortHidden = card.querySelector('[data-df="reasoning_efforts"]');
+      let efforts;
+      if (effortHidden) {
+        efforts = parseEfforts(effortHidden.value);
+      } else if (effortManual) {
+        efforts = parseEfforts(effortManual.value);
+      } else {
+        efforts = prev.reasoning_efforts;
+      }
+      const next = {
         id: f("id").value.trim(),
         provider_id: f("provider_id").value,
         model: f("model").value.trim(),
@@ -1469,19 +1544,65 @@ function openModelModal(modelId, prefill) {
         input_cost_per_mtok: Number(f("input_cost_per_mtok").value || 0),
         output_cost_per_mtok: Number(f("output_cost_per_mtok").value || 0),
         enabled: f("enabled").value === "true",
+        reasoning_effort: effortSel
+          ? (effortSel.value || null)
+          : (prev.reasoning_effort ?? null),
+        reasoning_efforts: efforts,
       };
+      for (const k of DEP_PRESERVE) {
+        if (prev[k] !== undefined && next[k] === undefined) next[k] = prev[k];
+      }
+      deps[i] = next;
     });
+  };
+  // 档位未知时的「从供应商获取」：按当前部署的供应商+上游模型去市场探测结果里对，
+  // 拿到 reasoning_effort_support_list 就地回填，再重渲染成可调下拉。
+  const fetchEfforts = async (idx) => {
+    collectDeps();
+    const d = deps[idx] || {};
+    const pid = d.provider_id;
+    const upstream = (d.model || "").trim();
+    if (!pid || !upstream) { toast("先填好供应商和上游模型名", "err"); return; }
+    const btns = document.querySelectorAll("[data-effort-fetch]");
+    btns.forEach(b => { b.disabled = true; b.textContent = "获取中…"; });
+    try {
+      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models`);
+      if (r.error) { toast(r.error.message || "获取失败", "err"); return; }
+      const hit = (r.data || []).find(x => x.upstream_model === upstream);
+      if (!hit) {
+        toast("供应商目录里没有这个模型，无法确认可选档位", "err");
+        return;
+      }
+      // 接口已把「探测 / 官方预设」两路档位合成好了；都没有才是真不知道
+      const efforts = hit.reasoning_efforts
+        || hit.discovered?.reasoning_effort
+        || hit.preset?.reasoning_efforts;
+      if (Array.isArray(efforts) && efforts.length) {
+        deps[idx].reasoning_efforts = efforts;
+        if (hit.reasoning_effort_default) {
+          deps[idx].reasoning_effort_default = hit.reasoning_effort_default;
+        }
+        // 默认上最高档
+        const top = highestEffort(efforts);
+        deps[idx].reasoning_effort = top || null;
+        toast(`已获取可选档位：${efforts.join(" / ")}${top ? `（默认 ${top}）` : ""}`, "ok");
+      } else {
+        // 目录里有这个模型但两路都没档位 = 不支持调档
+        deps[idx].reasoning_efforts = [];
+        deps[idx].reasoning_effort = null;
+        toast("该模型不支持调整推理等级，已保持上游默认", "ok");
+      }
+      renderDeps();
+    } catch (err) { toast(err.message, "err"); }
+    finally { btns.forEach(b => { b.disabled = false; b.textContent = "从供应商获取"; }); }
   };
   $("#mm-add-dep").onclick = () => { collectDeps(); deps.push({}); renderDeps(); };
   renderDeps();
   $("#mm-cancel").onclick = () => closeModal("#model-modal");
   $("#mm-save").onclick = async () => {
     collectDeps();
-    const caps2 = {};
-    document.querySelectorAll("[data-cap]").forEach(i => {
-      // 只提交八个合法维度：多余键会被后端校验判为 extra_forbidden
-      if (CAP_DIMS.includes(i.dataset.cap)) caps2[i.dataset.cap] = Number(i.value);
-    });
+    // 能力评分不再手选：原样带回预设/已有分值（路由还要用）
+    const caps2 = caps;
     const payload = {
       id: $("#mm-id").value.trim(),
       display_name: $("#mm-name").value.trim() || null,
@@ -1647,15 +1768,33 @@ async function openMarketModal(presetPid) {
             // 实测事实随表单一起带过去：表单据此决定哪些参数可调、哪些直接定值
             discovered: x.discovered,
             facts_note: x.facts_note,
+            official_facts: x.official_facts || [],
             deployments: [{
               id: `${x.suggested_model_id}-${providerId}`,
               provider_id: providerId,
               model: x.upstream_model,
               priority: 100,
               context_window: x.discovered?.context_window || p.context_window,
-              max_output_tokens: 32768,
+              // 最大输出：官方核实值优先，没有就不瞎填 32768（让运营者自己定）
+              max_output_tokens: x.max_output_tokens
+                || x.preset?.max_output_tokens
+                || (x.spec_source === "official" ? null : 32768),
               input_cost_per_mtok: p.input_price,
               output_cost_per_mtok: p.output_price,
+              // 推理力度档位：接口已合成「探测 / 官方预设」两路；都没有才是未知
+              reasoning_efforts: Array.isArray(x.reasoning_efforts) && x.reasoning_efforts.length
+                ? x.reasoning_efforts
+                : (Array.isArray(x.discovered?.reasoning_effort) && x.discovered.reasoning_effort.length
+                    ? x.discovered.reasoning_effort
+                    : (Array.isArray(x.preset?.reasoning_efforts) && x.preset.reasoning_efforts.length
+                        ? x.preset.reasoning_efforts
+                        : (x.discovered?.reasoning === false ? [] : undefined))),
+              reasoning_effort_default: x.reasoning_effort_default
+                || x.preset?.reasoning_effort_default || undefined,
+              // 默认上最高档（none 除外）
+              reasoning_effort: x.reasoning_effort_recommended
+                || highestEffort(x.reasoning_efforts || x.preset?.reasoning_efforts)
+                || null,
             }],
             presetDescription: p.description,
           });

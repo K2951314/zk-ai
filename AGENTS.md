@@ -250,6 +250,22 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `POST /admin/aliases` 走 `_write_alias_file()` 落盘，所以「配置文件里是 A、实际
   生效是 B」通常不是 bug，而是有人在控制台改过。排查前先 `grep front_model= data/gateway.log`
   看它实际用的是什么、什么时候变的。
+- **控制台部署卡片 `collectDeps` 只收表单里有的字段，其余必须显式回传**（2026-10-23
+  修推理等级时踩到）：原来保存会把 YAML 里的 `options` / `supported_params` /
+  `request_requires` / `weight` 等**整段抹掉**（部署是替换不是合并）。现在
+  `DEP_PRESERVE` 列表把这些连同 `reasoning_efforts`（档位证据）原样带回。
+  新增部署字段时**必须同时进这个列表**，否则控制台一保存就丢。
+- **推理等级默认值永不覆盖客户端**（2026-10-23）：`DeploymentConfig.reasoning_effort`
+  只在 payload 里还没有 `reasoning_effort` 时注入（Codex 的 `reasoning.effort` 走
+  extra_params 进来）。优先级是 **客户端 > 部署默认 > 不指定**。别改成
+  `payload.update` 强写——会把客户端明确的思考强度盖掉。
+- **档位词表要信官方文档，不能只信 `/models` 探测**（2026-10-23 被运营者纠正）：
+  商汤 `GET /models` **根本不回** `reasoning_effort_support_list`，只靠探测会让
+  `deepseek-flash` 这种明明支持 `none/low/high/max` 的模型永远显示「档位未知」、
+  没法配置。已核实词表必须落进 `ModelPreset.reasoning_efforts`（官方文档出处写注释），
+  市场合成逻辑是 **探测 > 预设 > 空**；两路都没有才是「不支持调档」。
+  deepseek-flash 另有兼容映射 `minimal→low, medium/xhigh→high, ultra→max`
+  （`reasoning_effort_aliases`）。档位未知时表单给手填入口，不许是死胡同。
 - **`max_total_attempts` 是次数上限，不是时间上限**（2026-09-28 补
   `ZKAI_MAX_REQUEST_SECONDS`，默认 300s）：20 次尝试 × 60s（nvidia read timeout）
   = 最坏 20 分钟。实测一次请求磨了十几分钟、客户端一个字节都没收到——每次尝试单独看

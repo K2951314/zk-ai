@@ -63,6 +63,11 @@ models:
         options:
           # 推理模型必须使用较新的参数名（max_tokens 会被上游拒绝）
           max_tokens_param: max_completion_tokens
+        # 推理等级（reasoning effort）——模型自己支持的思考投入档位，与积分无关。
+        # reasoning_efforts: 供应商公布的可选档位（探测结果；None=未探；空表=不支持调档）
+        # reasoning_effort:  网关默认下发档位；空 = 不指定，客户端显式指定时以客户端为准
+        # reasoning_efforts: [low, medium, high]
+        # reasoning_effort: medium
       - id: gpt-5-openrouter
         provider_id: openrouter
         model: openai/gpt-5

@@ -453,8 +453,16 @@ models:
 
 `kimi-k3` / `high` 这类**模型级参数**（`context_window`、`capabilities`）写在模型上；
 **部署级参数**（`priority`、`max_output_tokens`、`input_cost_per_mtok`、
+`output_cost_per_mtok`、`request_requires`、`reasoning_effort`、`reasoning_efforts`、
 `options`、`supported_params`）写在 deployment 上。写错层会直接报
 `Extra inputs are not permitted`。
+
+**推理等级（reasoning effort）**是模型自己支持的思考投入档位（低/中/高/超高/极致这类，
+与积分无关）：`reasoning_efforts` 存供应商公布的可选档位（探测证据，不猜），
+`reasoning_effort` 是网关默认下发值。优先级 **客户端 > 部署默认 > 不指定**——
+Codex 的 `reasoning.effort` / 裸参数 `reasoning_effort` 都不会被网关默认盖掉。
+目前只对 OpenAI 兼容链路注入。控制台部署卡片三态渲染：可调下拉 / 不支持（灰态）/
+档位未知（「从供应商获取」）。
 
 `max_output_tokens` 是**部署级**字段：
 
@@ -663,7 +671,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 35 个测试模块，924 个用例，全部 Mock
+├── tests/                # conftest + 36 个测试模块，949 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -671,9 +679,9 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 101 个文件约 24,671 行，`tests/` 35 个测试模块 924 个用例（约 16,615 行），
-`scripts/` 18 个文件约 4,880 行。**测试/产品代码 = 70%**。
-（这两个数字上一次更新是 2026-10-22，此前为 2026-10-13 的 72/22,510/36/889——**文档规模必须跟着代码走**，
+规模：`app/` 101 个文件约 24,900 行，`tests/` 36 个测试模块 949 个用例（约 17,020 行），
+`scripts/` 18 个文件约 4,880 行。**测试/产品代码 = 68%**。
+（这两个数字上一次更新是 2026-10-23，此前为同日早些时候的 68/24,820/36/944——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
 ---
@@ -1350,7 +1358,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**924 个用例，全部通过，零网络、零真实配额。**
+**949 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

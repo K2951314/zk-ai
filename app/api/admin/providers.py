@@ -292,7 +292,7 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         for deployment in model.deployments
     }
     from app.models.discovery import model_facts
-    from app.models.presets import preset_for
+    from app.models.presets import highest_effort, preset_for
     from app.models.pricing import lookup, reference_prices
 
     # 上游的模型列表只说 id：描述、上下文窗口这些事实要去模型社区的资料页取。
@@ -316,7 +316,8 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
 
     data = []
     for upstream in sorted(catalogue):
-        preset = preset_for(upstream)
+        # 供应商专属预设优先：同一模型（如 kimi-k3）在商汤/月之暗面的档位表不一样
+        preset = preset_for(upstream, provider_id)
         # Measured facts outrank the hand-written preset for the fields the
         # provider actually reported; anything it stayed silent about keeps the
         # preset value, and ``fallback`` records where each number came from so
@@ -359,10 +360,36 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
                 "output_price": output_price,
                 "price_source": price_source,
                 "description": info.get("description") or preset.description,
+                "reasoning_efforts": list(preset.reasoning_efforts),
+                "reasoning_effort_default": preset.reasoning_effort_default,
+                "max_output_tokens": preset.max_output_tokens,
+                "max_output_tokens_max": preset.max_output_tokens_max,
+                "spec_source": preset.spec_source,
             },
             "official": info,
             "discovered": facts.as_dict(),
             "discovered_known": facts.known,
+            # 推理力度档位：探测（reasoning_effort_support_list）有就用探测的；
+            # 探测没有就回落官方文档预设——商汤 /models 根本不回档位字段，
+            # 只靠探测永远「档位未知」，而官方文档明明写着 deepseek-flash 是
+            # none/low/high/max。没预设的仍留空，不猜。
+            "reasoning_efforts": (
+                list(facts.reasoning_effort)
+                or list(preset.reasoning_efforts)
+            ),
+            "reasoning_efforts_source": (
+                "discovery" if facts.reasoning_effort
+                else ("official" if preset.reasoning_efforts else None)
+            ),
+            "reasoning_effort_default": preset.reasoning_effort_default,
+            # 运营者默认上最高档（none 除外，那是关思考）
+            "reasoning_effort_recommended": highest_effort(
+                list(facts.reasoning_effort) or list(preset.reasoning_efforts)
+            ),
+            # 官方规格来源：official = 官方文档核实；estimated = 预估，表单要标出来
+            "spec_source": preset.spec_source,
+            "max_output_tokens": preset.max_output_tokens,
+            "max_output_tokens_max": preset.max_output_tokens_max,
             # Higher-fidelity-vendor presets are only a guess for StepFun's own
             # models; anything else keeps the preset context window.
             "context_window_source": (
@@ -373,6 +400,8 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         }
         if facts.known:
             entry["facts_note"] = facts.describe()
+        if preset.spec_source == "official":
+            entry["official_facts"] = preset.official_facts()
         data.append(entry)
     return {"object": "list", "provider_id": provider_id, "data": data}
 
