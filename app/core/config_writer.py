@@ -256,10 +256,22 @@ def _section_line(lines: list[str], section: str) -> int | None:
 
 
 def _find_entry_line(lines: list[str], section_start: int, key: str, name: str):
-    """Return ``(base_indent, item_line_index)`` for ``- <key>: <name>`` in section."""
+    """Return ``(base_indent, item_line_index)`` for ``- <key>: <name>`` in section.
+
+    The value may be plain, double- or single-quoted: ruamel preserves (and can
+    add) quotes for values with special characters, and a model id like
+    ``deepseek-ai/DeepSeek-V4.1-Flash`` survives as plain - but anything with a
+    leading ``*``/``&``/``?`` or a ``: `` inside gets quoted. Missing the quoted
+    form here silently skipped the splice and left a zombie entry that resurrected
+    on the next restart (2026-10-23 审计发现）。
+    """
     import re
 
-    pattern = re.compile(rf"^(\s*)-\s+{re.escape(key)}:\s*{re.escape(name)}\s*(#.*)?$")
+    quoted = re.escape(name)
+    pattern = re.compile(
+        rf'^(\s*)-\s+{re.escape(key)}:\s*'
+        rf'(?:"{quoted}"|\'{quoted}\'|{quoted})\s*(#.*)?$'
+    )
     for index in range(section_start + 1, len(lines)):
         if _is_top_level_key(lines[index]):
             break  # a real top-level key ends the section (col-0 comments do not)

@@ -127,13 +127,18 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
         )
 
     # 先改内存立即生效（下一次请求就能看到），再落盘。
-    # 落盘失败则回滚内存，保持文件与内存一致。
+    # 落盘失败则回滚内存，保持文件与内存一致——编辑场景要恢复旧值，
+    # 不能一 pop 了之（那会让旧模型从内存里消失，与文件里的条目不一致）。
+    previous = container.config.models.get(model.id)
     container.config.models[model.id] = model
     try:
         synced = _write_model_file(container, model)
         await container.config_repository.upsert_model(model)
     except Exception:
-        container.config.models.pop(model.id, None)  # 回滚
+        if previous is None:
+            container.config.models.pop(model.id, None)
+        else:
+            container.config.models[model.id] = previous
         raise
     return {
         "object": "model",

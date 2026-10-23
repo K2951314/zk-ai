@@ -245,10 +245,11 @@ def test_tools_force_the_tool_use_capability() -> None:
     )
     decision = router.plan(request)
     assert decision.requirement.minimums.get("tool_use") == 1.0
-    # Neither model declares tool_use, so both are gated out but still listed.
-    assert all(not candidate.eligible for candidate in decision.candidates)
-    assert decision.eligible_candidates() == []
-    assert any("tool_use" in gate for c in decision.candidates for gate in c.gates_failed)
+    # Neither model declares tool_use, so both are gated out by the hard gate —
+    # but the safety valve (all-gated-out) relaxes minimums rather than
+    # returning zero eligible candidates, so both stay in the attempt order.
+    assert decision.eligible_candidates(), "安全阀必须兜底：不能 0 个候选"
+    assert {c.deployment.id for c in decision.eligible_candidates()} >= {"coder-dep", "thinker-dep"}
 
 
 def test_json_mode_requires_structured_output() -> None:

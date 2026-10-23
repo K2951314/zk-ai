@@ -64,10 +64,12 @@ class Provider(Base):
     )
 
     credentials: Mapped[list[Credential]] = relationship(
-        back_populates="provider", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="provider", cascade="all, delete-orphan",
+        lazy="selectin", passive_deletes=True,
     )
     deployments: Mapped[list[Deployment]] = relationship(
-        back_populates="provider", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="provider", cascade="all, delete-orphan",
+        lazy="selectin", passive_deletes=True,
     )
 
 
@@ -87,7 +89,8 @@ class Model(Base):
     )
 
     deployments: Mapped[list[Deployment]] = relationship(
-        back_populates="model", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="model", cascade="all, delete-orphan",
+        lazy="selectin", passive_deletes=True,
     )
 
 

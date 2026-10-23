@@ -1010,6 +1010,36 @@ async def test_sync_config_prunes_rows_removed_from_yaml(provider_config, fake_a
         await harness.container.shutdown()
 
 
+async def test_sync_config_prunes_provider_rows(provider_config, fake_adapter) -> None:
+    """整供应商被删：其凭据/部署行也必须离开镜像。
+
+    这条路径触发过 StaleDataError（ORM 集合同步 vs bulk DELETE 冲突，
+    2026-10-23 生产实测）——凭据行从未入库，管理员界面看不到 AMD。
+    passive_deletes=True + DB 级 ON DELETE CASCADE 后由数据库负责级联。
+    """
+    other = make_provider("other", key_ids=("ok-1",))
+    config = make_config(
+        providers=[provider_config, other],
+        models=[make_model("fake-model"), make_model("other-model", provider_id="other")],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter, "other": fake_adapter})
+    try:
+        await harness.container.config_repository.sync_config(config)
+        before_providers = {row["id"] for row in await harness.container.config_repository.list_providers()}
+        assert {"fake", "other"} <= before_providers
+
+        # fake 供应商整个移出配置，重新镜像。
+        config.providers.pop("fake")
+        config.models.pop("fake-model")
+        await harness.container.config_repository.sync_config(config)
+        after_providers = {row["id"] for row in await harness.container.config_repository.list_providers()}
+        assert after_providers == {"other"}
+        creds = await harness.container.config_repository.list_credentials()
+        assert [row["id"] for row in creds] == ["ok-1"]
+    finally:
+        await harness.container.shutdown()
+
+
 async def test_backfill_reprices_zero_cost_usage_rows(api) -> None:
     """The console button: rows recorded before pricing get their cost filled in."""
     client, harness = api

@@ -671,7 +671,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 38 个测试模块，982 个用例，全部 Mock
+├── tests/                # conftest + 38 个测试模块，985 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -679,9 +679,9 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 103 个文件约 25,390 行，`tests/` 38 个测试模块 982 个用例（约 17,420 行），
+规模：`app/` 103 个文件约 25,420 行，`tests/` 38 个测试模块 985 个用例（约 17,440 行），
 `scripts/` 18 个文件约 4,896 行。**测试/产品代码 = 68%**。
-（这两个数字上一次更新是 2026-10-23，此前为同日早些时候的 68/25,380/38/980——**文档规模必须跟着代码走**，
+（这两个数字上一次更新是 2026-10-23，此前为同日早些时候的 68/25,390/38/982——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
 ---
@@ -1358,7 +1358,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**982 个用例，全部通过，零网络、零真实配额。**
+**985 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

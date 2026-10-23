@@ -125,11 +125,29 @@ def _delete_file_entry(
     if path is None:
         return None
     try:
-        delete_list_entry(path, section, key, name)
+        removed = delete_list_entry(path, section, key, name)
+        if not removed and _file_entry_exists(path, section, key, name):
+            # 条目还在文件里但正则没匹配上（引号/格式意外）——此时若继续删
+            # 内存+DB，文件里的条目会在下次重启时复活（僵尸条目）。
+            # fail-closed：宁可返回 500 让运营者知道，不要静默留雷。
+            raise _file_write_failed(
+                ValueError(f"未能从 {path.name} 中删除 {section}/{name}（条目仍存在）")
+            )
     except (OSError, ValueError) as exc:
         raise _file_write_failed(exc) from exc
     container.refresh_config_watch()  # 见 _write_model_file 的说明
     return path.name
+
+
+def _file_entry_exists(path: Path, section: str, key: str, name: str) -> bool:
+    """条目是否仍在 YAML 文件里（解析级判断，不依赖正则）。"""
+    from app.core.config_writer import _find, _list_of, load_document
+
+    try:
+        doc = load_document(path)
+        return _find(_list_of(doc, section), key, name) >= 0
+    except Exception:
+        return True  # 读不了就别放行
 
 
 def _write_limits_file(

@@ -405,3 +405,44 @@ def test_stale_config_files_reports_the_name(tmp_path) -> None:
     time.sleep(0.01)
     path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     assert "providers.yaml" in cw.stale_config_files()
+
+
+def test_delete_list_entry_matches_quoted_values(tmp_path):
+    """ruamel 会给特殊字符值加引号——删除正则必须认引号形式。
+
+    2026-10-23 审计：正则只匹配无引号值，带引号条目删不掉会在重启后复活。
+    """
+    from app.core import config_writer as cw
+
+    path = tmp_path / "models.yaml"
+    path.write_text(
+        "models:\n"
+        '  - id: "deepseek-ai/DeepSeek-V4.1-Flash"\n'
+        "    enabled: true\n"
+        "  - id: plain-model\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    # 带引号的条目要能删掉
+    assert cw.delete_list_entry(path, "models", "id", "deepseek-ai/DeepSeek-V4.1-Flash") is True
+    text = path.read_text(encoding="utf-8")
+    assert "deepseek-ai" not in text
+    assert "plain-model" in text
+
+    # 不存在的条目返回 False（不报错）
+    assert cw.delete_list_entry(path, "models", "id", "nope") is False
+
+
+def test_delete_list_entry_matches_single_quoted_values(tmp_path):
+    from app.core import config_writer as cw
+
+    path = tmp_path / "models.yaml"
+    path.write_text(
+        "models:\n"
+        "  - id: 'weird: model'\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    assert cw.delete_list_entry(path, "models", "id", "weird: model") is True
+    assert "weird" not in path.read_text(encoding="utf-8")
+
