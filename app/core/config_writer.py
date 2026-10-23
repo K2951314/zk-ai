@@ -475,6 +475,41 @@ def delete_provider(path: Path, provider_id: str) -> bool:
     return delete_list_entry(path, "providers", "id", provider_id)
 
 
+def rename_provider_in_file(path: Path, old_id: str, new_id: str) -> None:
+    """Rename a provider's ``id`` in ``providers.yaml``, in place (comments kept)."""
+    doc = load_document(path)
+    providers = _list_of(doc, "providers")
+    index = _find(providers, "id", old_id)
+    if index < 0:
+        raise KeyError(f"provider '{old_id}' not found in {path.name}")
+    providers[index]["id"] = new_id
+    atomic_write(path, doc)
+
+
+def retarget_deployments(path: Path, old_provider: str, new_provider: str) -> int:
+    """Point every ``deployments[].provider_id`` from *old* to *new* in models.yaml.
+
+    Returns the number of deployment entries updated.  Comments and unrelated
+    fields survive because we mutate the parsed tree in place.
+    """
+    doc = load_document(path)
+    models = _list_of(doc, "models")
+    changed = 0
+    for model in models:
+        if not isinstance(model, CommentedMap):
+            continue
+        deployments = model.get("deployments")
+        if not isinstance(deployments, (list, CommentedSeq)):
+            continue
+        for dep in deployments:
+            if isinstance(dep, CommentedMap) and dep.get("provider_id") == old_provider:
+                dep["provider_id"] = new_provider
+                changed += 1
+    if changed:
+        atomic_write(path, doc)
+    return changed
+
+
 # --------------------------------------------------------------------------- #
 # dotenv (.env) - secrets never go into the YAML
 # --------------------------------------------------------------------------- #
@@ -554,6 +589,8 @@ __all__ = [
     "delete_provider",
     "load_document",
     "looks_like_secret",
+    "rename_provider_in_file",
+    "retarget_deployments",
     "sync_provider_rate_limits",
     "upsert_env_var",
     "upsert_list_entry",

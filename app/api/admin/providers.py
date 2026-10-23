@@ -33,6 +33,8 @@ from app.core.config_writer import (
     delete_credential_from_provider,
     delete_env_var,
     looks_like_secret,
+    rename_provider_in_file,
+    retarget_deployments,
     update_credential_in_provider,
     upsert_env_var,
 )
@@ -969,6 +971,86 @@ async def upsert_provider(payload: ProviderUpsertRequest, container: ContainerDe
         "object": "provider",
         "provider_id": provider.id,
         "created": existing is None,
+        "synced": synced,
+    }
+
+
+@router.put("/providers/{provider_id}/rename", summary="改名供应商")
+async def rename_provider(
+    provider_id: str,
+    payload: dict[str, Any] = Body(...),
+    container: ContainerDep = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Rename a provider and retarget every reference (deployments + credentials).
+
+    ``provider_id`` is referenced from three places — the provider entry itself,
+    every ``deployments[].provider_id`` in models.yaml, and every credential's
+    ``provider_id`` — so a rename must touch all three or the config breaks
+    silently.  This endpoint does the full sweep atomically.
+    """
+    new_id = str(payload.get("new_id", "")).strip()
+    if not new_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"message": "新 id 不能为空", "type": "invalid_provider"}},
+        )
+    if new_id == provider_id:
+        return {"renamed": False, "provider_id": new_id, "message": "id 未变化"}
+    if new_id in container.config.providers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": {"message": f"供应商 '{new_id}' 已存在", "type": "duplicate"}},
+        )
+    provider = container.config.providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
+        )
+
+    # 1. providers.yaml：改 id
+    synced: list[str] = []
+    path = _source_file(container, "providers")
+    if path is not None:
+        try:
+            rename_provider_in_file(path, provider_id, new_id)
+        except (OSError, KeyError) as exc:
+            raise _file_write_failed(exc) from exc
+        synced.append(path.name)
+
+    # 2. models.yaml：改所有 deployments[].provider_id
+    model_path = _source_file(container, "models") or _source_file(container, "config")
+    if model_path is not None:
+        try:
+            retarget_deployments(model_path, provider_id, new_id)
+        except (OSError, KeyError) as exc:
+            raise _file_write_failed(exc) from exc
+        synced.append(model_path.name)
+
+    # 3. 运行时：改 provider.id、所有 credential.provider_id、所有 deployment.provider_id
+    provider.id = new_id
+    for c in provider.credentials:
+        c.provider_id = new_id
+    for model in container.config.models.values():
+        for dep in model.deployments:
+            if dep.provider_id == provider_id:
+                dep.provider_id = new_id
+    # 字典 key 也要换——provider.id 改了但 dict 没换，路由查找会 miss
+    container.config.providers[new_id] = container.config.providers.pop(provider_id)
+
+    # 4. pool：旧 key 换新 key
+    container.pool.reconcile(container.config.providers)
+    container.pool.register_provider(provider)
+
+    # 5. 别名 / rate_limiter
+    container.rate_limiter.register_provider(provider)
+    container.refresh_config_watch()
+
+    await container.config_repository.sync_config(container.config)
+    logger.info("provider %s renamed to %s via console", provider_id, new_id)
+    return {
+        "renamed": True,
+        "provider_id": new_id,
         "synced": synced,
     }
 

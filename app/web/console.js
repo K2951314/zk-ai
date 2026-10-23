@@ -963,7 +963,7 @@ function openProvidersModal() {
     const rows = providers.map(p => {
       const limits = (p.rate_limits || []).length ? "pill green" : "pill gray";
       const limitCount = (p.rate_limits || []).length;
-      return `<tr><td class="acts"><div class="row-flex"><button class="mini" data-edit-provider="${esc(p.id)}" title="编辑供应商 ${esc(p.id)}">编辑</button><button class="mini danger" data-del-provider="${esc(p.id)}" title="删除供应商 ${esc(p.id)}">删除</button></div></td>
+      return `<tr><td class="acts"><div class="row-flex"><button class="mini" data-edit-provider="${esc(p.id)}" title="编辑供应商 ${esc(p.id)}">编辑</button><button class="mini" data-rename-provider="${esc(p.id)}" title="改名供应商 ${esc(p.id)}">改名</button><button class="mini danger" data-del-provider="${esc(p.id)}" title="删除供应商 ${esc(p.id)}">删除</button></div></td>
         <td class="name"><b>${esc(p.id)}</b><span class="sub">${esc(p.type)}</span></td>
         <td class="small muted ell" title="${esc(p.base_url)}" style="max-width:220px">${esc(p.base_url)}</td>
         <td>${p.enabled ? pill("healthy") : pill("disabled")}</td>
@@ -990,6 +990,19 @@ function openProvidersModal() {
     $("#pv-new").onclick = () => openProviderForm(null);
     document.querySelectorAll("[data-edit-provider]").forEach(b =>
       b.onclick = () => openProviderForm(b.dataset.editProvider));
+    document.querySelectorAll("[data-rename-provider]").forEach(b =>
+      b.onclick = async () => {
+        const id = b.dataset.renameProvider;
+        const next = prompt(`把供应商「${id}」改名为：`, id);
+        if (!next || next.trim() === "" || next.trim() === id) return;
+        const r = await api(`/admin/providers/${encodeURIComponent(id)}/rename`, {
+          method: "PUT", json: { new_id: next.trim() },
+        });
+        if (r.error) { toast(r.error.message || "改名失败", "err"); return; }
+        toast(`供应商已改名为 ${r.provider_id}（部署与 Key 引用已同步）`, "ok");
+        state.providers = (await api("/admin/providers")).data || [];
+        renderList();
+      });
     document.querySelectorAll("[data-del-provider]").forEach(b =>
       b.onclick = async () => {
         const id = b.dataset.delProvider;

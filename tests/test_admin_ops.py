@@ -109,6 +109,36 @@ class TestCredentialGuards:
         assert r.status_code == 400
 
 
+class TestProviderRename:
+    async def test_rename_provider_retargets_references(self, api) -> None:
+        """供应商改名后，部署和凭据的 provider_id 必须同步换。"""
+        client, harness = api
+        r = await client.put(
+            "/zkadmin/providers/fake/rename",
+            json={"new_id": "fake-reborn"},
+            headers=ADMIN,
+        )
+        assert r.status_code == 200
+        assert r.json()["provider_id"] == "fake-reborn"
+        assert "fake-reborn" in harness.container.config.providers
+        assert "fake" not in harness.container.config.providers
+        # 凭据的 provider_id 也换了
+        for c in harness.container.config.providers["fake-reborn"].credentials:
+            assert c.provider_id == "fake-reborn"
+        # pool 里旧 key 清了、新 key 在
+        assert harness.container.pool.get("key-1") is not None
+
+    async def test_rename_rejects_duplicate(self, api) -> None:
+        client, _ = api
+        r = await client.put(
+            "/zkadmin/providers/fake/rename",
+            json={"new_id": "fake"},  # 同名
+            headers=ADMIN,
+        )
+        assert r.status_code == 200  # 同名返回 renamed=False
+        assert r.json()["renamed"] is False
+
+
 class TestGatewayRestart:
     async def test_restart_returns_a_mode(self, api) -> None:
         """检测不到 systemd/托盘时必须 ok=False + 可抄命令，不许假装成功。"""
