@@ -66,6 +66,11 @@ def _wire_message(message: ChatMessage) -> dict[str, Any]:
     supposed to mean anyway - the assistant said nothing, it only called tools.
     """
     rendered = message.model_dump(exclude_none=True)
+    # OpenAI 新版 API 用 developer 代替 system，但很多上游（DeepSeek /
+    # NVIDIA NIM / 魔搭）只认 system。在 wire 边界归一化，内部保留 developer
+    # 语义（历史裁剪 / token 估计不需要区分）。
+    if rendered.get("role") == "developer":
+        rendered["role"] = "system"
     if "content" not in rendered and rendered.get("role") in {"assistant", "tool"}:
         rendered["content"] = ""
     return rendered

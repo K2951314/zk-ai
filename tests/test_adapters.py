@@ -766,3 +766,24 @@ def test_assistant_tool_calls_message_always_carries_content() -> None:
     assert payload["messages"][1]["content"] == "", "只说工具调用时 content 是空串"
     assert payload["messages"][1]["tool_calls"][0]["function"]["name"] == "read_file"
     assert payload["messages"][1]["tool_calls"][0]["id"] == "c1"
+
+
+class TestDeveloperRoleMapping:
+    """OpenAI 新版 developer 角色 → system（很多上游不认 developer）。"""
+
+    def test_developer_role_becomes_system_on_the_wire(self) -> None:
+        from app.models.request import ChatMessage
+        from app.providers.base import _wire_message
+
+        msg = ChatMessage(role="developer", content="you are helpful")
+        wire = _wire_message(msg)
+        assert wire["role"] == "system"
+        assert wire["content"] == "you are helpful"
+
+    def test_other_roles_pass_through(self) -> None:
+        from app.models.request import ChatMessage
+        from app.providers.base import _wire_message
+
+        for role in ("system", "user", "assistant", "tool"):
+            wire = _wire_message(ChatMessage(role=role, content="x"))  # type: ignore[arg-type]
+            assert wire["role"] == role
