@@ -281,6 +281,16 @@ class ConfigRepository:
             row.enabled = model.enabled
             row.context_window = model.context_window
             row.capabilities = model.capabilities.as_dict()
+            # flush 让 Model 行先进 DB——否则 Deployment 的外键约束
+            # 会在同一个事务里看到 model_id 还不存在就炸掉。
+            await session.flush()
+            # Deployment 有外键指向 providers.id——引用的 provider 必须先在 DB 里。
+            for dep in model.deployments:
+                if not await session.get(Provider, dep.provider_id):
+                    session.add(Provider(
+                        id=dep.provider_id, type="openai", base_url="", enabled=True,
+                    ))
+            await session.flush()
 
             kept: set[str] = set()
             for deployment in model.deployments:

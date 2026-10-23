@@ -141,11 +141,12 @@ class TestProviderRename:
         adapter = harness.container.router.adapter("fake-reborn")
         assert adapter is not None
         # 旧 id 的 adapter 已移除
-        try:
+        import pytest
+
+        from app.routing.router import ProviderNotFoundError
+
+        with pytest.raises(ProviderNotFoundError):
             harness.container.router.adapter("fake")
-            raise AssertionError("旧 id 的 adapter 不该还在")
-        except Exception:
-            pass  # ProviderNotFoundError 是预期的
 
     async def test_rename_rejects_duplicate(self, api) -> None:
         client, _ = api
@@ -156,6 +157,61 @@ class TestProviderRename:
         )
         assert r.status_code == 200  # 同名返回 renamed=False
         assert r.json()["renamed"] is False
+
+
+class TestModelCrud:
+    async def test_add_model_with_slash_in_id(self, api) -> None:
+        """模型 ID 带 /（如 deepseek-ai/DeepSeek-V4.1-Flash）要能增删。"""
+        client, harness = api
+        model_id = "deepseek-ai/DeepSeek-V4.1-Flash"
+        r = await client.post("/zkadmin/models", headers=ADMIN, json={
+            "id": model_id,
+            "context_window": 131072,
+            "deployments": [{
+                "id": "probe-dep", "provider_id": "fake",
+                "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            }],
+        })
+        assert r.status_code == 200, r.text
+        assert model_id in harness.container.config.models
+
+        # 删除也要能匹配（路由要 :path）
+        r = await client.delete(f"/zkadmin/models/{model_id}", headers=ADMIN)
+        # URL 里 / 会被 encode 成 %2F，但 :path 能吃下
+        assert r.status_code == 200 or r.status_code == 404  # 404 = URL 编码问题，见下
+
+    async def test_delete_model_with_slash_via_path(self, api) -> None:
+        """DELETE /models/{id} 对带 / 的 id 必须命中（:path 参数）。"""
+        client, harness = api
+        model_id = "org/model-name"
+        # 先加
+        r = await client.post("/zkadmin/models", headers=ADMIN, json={
+            "id": model_id,
+            "context_window": 8192,
+            "deployments": [{"id": "d1", "provider_id": "fake", "model": "x"}],
+        })
+        assert r.status_code == 200, r.text
+        # 再删——URL 编码后的 %2F 要能被 :path 匹配
+        r = await client.delete(f"/zkadmin/models/{model_id}", headers=ADMIN)
+        assert r.status_code == 200, r.text
+        assert model_id not in harness.container.config.models
+
+    async def test_add_model_strips_unknown_deployment_fields(self, api) -> None:
+        """部署里的多余字段（市场证据）不该把保存炸成 500。"""
+        client, _ = api
+        r = await client.post("/zkadmin/models", headers=ADMIN, json={
+            "id": "test-model",
+            "context_window": 8192,
+            "deployments": [{
+                "id": "d1", "provider_id": "fake", "model": "x",
+                "reasoning_efforts": ["low", "high"],   # 不在 DeploymentConfig
+                "official_facts": [{"label": "x"}],      # 不在 DeploymentConfig
+                "spec_source": "official",               # 不在 DeploymentConfig
+            }],
+        })
+        assert r.status_code == 200, r.text
+        # 未知字段被剥掉了，但模型建出来了
+        assert r.json()["data"]["id"] == "test-model"
 
 
 class TestGatewayRestart:

@@ -60,8 +60,19 @@ async def list_aliases(container: ContainerDep) -> dict[str, Any]:
 @router.post("/models", summary="新建或替换模型")
 async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> dict[str, Any]:
     """Hot-add/edit a model; takes effect immediately and survives restarts."""
+    from app.models.provider import DeploymentConfig as _Dep
+
+    # deployments 是 list[Any]（前端会带 extra 字段），逐个剥掉未知键再喂
+    # ModelConfig（extra=forbid）——否则市场带回来的 reasoning_efforts 等
+    # 证据字段会把整个保存炸成 500。
+    dep_fields = set(_Dep.model_fields)
+    raw = payload.model_dump()
+    raw["deployments"] = [
+        {k: v for k, v in dep.items() if k in dep_fields}
+        for dep in (raw.get("deployments") or [])
+    ]
     try:
-        model = ModelConfig(**payload.model_dump())
+        model = ModelConfig(**raw)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -103,8 +114,10 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
     }
 
 
-@router.delete("/models/{model_id}", summary="删除模型")
+@router.delete("/models/{model_id:path}", summary="删除模型")
 async def delete_model(model_id: str, container: ContainerDep) -> dict[str, Any]:
+    """Delete a model by id. ``:path`` lets ids containing ``/`` match
+    (e.g. ``deepseek-ai/DeepSeek-V4.1-Flash`` from ModelScope)."""
     if model_id not in container.config.models:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
