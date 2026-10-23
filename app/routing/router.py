@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.core.config import AppConfig
@@ -315,12 +315,16 @@ class Router:
         # The gates still order (gated candidates sort after eligible ones), so
         # this only ever *widens* the fallback chain.
         if ordered and not any(c.eligible for c in ordered):
+            # minimums 也放宽：请求带图但所有部署都是纯文本模型时，
+            # vision 闸门会把 order 清空、0 尝试直接拒——宁可发出去让上游
+            # 自己报错，也不要本地就掐死。
+            relaxed_req = replace(requirement, minimums={})
             relaxed: list[RoutingCandidate] = []
             for candidate in candidates:
                 card = score_candidate(
                     model=candidate.model,
                     deployment=_without_request_gate(candidate.deployment),
-                    requirement=requirement,
+                    requirement=relaxed_req,
                 )
                 relaxed.append(
                     RoutingCandidate.from_scorecard(
@@ -332,7 +336,7 @@ class Router:
                     )
                 )
             ordered = strategy.order(
-                relaxed, requirement, pin_first=bool(alias and alias.pin_first)
+                relaxed, relaxed_req, pin_first=bool(alias and alias.pin_first)
             )
             # The front-line model must survive the safety valve too: if it were
             # dropped here, a request whose gates all fail would silently lose the
