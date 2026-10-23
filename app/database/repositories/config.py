@@ -34,7 +34,51 @@ class ConfigRepository:
     async def sync_config(self, config: AppConfig) -> dict[str, int]:
         """Upsert providers / models / credentials / deployments / aliases."""
         counts = {"providers": 0, "models": 0, "credentials": 0, "deployments": 0, "aliases": 0}
+
+        # 先算 keep 集，再**先清理后 upsert**。顺序是生死问题：
+        # 供应商改名（ADM → AMD，凭据 ID 不变）时，若先 upsert（把凭据行
+        # 重新指向新供应商）再删旧供应商行，DB 级 ON DELETE CASCADE 会在
+        # 旧父行被删的瞬间级联掉这些凭据行，随后 flush 那条排队的 UPDATE
+        # 就撞上 "expected to update 2 row(s); 0 were matched"（StaleDataError），
+        # 整个镜像事务回滚——凭据永远进不了库（2026-10-23 生产实测）。
+        # 先删后建让 get() 自然走到「不存在→新建」，从根上消除这个竞态。
+        kept_providers = set(config.providers)
+        kept_credentials = {
+            credential.id for provider in config.providers.values()
+            for credential in provider.credentials
+        }
+        kept_models = set(config.models)
+        kept_deployments = {
+            deployment.id for model in config.models.values()
+            for deployment in model.deployments
+        }
+        kept_aliases = set(config.aliases)
+
         async with self.db.session() as session:
+            # Mirror must be a *sync*, not only an upsert: rows removed from the
+            # YAML (a key rotated out, a provider retired/renamed) must disappear
+            # from the mirror too, otherwise the console and the live config drift.
+            removed = 0
+            for table, keep, key_attr in (
+                (Deployment, kept_deployments, Deployment.id),
+                (Credential, kept_credentials, Credential.id),
+                (ModelAlias, kept_aliases, ModelAlias.name),
+                (Model, kept_models, Model.id),
+                (Provider, kept_providers, Provider.id),
+            ):
+                if not keep:
+                    continue  # empty config should never wipe a whole table
+                result = await session.execute(
+                    delete(table).where(key_attr.notin_(keep)),
+                    execution_options={"synchronize_session": False},
+                )
+                removed += int(cast("CursorResult[Any]", result).rowcount or 0)
+            if removed:
+                counts["removed"] = removed
+                # 清理后 identity map 里可能还留着被删行的陈旧对象，expire_all
+                # 让后续 get() 老实回库查，避免拿到已删行的幻影。
+                session.expire_all()
+
             for provider in config.providers.values():
                 provider_row = await session.get(Provider, provider.id)
                 if provider_row is None:
@@ -123,34 +167,6 @@ class ConfigRepository:
                 alias_row.description = alias.description
                 counts["aliases"] += 1
 
-            # Mirror must be a *sync*, not only an upsert: rows removed from the
-            # YAML (a key rotated out, a provider retired) must disappear from the
-            # mirror too, otherwise the console and the live config drift apart.
-            kept_providers = set(config.providers)
-            kept_credentials = {
-                credential.id for provider in config.providers.values()
-                for credential in provider.credentials
-            }
-            kept_models = set(config.models)
-            kept_deployments = {
-                deployment.id for model in config.models.values()
-                for deployment in model.deployments
-            }
-            kept_aliases = set(config.aliases)
-            removed = 0
-            for table, keep, key_attr in (
-                (Deployment, kept_deployments, Deployment.id),
-                (Credential, kept_credentials, Credential.id),
-                (ModelAlias, kept_aliases, ModelAlias.name),
-                (Model, kept_models, Model.id),
-                (Provider, kept_providers, Provider.id),
-            ):
-                if not keep:
-                    continue  # empty config should never wipe a whole table
-                result = await session.execute(delete(table).where(key_attr.notin_(keep)))
-                removed += int(cast("CursorResult[Any]", result).rowcount or 0)
-            if removed:
-                counts["removed"] = removed
         logger.info("configuration mirrored to database: %s", counts)
         return counts
 

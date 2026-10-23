@@ -1040,6 +1040,49 @@ async def test_sync_config_prunes_provider_rows(provider_config, fake_adapter) -
         await harness.container.shutdown()
 
 
+async def test_sync_config_survives_provider_rename(fake_adapter) -> None:
+    """供应商改名（ADM→AMD）且凭据 ID 不变：不能再炸 StaleDataError。
+
+    2026-10-23 生产实测：先 upsert（凭据行改指新供应商）再删旧供应商行，
+    DB 级 ON DELETE CASCADE 级联掉凭据行 → flush 的 UPDATE 0 行匹配 →
+    整个镜像事务回滚 → 凭据永远进不了库。修法：先删后建。
+    """
+    from app.models.provider import CredentialConfig, ProviderConfig, ProviderType
+
+    # 第一态：供应商叫 ADM，两把凭据
+    old = ProviderConfig(
+        id="ADM", type=ProviderType.OPENAI, base_url="http://x",
+        credentials=[
+            CredentialConfig(id="adm-01", env_var="ADM_API_KEY"),
+            CredentialConfig(id="adm-02", env_var="ADM_API_KEY_02"),
+        ],
+    )
+    config = make_config(providers=[old], models=[make_model("m", provider_id="ADM")])
+    harness = await build_harness(config, adapters={"ADM": fake_adapter})
+    try:
+        repo = harness.container.config_repository
+        await repo.sync_config(config)
+        rows = {r["id"]: r["provider_id"] for r in await repo.list_credentials()}
+        assert rows == {"adm-01": "ADM", "adm-02": "ADM"}
+
+        # 第二态：改名 AMD，凭据 ID 不变
+        new = ProviderConfig(
+            id="AMD", type=ProviderType.OPENAI, base_url="http://x",
+            credentials=[
+                CredentialConfig(id="adm-01", env_var="ADM_API_KEY"),
+                CredentialConfig(id="adm-02", env_var="ADM_API_KEY_02"),
+            ],
+        )
+        config2 = make_config(providers=[new], models=[make_model("m", provider_id="AMD")])
+        await repo.sync_config(config2)  # 不许抛 StaleDataError
+        rows2 = {r["id"]: r["provider_id"] for r in await repo.list_credentials()}
+        assert rows2 == {"adm-01": "AMD", "adm-02": "AMD"}
+        providers = {r["id"] for r in await repo.list_providers()}
+        assert "ADM" not in providers and "AMD" in providers
+    finally:
+        await harness.container.shutdown()
+
+
 async def test_backfill_reprices_zero_cost_usage_rows(api) -> None:
     """The console button: rows recorded before pricing get their cost filled in."""
     client, harness = api
