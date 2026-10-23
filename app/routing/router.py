@@ -301,7 +301,8 @@ class Router:
                 f"模型 '{requested}' 下没有任何可用的部署", model=requested
             )
 
-        strategy_name = alias.strategy if alias else None
+        # 别名策略 > 模型策略 > 默认 capability
+        strategy_name = alias.strategy if alias else (primary_model.strategy if primary_model else None)
         strategy = get_strategy(strategy_name)
         ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
         front = self._promote_front_model(ordered, alias, unavailable or set())

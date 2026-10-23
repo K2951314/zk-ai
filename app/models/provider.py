@@ -207,6 +207,9 @@ class ModelConfig(BaseModel):
     deployments: list[DeploymentConfig] = Field(default_factory=list)
     description: str | None = None
     owned_by: str | None = None
+    #: 部署选择策略：直接调模型名（非别名）时生效。空 = 默认 capability。
+    #: 多部署同分时建议设 round_robin，否则字母序靠前的永远优先。
+    strategy: str | None = None
 
     def effective_capabilities(self, deployment: DeploymentConfig) -> CapabilityScores:
         """Model scores with per-deployment overrides applied."""

@@ -285,7 +285,11 @@ class ConfigRepository:
             # 会在同一个事务里看到 model_id 还不存在就炸掉。
             await session.flush()
             # Deployment 有外键指向 providers.id——引用的 provider 必须先在 DB 里。
+            seen_providers: set[str] = set()
             for dep in model.deployments:
+                if dep.provider_id in seen_providers:
+                    continue
+                seen_providers.add(dep.provider_id)
                 if not await session.get(Provider, dep.provider_id):
                     session.add(Provider(
                         id=dep.provider_id, type="openai", base_url="", enabled=True,

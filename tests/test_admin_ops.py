@@ -238,6 +238,22 @@ class TestModelCrud:
         assert "dep-amd" in dep_ids
         assert "dep-nvidia" in dep_ids
 
+    async def test_model_level_strategy(self, api) -> None:
+        """模型可设 strategy 字段，直接调模型名时生效。"""
+        client, harness = api
+        r = await client.post("/zkadmin/models", headers=ADMIN, json={
+            "id": "rr-model",
+            "context_window": 8192,
+            "strategy": "round_robin",
+            "deployments": [
+                {"id": "d1", "provider_id": "fake", "model": "a"},
+                {"id": "d2", "provider_id": "fake", "model": "b"},
+            ],
+        })
+        assert r.status_code == 200, r.text
+        model = harness.container.config.models["rr-model"]
+        assert model.strategy == "round_robin"
+
 
 class TestGatewayRestart:
     async def test_restart_returns_a_mode(self, api) -> None:

@@ -1560,6 +1560,14 @@ function openModelModal(modelId, prefill) {
       <label>启用 <select id="mm-enabled">
         <option value="true" ${m.enabled !== false ? "selected" : ""}>启用</option>
         <option value="false" ${m.enabled === false ? "selected" : ""}>禁用</option></select></label>
+      <label>部署策略 <select id="mm-strategy">
+        <option value="" ${!m.strategy ? "selected" : ""}>默认（能力分优先）</option>
+        <option value="round_robin" ${m.strategy === "round_robin" ? "selected" : ""}>轮询（多供应商均摊）</option>
+        <option value="priority" ${m.strategy === "priority" ? "selected" : ""}>优先级（priority 小的先）</option>
+        <option value="cost" ${m.strategy === "cost" ? "selected" : ""}>成本（便宜的先）</option>
+        <option value="speed" ${m.strategy === "speed" ? "selected" : ""}>速度（快的先）</option>
+        <option value="weighted" ${m.strategy === "weighted" ? "selected" : ""}>加权随机</option></select>
+        <span class="small muted">多部署同分时建议轮询，否则字母序靠前的永远优先</span></label>
       <label style="grid-column:1/-1">描述<input type="text" id="mm-desc" value="${esc(m.description || "")}" placeholder="可空"></label>
     </div>
     <h4 class="sec">部署（哪个供应商、上游模型叫什么）</h4>
@@ -1695,6 +1703,7 @@ function openModelModal(modelId, prefill) {
       enabled: $("#mm-enabled").value === "true",
       context_window: Number($("#mm-ctx").value || 128000),
       capabilities: caps2,
+      strategy: $("#mm-strategy").value || null,
       deployments: deps.filter(d => d.id && d.model),
       // 从市场加同一模型的第二个供应商 → 合并部署，不整体覆盖
       merge: fromMarket && !modelId && (state.modelsCache || []).some(x => x.id === mid),

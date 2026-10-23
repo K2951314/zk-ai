@@ -232,6 +232,9 @@ class ModelUpsertRequest(BaseModel):
     context_window: int = 128_000
     capabilities: dict[str, float] = Field(default_factory=dict)
     deployments: list[Any] = Field(default_factory=list)
+    #: 部署选择策略（priority/capability/cost/speed/round_robin/weighted）。
+    #: 多部署同分时建议 round_robin。空 = 默认 capability。
+    strategy: str | None = None
     #: True = 合并部署（市场「＋添加」同 ID 的第二个供应商），
     #: False = 整体替换（编辑表单）。同 ID 已存在时才生效。
     merge: bool = False
