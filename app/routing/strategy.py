@@ -11,7 +11,7 @@ from __future__ import annotations
 import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from app.models.provider import AliasStrategy, DeploymentConfig, ModelConfig, ProviderConfig
 from app.routing.capability import CapabilityRequirement, ScoreCard
@@ -213,13 +213,19 @@ class SpeedSelection(SelectionStrategy):
 
 
 class RoundRobinSelection(SelectionStrategy):
-    """Rotate between equally ranked candidates (state kept per strategy)."""
+    """Rotate between equally ranked candidates.
+
+    Cursor is **class-level** because :func:`get_strategy` returns a fresh
+    instance per call — an instance-level cursor would reset every request
+    and round-robin would degenerate to "always the same candidate".
+    """
 
     name = AliasStrategy.ROUND_ROBIN.value
 
+    _cursor: ClassVar[dict[str, int]] = {}
+
     def __init__(self, rng: random.Random | None = None) -> None:
         super().__init__(rng)
-        self._cursor: dict[str, int] = {}
 
     def order(
         self,
@@ -231,9 +237,9 @@ class RoundRobinSelection(SelectionStrategy):
         eligible.sort(key=lambda c: (-c.deployment.priority, -c.score, c.label))
         if eligible:
             key = eligible[0].model.id
-            offset = self._cursor.get(key, 0) % len(eligible)
+            offset = RoundRobinSelection._cursor.get(key, 0) % len(eligible)
             eligible = eligible[offset:] + eligible[:offset]
-            self._cursor[key] = (offset + 1) % len(eligible)
+            RoundRobinSelection._cursor[key] = (offset + 1) % len(eligible)
         blocked.sort(key=lambda c: c.label)
         return self._number(eligible + blocked)
 
