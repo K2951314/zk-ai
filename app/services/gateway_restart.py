@@ -1,24 +1,31 @@
 """网关一键重启：systemd / 托盘，按部署形态二选一。
 
 与消耗器重启（``burner_service.restart``）同一套判据，目标换成 ``zkai`` 网关：
-  服务器 systemd：``systemctl restart zkai``（先裸命令，失败再 ``sudo -n``）。
+  服务器 systemd：走 polkit（bare systemctl，**不碰 sudo**——服务进程带
+    NoNewPrivileges，sudo 是 setuid 必被拦）。网关重启自己时用延迟 + 分离
+    进程，先把 HTTP 响应还回去再 SIGTERM。
   本机 Windows 托盘：写 ``data/gateway_restart.request``，托盘心跳看到就
     kill 子进程再 spawn——网关自己不能重启自己。
   都检测不到：返回 manual 模式 + 可抄的命令，界面原样展示。
+
+polkit 规则见 ``deploy-server/50-zkai.rules``（覆盖 zkai + zkai-burner）。
 """
 
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+from app.services.systemd_ctl import run_unit_action, unit_loaded
+
 #: 服务器上网关的 systemd unit 名。
 _SYSTEMD_UNIT = "zkai"
 _REQUEST_NAME = "gateway_restart.request"
+
+#: 网关重启自己的延迟秒数——要让 HTTP 响应写完再 SIGTERM。
+_SELF_RESTART_DELAY = 1.0
 
 
 def request_file(data_dir: Path) -> Path:
@@ -32,68 +39,13 @@ def pending(data_dir: Path) -> bool:
     return (data_dir / _REQUEST_NAME).exists()
 
 
-def _systemctl() -> str | None:
-    return shutil.which("systemctl")
-
-
-def _systemd_unit_active() -> bool:
-    systemctl = _systemctl()
-    if systemctl is None:
-        return False
-    try:
-        proc = subprocess.run(  # noqa: S603 固定命令+常量 unit 名
-            [systemctl, "status", _SYSTEMD_UNIT, "--no-pager", "-n", "0"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "Loaded:" in proc.stdout
-
-
 def detect_mode() -> str:
     """'systemd' | 'tray' | 'manual'。"""
-    if _systemd_unit_active():
+    if unit_loaded(_SYSTEMD_UNIT):
         return "systemd"
     if os.name == "nt":
         return "tray"
     return "manual"
-
-
-def _run_systemctl_restart() -> dict[str, Any]:
-    systemctl = _systemctl()
-    if systemctl is None:
-        return {
-            "mode": "manual", "ok": False,
-            "message": "找不到 systemctl",
-            "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
-        }
-    for cmd_prefix in ([systemctl], ["sudo", "-n", systemctl]):
-        try:
-            proc = subprocess.run(  # noqa: S603 固定命令+常量
-                [*cmd_prefix, "restart", _SYSTEMD_UNIT],
-                capture_output=True, text=True, timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if proc.returncode == 0:
-            return {
-                "mode": "systemd", "ok": True,
-                "message": f"已通过 systemd restart {_SYSTEMD_UNIT}，约 2 秒后恢复",
-            }
-        if cmd_prefix[0] == systemctl:
-            continue
-        return {
-            "mode": "manual", "ok": False,
-            "message": f"systemctl 退出码 {proc.returncode}：{proc.stderr.strip()[:200]}",
-            "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
-        }
-    return {
-        "mode": "manual", "ok": False,
-        "message": "systemctl restart 执行失败（权限或路径问题）",
-        "command": f"sudo systemctl restart {_SYSTEMD_UNIT}",
-    }
 
 
 def restart_gateway(data_dir: Path | None = None) -> dict[str, Any]:
@@ -101,7 +53,10 @@ def restart_gateway(data_dir: Path | None = None) -> dict[str, Any]:
     root = data_dir or Path(os.environ.get("ZKAI_DATA_DIR", "data"))
     mode = detect_mode()
     if mode == "systemd":
-        return _run_systemctl_restart()
+        # 自重启必须分离 + 延迟：同步跑会把当前处理请求的进程先杀了
+        return run_unit_action(
+            _SYSTEMD_UNIT, "restart", detached_delay=_SELF_RESTART_DELAY
+        )
     if mode == "tray":
         path = request_file(root)
         return {

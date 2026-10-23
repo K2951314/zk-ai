@@ -1,0 +1,20 @@
+[Unit]
+Description=ZK-AI gateway (personal AI router)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+EnvironmentFile=/opt/zkai/.env
+WorkingDirectory=/opt/zkai
+ExecStart=/opt/zkai/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8318
+Restart=always
+RestartSec=3
+# NoNewPrivileges 挡的是 sudo/setuid 提权；polkit 走 D-Bus 不受影响。
+# 控制台一键重启依赖 50-zkai.rules 放行 www-data manage-units。
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

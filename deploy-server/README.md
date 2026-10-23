@@ -213,11 +213,12 @@ ssh $SERVER 'systemctl show zkai-burner -p MemoryCurrent -p CPUUsageNSec; free -
 
 ```bash
 # 新服务器上先有：git clone + uv sync + .env（含 SENSENOVA_API_KEY_*）
-# 代码同步走 git（见「同步走 git」一节），下面的 3 个文件按需手工安装
+# 代码同步走 git（见「同步走 git」一节），下面的 4 个文件按需手工安装
 sudo install -o www-data -g www-data -m 664 deploy-server/burner.yaml      /opt/zkai/config/burner.yaml
+sudo install -o root     -g root     -m 644 deploy-server/zkai.service        /etc/systemd/system/zkai.service
 sudo install -o root     -g root     -m 644 deploy-server/zkai-burner.service /etc/systemd/system/zkai-burner.service
-sudo install -o root     -g root     -m 644 deploy-server/50-zkai-burner.rules /etc/polkit-1/rules.d/50-zkai-burner.rules
-sudo systemctl daemon-reload && sudo systemctl restart polkit && sudo systemctl enable --now zkai-burner
+sudo install -o root     -g root     -m 644 deploy-server/50-zkai.rules       /etc/polkit-1/rules.d/50-zkai.rules
+sudo systemctl daemon-reload && sudo systemctl restart polkit && sudo systemctl enable --now zkai zkai-burner
 ```
 
 ⚠️ 装 `burner.yaml` 前先把服务器现役的备份一份，别把服务器上调好的费率/锚点冲掉。
@@ -235,7 +236,7 @@ curl https://<新IP>/zkai/v1/chat/completions \
 
 ### 电脑 ↔ 服务器
 
-迁移包（一键换机 Skill）现在也带 `deploy-server/` 三个文件，导入任一台新电脑后
+迁移包（一键换机 Skill）现在也带 `deploy-server/` 四个文件，导入任一台新电脑后
 都能直接同步回服务器。导入后两件事要手工做（Skill 不碰 `~/.codex` 也不碰用户
 环境变量）：
 
@@ -296,36 +297,44 @@ Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner
 | 文件 | 作用 |
 |---|---|
 | `burner.yaml` | 服务器保守档 burner 配置（**安装前先备份服务器上的现役版**） |
+| `zkai.service` | 网关的 systemd 单元（`NoNewPrivileges=true`，一键重启靠 polkit） |
 | `zkai-burner.service` | burner 的 systemd 单元（限额+优先级） |
-| `50-zkai-burner.rules` | polkit 规则：让网关（www-data）能 start/stop/restart 消耗器 |
+| `50-zkai.rules` | polkit 规则：让网关（www-data）能 start/stop/restart **网关与消耗器** |
 | `Caddyfile` | Caddy 配置（`/zkai/*` 网关 API + `/ui/*` 控制台 + `/admin/*` 按 token 分流） |
 
-## 控制台为什么能管消耗器：polkit 而不是 sudo
+## 控制台为什么能管服务：polkit 而不是 sudo
 
-控制台「积分消耗器」页的启动/停止/重启按钮，走的是 `app/services/burner_service/restart.py`
-里的 `_run_systemctl_action()`。**2026-10-15 前这套在服务器上从来没能工作过**，
-根因是两道锁同时锁死：
+控制台「重启网关」按钮（`app/services/gateway_restart.py`）与「积分消耗器」页的
+启动/停止/重启按钮（`app/services/burner_service/restart.py`），底层都走
+`app/services/systemd_ctl.py` 的 bare systemctl。**2026-10-23 前这套在服务器上
+从来没能工作过**，根因是两道锁同时锁死：
 
-1. `/etc/sudoers.d/zkai-burner` 里授权的是 **`ubuntu`** 用户：
-   `ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop zkai-burner, ...`
-   但网关以 **`www-data`** 运行（`zkai.service` 的 `User=www-data`），根本不在白名单。
-2. `zkai.service` 带 **`NoNewPrivileges=true`**。即使 sudoers 配对了，sudo 也会报
-   `The "no new privileges" flag is set, which prevents sudo from running as root`。
+1. `/etc/sudoers.d/*` 里授权的是 **`ubuntu`** 用户，但网关以 **`www-data`** 运行
+   （`zkai.service` 的 `User=www-data`），根本不在白名单里。
+2. `zkai.service` / `zkai-burner.service` 都带 **`NoNewPrivileges=true`**。
+   即使 sudoers 配对了，sudo 也会报
+   `The "no new privileges" flag is set, which prevents sudo from running as root`——
+   sudo 是 setuid，被 no_new_privs 拦死。
 
-**修法是 polkit**（`50-zkai-burner.rules`）：systemctl 通过 D-Bus 请求 systemd 执行，
+**修法是 polkit**（`50-zkai.rules`）：systemctl 通过 D-Bus 请求 systemd 执行，
 不经过 sudo、也不需要 setuid，两道锁都绕开了。规则只放行 `www-data` 对
-`zkai-burner.service` 的 start/stop/restart，不含其他 unit，也不含
-`manage-unit-files`（那会允许改开机自启，控制台用不到）。
+`zkai` / `zkai-burner` 的 start/stop/restart/try-restart，不含其他 unit，也不含
+`manage-unit-files`（那会允许改开机自启，属于更宽的权限，控制台用不到）。
 
-装完必须 `systemctl restart polkit` 才生效。自检：
+⚠️ **从 SSH 会话 `sudo -u www-data systemctl ...` 测能通过是假象**——那个进程带着
+`ubuntu` 的登录会话上下文，polkit 按 active session 放行。服务进程没有会话，
+必须靠本规则显式放行。验证要模拟服务上下文：
 
 ```bash
-sudo -u www-data systemctl stop  zkai-burner   # 退出码 0、状态转 inactive
-sudo -u www-data systemctl start zkai-burner   # 退出码 0、状态转 active
+sudo -u www-data env -i PATH=/usr/bin:/bin HOME=/var/www systemctl restart zkai-burner
+# 退出码 0 才算装好；报 Interactive authentication required 就是规则没生效
 ```
 
-⚠️ 规则文件必须 **UTF-8 无 BOM**（polkit 的 JS 引擎对 BOM 敏感）。
-传完先 `head -c 3 50-zkai-burner.rules | xxd` 确认不是 `efbbbf`。
+装完必须 `systemctl restart polkit` 才生效。⚠️ 规则文件必须 **UTF-8 无 BOM**
+（polkit 的 JS 引擎对 BOM 敏感）。传完先 `head -c 3 50-zkai.rules | xxd` 确认不是 `efbbbf`。
+
+**网关重启自己**（`restart` 作用于 `zkai`）时，代码里用 `--no-block` + 1 秒延迟
+分离进程——同步跑会把正在写 HTTP 响应的进程先杀了，前端只看到连接断开。
 
 密钥一律不进这三个文件：SENSENOVA key 走 scp 到服务器 `.env`，
 token 从 `/opt/zkai/.env` 现取写进 `/etc/caddy/zkai.env`（root:caddy 640）；
