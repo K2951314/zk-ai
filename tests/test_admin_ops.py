@@ -213,6 +213,31 @@ class TestModelCrud:
         # 未知字段被剥掉了，但模型建出来了
         assert r.json()["data"]["id"] == "test-model"
 
+    async def test_merge_adds_deployment_without_overwriting(self, api) -> None:
+        """市场加同 ID 第二个供应商：合并部署，不覆盖原有的。"""
+        client, harness = api
+        # 第一次：建模型，挂一个部署
+        r = await client.post("/zkadmin/models", headers=ADMIN, json={
+            "id": "shared-model",
+            "context_window": 8192,
+            "deployments": [{"id": "dep-amd", "provider_id": "fake", "model": "a"}],
+        })
+        assert r.status_code == 200
+        # 第二次：merge=true，加另一个部署（不同 upstream_model 避开 UNIQUE 约束）
+        r = await client.post("/zkadmin/models", headers=ADMIN, json={
+            "id": "shared-model",
+            "context_window": 8192,
+            "merge": True,
+            "deployments": [{"id": "dep-nvidia", "provider_id": "fake", "model": "b"}],
+        })
+        assert r.status_code == 200, r.text
+        assert r.json().get("merged") is True
+        # 两个部署都在
+        model = harness.container.config.models["shared-model"]
+        dep_ids = [d.id for d in model.deployments]
+        assert "dep-amd" in dep_ids
+        assert "dep-nvidia" in dep_ids
+
 
 class TestGatewayRestart:
     async def test_restart_returns_a_mode(self, api) -> None:

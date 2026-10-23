@@ -67,10 +67,34 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
     # 证据字段会把整个保存炸成 500。
     dep_fields = set(_Dep.model_fields)
     raw = payload.model_dump()
+    raw.pop("merge", None)  # 合并标志，不进 ModelConfig
     raw["deployments"] = [
         {k: v for k, v in dep.items() if k in dep_fields}
         for dep in (raw.get("deployments") or [])
     ]
+
+    # 合并模式：同 ID 已存在时把新部署追加进去，不整体覆盖。
+    # 市场「＋添加」同一模型的第二个供应商就走这条路。
+    existing = container.config.models.get(payload.id)
+    if payload.merge and existing is not None:
+        seen = {d.id for d in existing.deployments}
+        for dep_raw in raw["deployments"]:
+            if dep_raw.get("id") not in seen:
+                existing.deployments.append(_Dep(**dep_raw))
+            else:
+                # 同 ID 的部署更新字段（如 priority 被手动改了）
+                for i, d in enumerate(existing.deployments):
+                    if d.id == dep_raw["id"]:
+                        existing.deployments[i] = _Dep(**dep_raw)
+                        break
+        _write_model_file(container, existing)
+        await container.config_repository.upsert_model(existing)
+        return {
+            "object": "model",
+            "merged": True,
+            "data": container.model_service.describe(existing.id),
+        }
+
     try:
         model = ModelConfig(**raw)
     except Exception as exc:

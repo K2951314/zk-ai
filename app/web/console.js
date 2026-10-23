@@ -1686,8 +1686,9 @@ function openModelModal(modelId, prefill) {
     collectDeps();
     // 能力评分不再手选：原样带回预设/已有分值（路由还要用）
     const caps2 = caps;
+    const mid = $("#mm-id").value.trim();
     const payload = {
-      id: $("#mm-id").value.trim(),
+      id: mid,
       display_name: $("#mm-name").value.trim() || null,
       owned_by: $("#mm-owner").value.trim() || null,
       description: $("#mm-desc").value.trim() || null,
@@ -1695,8 +1696,10 @@ function openModelModal(modelId, prefill) {
       context_window: Number($("#mm-ctx").value || 128000),
       capabilities: caps2,
       deployments: deps.filter(d => d.id && d.model),
+      // 从市场加同一模型的第二个供应商 → 合并部署，不整体覆盖
+      merge: fromMarket && !modelId && (state.modelsCache || []).some(x => x.id === mid),
     };
-    if (!payload.id) { toast("模型 ID 不能为空", "err"); return; }
+    if (!mid) { toast("模型 ID 不能为空", "err"); return; }
     try {
       const r = await api("/admin/models", { method: "POST", json: payload });
       if (r.error) { toast(r.error.message || "保存失败", "err"); return; }
