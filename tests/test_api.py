@@ -1983,3 +1983,40 @@ async def test_verify_honours_the_limit(api) -> None:
         headers=BURNER_HEADERS,
     )
     assert r.json()["checked"] == 2
+
+
+async def test_cached_tokens_survive_the_whole_chain(fake_adapter) -> None:
+    """上游报的缓存数要一路活到 DB——否则成本高估近一个数量级。
+
+    2026-10-24 对抗式审查：OpenAI 系的 prompt_tokens_details.cached_tokens
+    原来在 normalize_response 就被丢掉（Usage 没提这层），Anthropic 路径
+    本来就对。修法是在 Usage 模型层 lift。
+    """
+    from app.database.repositories.usage import UsageRepository
+    from app.models.response import ChatCompletionResponse
+
+    # 1) 模型层：OpenAI 嵌套格式要被提起
+    payload = {
+        "id": "x", "object": "chat.completion", "created": 1, "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
+                  "prompt_tokens_details": {"cached_tokens": 800}},
+    }
+    response = ChatCompletionResponse.model_validate(payload)
+    assert response.usage.cached_tokens == 800
+    assert response.usage.prompt_tokens == 1000, "prompt_tokens 含缓存，不缩减"
+
+    # 2) DB 层：record 收下 cached_tokens，summary 聚合出来
+    repo = UsageRepository.__new__(UsageRepository)  # 只测 SQL 形状，不走 service
+    from app.database.db import Database
+    db = Database("sqlite+aiosqlite:///:memory:")
+    await db.init()
+    repo.db = db
+    await repo.record(
+        request_id=None, provider_id="p", model="m", credential_id="c",
+        input_tokens=1000, output_tokens=100, cached_tokens=800,
+    )
+    summary = await repo.summary(days=7)
+    assert summary["cached_tokens"] == 800
+    assert summary["input_tokens"] == 1000

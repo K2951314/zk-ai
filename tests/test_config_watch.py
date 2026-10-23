@@ -512,3 +512,50 @@ async def test_credential_mirror_loop_persists_runtime_counters(tmp_path: Path) 
         assert container._cred_mirror_task is None
     finally:
         await container.shutdown()
+
+
+async def test_column_migration_patches_a_pre_existing_database(tmp_path: Path) -> None:
+    """create_all 不给已存在的表加列——生产库（文件库、跑了几十天）必须幂等 ALTER。
+
+    2026-10-24 加入 cached_tokens 列时的基础设施。没有这一步，新代码连上
+    生产库的第一次 INSERT 就会 "no such column" 500。
+    """
+    import sqlite3
+
+    from app.database.db import Database
+
+    db_file = tmp_path / "old.db"
+    # 造一个没有 cached_tokens 列的旧表，并塞一行历史数据
+    raw = sqlite3.connect(db_file)
+    raw.execute(
+        "CREATE TABLE usage_records ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, request_id VARCHAR(64),"
+        "provider_id VARCHAR(64) NOT NULL, model VARCHAR(160) NOT NULL,"
+        "credential_id VARCHAR(64), input_tokens INTEGER DEFAULT 0,"
+        "output_tokens INTEGER DEFAULT 0, total_tokens INTEGER DEFAULT 0,"
+        "cost_usd FLOAT DEFAULT 0.0, latency_ms FLOAT DEFAULT 0.0,"
+        "created_at DATETIME)"
+    )
+    raw.execute(
+        "INSERT INTO usage_records (provider_id, model, input_tokens) VALUES ('p','m',500)"
+    )
+    raw.commit()
+    raw.close()
+
+    db = Database(f"sqlite+aiosqlite:///{db_file.as_posix()}")
+    await db.init()
+    try:
+        cols = [
+            row[1]
+            for row in sqlite3.connect(db_file).execute("PRAGMA table_info(usage_records)")
+        ]
+        assert "cached_tokens" in cols, "旧库要被补上列"
+        rows = sqlite3.connect(db_file).execute(
+            "SELECT provider_id, input_tokens FROM usage_records"
+        ).fetchall()
+        assert rows == [("p", 500)], "补列不许动历史数据"
+        # 幂等：再来一次不报错也不重复加
+        await db.init()
+    finally:
+        await db.dispose()
+

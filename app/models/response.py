@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.request import (
     ChatMessage,
@@ -46,6 +46,25 @@ class Usage(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     cached_tokens: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_openai_cached_tokens(cls, data: Any) -> Any:
+        """OpenAI 系把缓存数埋在 ``usage.prompt_tokens_details.cached_tokens``。
+
+        不提上来的话：缓存折扣完全不可见，控制台的 token 统计少了缓存维度，
+        成本估算还要按全价计——DeepSeek 官方说「缓存命中的费用往往占比较高」，
+        Agent 类长上下文重复前缀的工作负载，成本会高估近一个数量级。
+        Anthropic 路径本来就传 ``cache_read_input_tokens``（见 anthropic.py），
+        这条 before 校验让 OpenAI 兼容链路（DeepSeek/魔搭/商汤…）对齐。
+        """
+        if isinstance(data, dict) and "cached_tokens" not in data:
+            details = data.get("prompt_tokens_details")
+            if isinstance(details, dict):
+                cached = details.get("cached_tokens")
+                if cached:
+                    data = {**data, "cached_tokens": cached}
+        return data
 
     @classmethod
     def build(cls, prompt: int | None, completion: int | None, cached: int = 0) -> Usage:

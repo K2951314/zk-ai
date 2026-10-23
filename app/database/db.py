@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -74,11 +75,39 @@ class Database:
                 cursor.close()
 
     # ------------------------------------------------------------------ #
+    #: (table, column, DDL) —— create_all 只建新表，不给已存在的表加列。
+    #: 生产库是文件库、跑了几十天，加列必须幂等 ALTER，否则 INSERT 直接
+    #: "no such column" 500。每条都是「不存在才加」的安全形态。
+    _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+        (
+            "usage_records",
+            "cached_tokens",
+            "ALTER TABLE usage_records ADD COLUMN cached_tokens INTEGER DEFAULT 0",
+        ),
+    )
+
     async def init(self) -> None:
-        """Create the schema if it does not exist yet."""
+        """Create the schema if it does not exist yet, then apply column migrations."""
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(self._apply_column_migrations)
         logger.info("database ready (%s)", self._safe_url())
+
+    @staticmethod
+    def _apply_column_migrations(sync_connection: Any) -> None:
+        """Idempotent ADD COLUMN for tables that predate a field (SQLite)."""
+        for table, column, ddl in Database._COLUMN_MIGRATIONS:
+            try:
+                rows = sync_connection.exec_driver_sql(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            except Exception as exc:  # pragma: no cover - table missing entirely
+                logger.warning("column migration skipped (%s): %s", table, exc)
+                continue
+            if any(row[1] == column for row in rows):
+                continue
+            sync_connection.exec_driver_sql(ddl)
+            logger.info("applied column migration: %s.%s", table, column)
 
     async def dispose(self) -> None:
         await self.engine.dispose()

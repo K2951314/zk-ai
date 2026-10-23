@@ -69,6 +69,7 @@ class UsageService:
                 output_tokens=usage.completion_tokens,
                 cost_usd=cost,
                 latency_ms=latency_ms,
+                cached_tokens=usage.cached_tokens,
             )
         except Exception:
             logger.exception("failed to persist usage record for %s", request_id)

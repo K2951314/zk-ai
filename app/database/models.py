@@ -271,6 +271,10 @@ class UsageRecord(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    #: 输入里命中供应商侧前缀缓存的部分（OpenAI prompt_tokens_details /
+    #: Anthropic cache_read_input_tokens）。2026-10-24 加入：不提这列，
+    #: DeepSeek 的缓存折扣完全不可见，成本按全价高估近一个数量级。
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[dt.datetime] = mapped_column(

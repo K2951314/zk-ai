@@ -1321,6 +1321,7 @@ async function loadUsage() {
       ${kpi("请求数", num(u.requests), `窗口 ${stats.window_days} 天`)}
       ${kpi("输入 Tokens", fmtK(u.input_tokens), num(u.input_tokens) + " 精确值")}
       ${kpi("输出 Tokens", fmtK(u.output_tokens), num(u.output_tokens) + " 精确值")}
+      ${kpi("缓存命中", fmtK(u.cached_tokens || 0), (u.input_tokens ? Math.round(100 * (u.cached_tokens || 0) / u.input_tokens) : 0) + "% 的输入命中上游前缀缓存；成本按全价估，这数越大高估越多")}
       ${kpi("等价成本", fmtCost(u.cost_usd), "按公开牌价折算；免费渠道=省下的钱，付费渠道=真实成本")}
     </div>
     <h4 class="sec">按天</h4>

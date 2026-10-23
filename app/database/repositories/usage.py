@@ -37,6 +37,7 @@ class UsageRepository:
         output_tokens: int,
         cost_usd: float = 0.0,
         latency_ms: float = 0.0,
+        cached_tokens: int = 0,
     ) -> None:
         async with self.db.session() as session:
             session.add(
@@ -48,6 +49,7 @@ class UsageRepository:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
+                    cached_tokens=cached_tokens,
                     cost_usd=cost_usd,
                     latency_ms=latency_ms,
                 )
@@ -96,10 +98,11 @@ class UsageRepository:
                     func.coalesce(func.sum(UsageRecord.input_tokens), 0),
                     func.coalesce(func.sum(UsageRecord.output_tokens), 0),
                     func.coalesce(func.sum(UsageRecord.total_tokens), 0),
+                    func.coalesce(func.sum(UsageRecord.cached_tokens), 0),
                     func.coalesce(func.sum(UsageRecord.cost_usd), 0.0),
                 ).where(UsageRecord.created_at >= cutoff)
             )
-            count, input_tokens, output_tokens, total_tokens, cost = totals.one()
+            count, input_tokens, output_tokens, total_tokens, cached_tokens, cost = totals.one()
 
             by_provider = await session.execute(
                 select(
@@ -158,6 +161,8 @@ class UsageRepository:
                 "input_tokens": int(input_tokens or 0),
                 "output_tokens": int(output_tokens or 0),
                 "total_tokens": int(total_tokens or 0),
+                #: 命中上游前缀缓存的部分——成本按全价估，这数越大高估越多
+                "cached_tokens": int(cached_tokens or 0),
                 "cost_usd": round(float(cost or 0.0), 6),
                 "by_provider": [
                     {
