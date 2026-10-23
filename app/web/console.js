@@ -1002,6 +1002,7 @@ function openProvidersModal() {
         toast(`供应商已改名为 ${r.provider_id}（部署与 Key 引用已同步）`, "ok");
         state.providers = (await api("/admin/providers")).data || [];
         renderList();
+        refresh();  // 总览页也要刷新，否则旧名一直挂在告警里
       });
     document.querySelectorAll("[data-del-provider]").forEach(b =>
       b.onclick = async () => {

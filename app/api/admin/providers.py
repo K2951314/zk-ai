@@ -1042,7 +1042,12 @@ async def rename_provider(
     container.pool.reconcile(container.config.providers)
     container.pool.register_provider(provider)
 
-    # 5. 别名 / rate_limiter
+    # 5. router adapter：旧的拆、新的装——不重建的话模型市场调
+    #    /providers/{id}/models 会报 "provider 'AMD' is unknown or disabled"
+    container.router.remove_adapter(provider_id)
+    container.router.upsert_adapter(provider)
+
+    # 6. rate_limiter
     container.rate_limiter.register_provider(provider)
     container.refresh_config_watch()
 

@@ -128,6 +128,25 @@ class TestProviderRename:
         # pool 里旧 key 清了、新 key 在
         assert harness.container.pool.get("key-1") is not None
 
+    async def test_rename_rebuilds_router_adapter(self, api) -> None:
+        """改名后 router.adapter(new_id) 必须能拿到 adapter，否则模型市场报错。"""
+        client, harness = api
+        r = await client.put(
+            "/zkadmin/providers/fake/rename",
+            json={"new_id": "fake-reborn"},
+            headers=ADMIN,
+        )
+        assert r.status_code == 200
+        # 新 id 的 adapter 在
+        adapter = harness.container.router.adapter("fake-reborn")
+        assert adapter is not None
+        # 旧 id 的 adapter 已移除
+        try:
+            harness.container.router.adapter("fake")
+            raise AssertionError("旧 id 的 adapter 不该还在")
+        except Exception:
+            pass  # ProviderNotFoundError 是预期的
+
     async def test_rename_rejects_duplicate(self, api) -> None:
         client, _ = api
         r = await client.put(
