@@ -391,3 +391,38 @@ async def test_every_attempt_goes_through_the_registered_adapter(harness: Harnes
         f"有尝试绕过了已注册的适配器：{[call.get('provider') for call in calls]}"
     )
     assert isinstance(harness.adapter, FakeAdapter)
+
+
+async def test_deployment_affinity_pins_a_session_to_one_upstream(provider_config, fake_adapter) -> None:
+    """会话粘性：同一会话钉住上次成功的部署，前缀缓存才能滚雪球。
+
+    2026-10-24 实测：ds 别名 round_robin 在多个上游间轮换，同一场对话每轮
+    打到不同端点、每轮撞没暖的缓存——harness 直连 99% 命中，网关只有 3%。
+    """
+    from app.models.provider import AliasStrategy
+    from app.models.request import ChatCompletionRequest
+    from tests.conftest import make_alias, make_config, make_model, make_provider
+
+    other = make_provider("other", key_ids=("ok-1",))
+    config = make_config(
+        providers=[provider_config, other],
+        models=[
+            make_model("m-a", provider_id="fake", priority=100),
+            make_model("m-b", provider_id="other", priority=100),
+        ],
+        aliases=[make_alias("zk-rr", ["m-a", "m-b"], strategy=AliasStrategy.ROUND_ROBIN)],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter, "other": fake_adapter})
+    try:
+        request = ChatCompletionRequest(model="zk-rr", messages=[{"role": "user", "content": "hi"}])
+        await harness.service.chat(request, request_id="req-1")
+        first_model = harness.all_calls()[-1]["model"]
+
+        request2 = ChatCompletionRequest(model="zk-rr", messages=[
+            {"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"},
+            {"role": "user", "content": "again"},
+        ])
+        await harness.service.chat(request2, request_id="req-2")
+        assert harness.all_calls()[-1]["model"] == first_model, "同一会话要钉在同一部署"
+    finally:
+        await harness.container.shutdown()

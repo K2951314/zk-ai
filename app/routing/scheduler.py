@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -193,6 +194,19 @@ class Scheduler:
         self._deployment_cooldowns: dict[str, float] = {}
         #: 跨请求的连续失败记账与自动隔离，见 :class:`DeploymentHealth`。
         self._deployment_health: dict[str, DeploymentHealth] = {}
+        #: 会话级**缓存粘性**：session_key → (deployment_id, 过期时间)。
+        #:
+        #: 为什么必须有（2026-10-24 实测）：上游前缀缓存按部署隔离。`ds` 别名
+        #: round_robin [deepseek-flash, ds4.1]，ds4.1 再 round_robin [AMD, 魔搭]，
+        #: 于是同一场对话每轮打到 3 个不同上游——每轮都撞没暖的缓存。对比
+        #: harness 直连 99% 命中，网关只有 3%（继续对话也才 12%），用户实付
+        #: 近全价。粘性让「上轮成功的部署」优先，缓存滚雪球；失败照常故障转移。
+        self._deployment_affinity: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        #: 粘性条目的 TTL 与容量上限，复用凭据亲和的配置语义。
+        self._deployment_affinity_ttl = float(
+            getattr(pool, "affinity_ttl", 1800.0) or 1800.0
+        )
+        self._deployment_affinity_max = max(16, int(getattr(pool, "affinity_max_sessions", 64) or 64))
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -257,6 +271,73 @@ class Scheduler:
         health.consecutive_failures = 0
         health.quarantined_until = 0.0
         health.last_error_type = ""
+
+    # ------------------------------------------------------------------ #
+    # 会话级缓存粘性（deployment affinity）
+    # ------------------------------------------------------------------ #
+    def _alias_pins_front(self, alias_name: str | None) -> bool:
+        """该别名是否 pin_first（运营者热切换链首）——粘性必须让位。"""
+        if not alias_name:
+            return False
+        alias = self.router.config.aliases.get(alias_name)
+        return bool(alias and alias.pin_first)
+
+    def _note_deployment_affinity(self, session_key: str | None, deployment_id: str) -> None:
+        """成功之后把会话钉到该部署——下一轮优先回来，让前缀缓存滚起来。
+
+        只是**偏好**不是锁：该部署挂了/冷却了照常故障转移到计划里的下一个，
+        粘性从来不会把请求拖死。
+        """
+        if not session_key or not deployment_id:
+            return
+        self._deployment_affinity.pop(session_key, None)  # refresh LRU position
+        self._deployment_affinity[session_key] = (
+            deployment_id,
+            time.time() + self._deployment_affinity_ttl,
+        )
+        while len(self._deployment_affinity) > self._deployment_affinity_max:
+            self._deployment_affinity.popitem(last=False)
+
+    def _preferred_deployment(self, session_key: str | None, *, now: float | None = None) -> str | None:
+        """该会话上次成功的部署（过期/不存在则 None）。"""
+        if not session_key:
+            return None
+        entry = self._deployment_affinity.get(session_key)
+        if entry is None:
+            return None
+        deployment_id, expires_at = entry
+        moment = now if now is not None else time.time()
+        if expires_at <= moment:
+            self._deployment_affinity.pop(session_key, None)
+            return None
+        return deployment_id
+
+    def _apply_deployment_affinity(
+        self, candidates: list[Any], session_key: str | None, *, preserve_front: bool = False
+    ) -> str | None:
+        """把粘性部署提到候选最前；返回被提升的部署 ID（供路由 reason 记录）。
+
+        只在候选里**已存在且 eligible** 时生效——不改计划内容只调顺序，
+        故障转移链原样保留。
+
+        ``preserve_front=True``（alias.pin_first）时**不许动 index 0**：
+        运营者热切换链首是显式指令，必须立刻生效；粘性是偏好，不能盖指令。
+        （2026-10-24：热切换测试被粘性打红，暴露了这个优先级。）
+        """
+        preferred = self._preferred_deployment(session_key)
+        if not preferred:
+            return None
+        start = 1 if preserve_front else 0
+        for index, candidate in enumerate(candidates):
+            if (
+                index > start
+                and candidate.eligible
+                and candidate.deployment.id == preferred
+                and not self.deployment_cooling_down(preferred)
+            ):
+                candidates.insert(start, candidates.pop(index))
+                return preferred
+        return None
 
     def quarantined_deployments(self, *, now: float | None = None) -> dict[str, dict[str, Any]]:
         """当前被隔离/有失败记录的部署，供 /health 与控制台展示。"""
@@ -497,6 +578,17 @@ class Scheduler:
         """Run *request* to completion, retrying and failing over as configured."""
         decision = self.router.plan(request, unavailable=self.unavailable_deployments())
         session_key = self._session_key(request)
+        # 缓存粘性：把该会话上次成功的部署提到最前（调顺序不改内容，
+        # 故障转移链保留）。不这么做的话 round_robin 会让同一场对话在
+        # 多个上游之间来回跳，每轮都撞没暖的前缀缓存（2026-10-24 实测）。
+        # pin_first 别名（热切换）优先级更高——运营者指令压过偏好。
+        sticky = self._apply_deployment_affinity(
+            decision.candidates,
+            session_key,
+            preserve_front=self._alias_pins_front(decision.alias),
+        )
+        if sticky:
+            logger.info("session %s sticky deployment: %s", (session_key or "")[:20], sticky)
         attempts: list[AttemptOutcome] = []
         errors: list[ErrorInfo] = []
         attempt_number = 0
@@ -635,6 +727,7 @@ class Scheduler:
                     latency_ms = (time.perf_counter() - started) * 1000
                     self.pool.report_success(credential.id, latency_ms=latency_ms)
                     self.pool.note_affinity(session_key, credential.id)
+                    self._note_deployment_affinity(session_key, candidate.deployment.id)
                     usage = response.usage or Usage()
                     self._note_deployment_success(candidate.deployment.id)
                     self._note_tokens(candidate.provider, credential, usage)
@@ -701,6 +794,13 @@ class Scheduler:
         """
         decision = self.router.plan(request, unavailable=self.unavailable_deployments())
         session_key = self._session_key(request)
+        sticky = self._apply_deployment_affinity(
+            decision.candidates,
+            session_key,
+            preserve_front=self._alias_pins_front(decision.alias),
+        )
+        if sticky:
+            logger.info("session %s sticky deployment (stream): %s", (session_key or "")[:20], sticky)
         attempts: list[AttemptOutcome] = []
         errors: list[ErrorInfo] = []
         attempt_number = 0
@@ -878,6 +978,7 @@ class Scheduler:
                     if not cancelled and not stream_error:
                         self.pool.report_success(credential.id, latency_ms=latency_ms)
                         self.pool.note_affinity(session_key, credential.id)
+                        self._note_deployment_affinity(session_key, candidate.deployment.id)
 
                     if usage.total_tokens == 0:
                         # Providers that omit usage during streaming: estimate.
