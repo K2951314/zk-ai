@@ -3384,7 +3384,7 @@ function reportRender(stats, reqs, days) {
     <div class="k-label">${l}</div><div class="k-value">${v}</div>
     <div class="k-sub">${esc(s || "")}</div></div>`;
 
-  $('report-out').innerHTML = `
+  $('#report-out').innerHTML = `
   <div class="grid kpis">
     <div class="report-kpis-head">① 这段时间的大脉</div>
     ${kpi("", "请求数（近 " + days + " 天）", num(u.requests), "输入 " + num(u.input_tokens) + " tok")}

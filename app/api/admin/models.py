@@ -126,11 +126,15 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
             detail={"error": {"message": "部署 ID 重复", "type": "invalid_model"}},
         )
 
-    # File first: if the YAML cannot be written we abort with no partial state,
-    # so the console and the on-disk config never drift apart.
-    synced = _write_model_file(container, model)
+    # 先改内存立即生效（下一次请求就能看到），再落盘。
+    # 落盘失败则回滚内存，保持文件与内存一致。
     container.config.models[model.id] = model
-    await container.config_repository.upsert_model(model)
+    try:
+        synced = _write_model_file(container, model)
+        await container.config_repository.upsert_model(model)
+    except Exception:
+        container.config.models.pop(model.id, None)  # 回滚
+        raise
     return {
         "object": "model",
         "synced": synced,
