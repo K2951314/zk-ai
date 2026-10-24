@@ -620,15 +620,28 @@ git push origin main
 # 服务器（用户 ubuntu 有 sudo，仓库文件属 www-data）
 sudo git -c safe.directory=/opt/zkai -C /opt/zkai fetch origin main
 sudo git -c safe.directory=/opt/zkai -C /opt/zkai reset --hard origin/main
-sudo git -c safe.directory=/opt/zkai -C /opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data
+cd /opt/zkai && sudo git -c safe.directory=/opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data
 sudo systemctl restart zkai            # 配置热加载，但换代码要重启
 ```
+
+⚠ **chown 那行必须先 `cd /opt/zkai`**（2026-10-24 实测踩坑）：`ls-files` 输出的
+是**相对路径**，在 SSH 登录的家目录里跑 `xargs chown` 会整批
+`cannot access`——且它排在 `&&` 链中间，失败会**静默跳过后面的 restart**，
+表现为「代码同步了但服务还在跑旧版」。
 
 - `reset --hard` 只动**被跟踪**的文件：`config/*.yaml`、`.env`、`data/`、`__pycache__`
   全在 `.gitignore` 里，**不会被覆盖**。服务器上现役配置永远是它自己的那一份，
   所以 `config/models.yaml` 这类**不受版本控制、但影响行为**的文件要单独同步
   （本机 scp 不可用，用 `ssh host "cat > /tmp/x" < 文件` 或 base64 管道）。
 - 服务器监听 **8318**，本机是 8317 —— 探活别打错端口。
+- **服务器连不上 GitHub 时的备用通道：git bundle 经 SSH 运输**（2026-10-24
+  实测，GnuTLS -110 / 443 超时）：本地
+  `git bundle create x.bundle <服务器HEAD>..main` →
+  `ssh tandian211 "cat > /tmp/x.bundle" < x.bundle` → 服务器
+  `git fetch /tmp/x.bundle main:refs/remotes/origin/main` 后照常
+  reset/chown/restart。**这仍是 git 同步**（完整对象与引用），只是运输通道
+  换了——比手工挑文件传强在服务器 HEAD 仍然真实可查。纯文档改动可以跳过
+  restart。
 - **现役服务器是 `tandian211`（211.159.174.204，用户 ubuntu，SSH 别名
   `tandian211`，key `~/.ssh/migrate_211`）**；旧的 120.53.28.29 已停用，
   本地 `~/.ssh/config` 里那条是另一台内网机，别连错。
