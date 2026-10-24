@@ -278,6 +278,17 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   都没超时，所以次数闸认为还有预算。墙钟预算只在**两次尝试之间**检查，不会打断已在
   飞的流（那会截断客户端还能读的响应）。默认 300s = 现役最大上游超时（商汤 300s），
   一次成功的慢生成不会被误杀。
+- **AMD 的 DeepSeek 流式：冷 prefill 静默 50-70s，60s 读超时掐死整轮**（2026-10-24
+  服务器实锤，ds harness 反复报「流式读取中途超时」的根因）：
+  `developer.amd.com.cn` 的 DeepSeek-V4.1-Flash 在**未命中缓存**时，113k token 的
+  prefill 全程不吐一个字节、实测 50-70 秒；`timeout: 60` 的读超时把这类轮次掐死在
+  中途——流式一旦开头发送就**无法重试**，客户端整轮报废。判定特征：中途超时的尝试
+  总时长 ≈ X + 60s（X 是卡死前已流式的时间；实测 60.3/78.4/82.5/122.7/151.2s，
+  全部落差恰为 60）。对照：命中缓存的轮次 prefill 秒过（cached=100% 的行总时长
+  45-69s 全是生成时间）。已修（服务器+本机 providers.yaml）：`timeout: 60→300`
+  （对齐商汤现役最大值）、`max_retries: 2→0`（NVIDIA 同款教训：挂起交给上层
+  冷却+换渠道）。⚠ 粘性会话的**首轮（缓存冷启动）恰恰就是长 prefill 轮**——
+  读超时太紧等于专挑粘性的第一枪打，修缓存粘性必须同步检查上游超时预算。
 - **429 不能再默认「换一把兄弟 Key」**（2026-09-28 修）：分类器按正文分出
   `ThrottleKind`（`quota` 额度用尽 / `throughput` tpm / `frequency` rpm·rps /
   `unknown`），`cooldown.throttle_scopes` 决定冷却覆盖到哪：
