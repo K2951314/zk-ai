@@ -671,7 +671,7 @@ ZK-AI/
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 38 个测试模块，991 个用例，全部 Mock
+├── tests/                # conftest + 38 个测试模块，998 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -679,9 +679,9 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 103 个文件约 25,530 行，`tests/` 38 个测试模块 991 个用例（约 17,560 行），
+规模：`app/` 103 个文件约 25,850 行，`tests/` 38 个测试模块 998 个用例（约 17,780 行），
 `scripts/` 18 个文件约 4,896 行。**测试/产品代码 = 68%**。
-（这两个数字上一次更新是 2026-10-24 早，此前为同日凌晨的 68/25,470/38/990——**文档规模必须跟着代码走**，
+（这两个数字上一次更新是 2026-10-24 午，此前为同日早的 68/25,530/38/991——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
 ---
@@ -1018,7 +1018,11 @@ curl -s -X POST http://127.0.0.1:8317/admin/aliases \
   的哈希指纹——**与对话长度无关**，保证整通对话稳定映射到同一把 Key。
 - 亲和是**偏好不是锁**：被钉的 Key 一旦冷却/故障，立即回退常规轮换；下一次成功
   自动把锚点挪到新 Key（即「换池子也有连续性」，等价于在 CC Switch 上换 key）。
-- 滑动 TTL：每次成功续命 `ttl_seconds`，空闲超时才解除；`max_sessions` 做 LRU 上限。
+- 滑动 TTL：每次成功续命 `ttl_seconds`，空闲超时才解除；`max_sessions` 做 LRU 上限
+  （这两个键与 `enabled` 自 2026-10-24 起**热重载生效**，存盘即改，不用重启）。
+- 命中效果可观测（2026-10-24 起）：成功日志带 `usage … cached=N (P%)`（网关估算的
+  token 数会标 `(estimated)`，别当实报命中率）；锚点挪动有 `re-anchored: A -> B`、
+  粘性 Key 被冷却/限流挤掉有 `pin skipped` 日志线——排查「Key 是否在跳」看这三样。
 - 控制台「凭据池」用 📌N 显示每把 Key 当前钉住的会话数。
 
 > 注意：token 数**不会**因换 Key 而"累积"——对话历史本来就要每轮随请求重发，这是
@@ -1358,7 +1362,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**991 个用例，全部通过，零网络、零真实配额。**
+**998 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

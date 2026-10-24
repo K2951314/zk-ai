@@ -280,6 +280,9 @@ class Container:
             # 用同一个 from_mapping，与 build_container 的构造路径完全一致。
             self.pool.policy = CooldownPolicy.from_mapping(config.raw.get("cooldown"))
             self.pool.tracker.policy = self.pool.policy
+            # credential_affinity 段同理（池子只在建池时读它一次）：reload
+            # 不补读的话，改 ttl/max_sessions/enabled 都要重启进程才生效。
+            self.pool.apply_affinity_config(config.raw.get("credential_affinity"))
             for provider in config.providers.values():
                 self.pool.register_provider(provider)
             pruned = self.pool.reconcile(config.providers)

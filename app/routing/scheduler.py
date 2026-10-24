@@ -202,11 +202,6 @@ class Scheduler:
         #: harness 直连 99% 命中，网关只有 3%（继续对话也才 12%），用户实付
         #: 近全价。粘性让「上轮成功的部署」优先，缓存滚雪球；失败照常故障转移。
         self._deployment_affinity: OrderedDict[str, tuple[str, float]] = OrderedDict()
-        #: 粘性条目的 TTL 与容量上限，复用凭据亲和的配置语义。
-        self._deployment_affinity_ttl = float(
-            getattr(pool, "affinity_ttl", 1800.0) or 1800.0
-        )
-        self._deployment_affinity_max = max(16, int(getattr(pool, "affinity_max_sessions", 64) or 64))
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -291,11 +286,14 @@ class Scheduler:
         if not session_key or not deployment_id:
             return
         self._deployment_affinity.pop(session_key, None)  # refresh LRU position
+        # TTL 与容量**现场读**池子（credential_affinity 段），不做构造期快照：
+        # 快照会在热重载后变陈旧，而 getattr 猜属性名的旧写法更是把容量钉死
+        # 在魔数 64——运营者改 max_sessions 怎么都不生效（2026-10-24 实锤）。
         self._deployment_affinity[session_key] = (
             deployment_id,
-            time.time() + self._deployment_affinity_ttl,
+            time.time() + self.pool.affinity_ttl,
         )
-        while len(self._deployment_affinity) > self._deployment_affinity_max:
+        while len(self._deployment_affinity) > self.pool.affinity_max_sessions:
             self._deployment_affinity.popitem(last=False)
 
     def _preferred_deployment(self, session_key: str | None, *, now: float | None = None) -> str | None:
@@ -402,6 +400,39 @@ class Scheduler:
         if limiter is None:
             return
         limiter.note_tokens(provider.id, credential.id, usage.total_tokens, credential.tags)
+
+    @staticmethod
+    def _log_usage(
+        candidate: RoutingCandidate,
+        credential: CredentialRuntime,
+        usage: Usage,
+        *,
+        estimated: bool = False,
+    ) -> None:
+        """缓存命中数落日志（2026-10-24 缓存分析 §4-E）。
+
+        ``usage.cached_tokens`` 全链已打通却没有任何地方写进日志，
+        ``grep cached data/gateway.log`` 恒为 0——没有这个数字，
+        命中率优化就只能靠对账猜。两条成功路径（非流式 / 流式）都调它。
+        ``estimated=True`` 时必须标注：网关自己估的 token 数没有 cached 信息，
+        不标的话运营者会把「上游没报 usage」误读成「命中率为 0」。
+        """
+        share = (
+            usage.cached_tokens / usage.prompt_tokens * 100.0
+            if usage.prompt_tokens
+            else 0.0
+        )
+        logger.info(
+            "usage %s/%s key=%s: prompt=%d cached=%d (%.0f%%) completion=%d%s",
+            candidate.deployment.provider_id,
+            candidate.deployment.model,
+            credential.id,
+            usage.prompt_tokens,
+            usage.cached_tokens,
+            share,
+            usage.completion_tokens,
+            " (estimated)" if estimated else "",
+        )
 
     def _session_key(self, request: ChatCompletionRequest) -> str | None:
         """Stable identity for credential affinity, without persisting any state.
@@ -731,6 +762,9 @@ class Scheduler:
                     usage = response.usage or Usage()
                     self._note_deployment_success(candidate.deployment.id)
                     self._note_tokens(candidate.provider, credential, usage)
+                    self._log_usage(
+                        candidate, credential, usage, estimated=response.usage is None
+                    )
                     attempts.append(
                         self._attempt_outcome(
                             attempt_number=attempt_number,
@@ -980,7 +1014,10 @@ class Scheduler:
                         self.pool.note_affinity(session_key, credential.id)
                         self._note_deployment_affinity(session_key, candidate.deployment.id)
 
-                    if usage.total_tokens == 0:
+                    # 估算前先记住「上游没报 usage」：估出来的数字没有 cached 信息，
+                    # 落日志时必须带 (estimated) 标记，不许冒充实报命中率。
+                    usage_estimated = usage.total_tokens == 0
+                    if usage_estimated:
                         # Providers that omit usage during streaming: estimate.
                         usage = Usage.build(
                             request.estimated_input_tokens(),
@@ -988,6 +1025,9 @@ class Scheduler:
                         )
                     if not cancelled and not stream_error:
                         self._note_tokens(candidate.provider, credential, usage)
+                        self._log_usage(
+                            candidate, credential, usage, estimated=usage_estimated
+                        )
 
                     _record(
                         self._attempt_outcome(

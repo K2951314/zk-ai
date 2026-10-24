@@ -612,6 +612,58 @@ def test_affinity_bindings_are_provider_scoped_and_masked() -> None:
     assert pool.affinity_bindings_for_provider("nope") == []
 
 
+def test_affinity_beats_weighted_rotation_every_time() -> None:
+    """weighted 轮换（现役配置）下粘性必须每次都赢：浮前是确定性的。
+
+    2026-10-24 缓存分析曾怀疑「weighted 下 8/9 概率没被浮上去」——
+    这条测试钉死：粘性命中与轮换策略无关，钉住的 Key 永远排第一。
+    """
+    pool, _ = build_pool(rotation="weighted", keys=(("k1", 100), ("k2", 100), ("k3", 100)))
+    pool._rotation.rng = random.Random(20261024)
+    # 无粘性时 weighted 的首选确实在漂——证明下面「总是同一把」不是空转。
+    leaders = {next(c.id for c in pool.candidates("p1")) for _ in range(12)}
+    assert len(leaders) > 1
+    pool.note_affinity("s-1", "k3")
+    for _ in range(12):
+        assert next(c.id for c in pool.candidates("p1", session_key="s-1")) == "k3"
+
+
+def test_affinity_reanchor_and_pin_skip_leave_log_traces(caplog) -> None:
+    """锚点挪动 / 粘性 Key 不可用，都必须留日志——「Key 在跳」要有实锤可查。"""
+    pool, _ = build_pool()
+    with caplog.at_level("INFO", logger="zkai.credentials.pool"):
+        pool.note_affinity("s-1", "k1")
+        pool.note_affinity("s-1", "k1")  # 续期不打日志
+        pool.note_affinity("s-1", "k2")  # 换锚才打
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("re-anchored" in m for m in messages) == 1
+    assert any("k1 -> k2" in m for m in messages)
+    # 粘性 Key 冷却后会被跳过——跳过必须说明是谁、什么状态。
+    pool.report_failure("k2", failure(429))
+    with caplog.at_level("INFO", logger="zkai.credentials.pool"):
+        pool.candidates("p1", session_key="s-1")
+    assert any(
+        "pin skipped" in r.getMessage() and "k2" in r.getMessage() and "cooldown" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_affinity_pin_of_another_provider_stays_silent(caplog) -> None:
+    """钉在别的供应商的 Key 不算「跳过」：多部署计划里这是常态，不许刷屏。"""
+    pool, _ = build_pool()
+    other = ProviderConfig(
+        id="p2",
+        type=ProviderType.OPENAI,
+        base_url="http://127.0.0.1:9/v1",
+        credentials=[CredentialConfig(id="kx", value="secret-x", priority=100)],
+    )
+    pool.register_provider(other)
+    pool.note_affinity("s-1", "kx")  # 钉在 p2 的 Key 上
+    with caplog.at_level("INFO", logger="zkai.credentials.pool"):
+        pool.candidates("p1", session_key="s-1")
+    assert not any("pin skipped" in r.getMessage() for r in caplog.records)
+
+
 # --------------------------------------------------------------------------- #
 # UNHEALTHY auto-recovery (auto_recover_after) and pool reconcile on reload
 # --------------------------------------------------------------------------- #

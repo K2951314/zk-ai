@@ -426,3 +426,53 @@ async def test_deployment_affinity_pins_a_session_to_one_upstream(provider_confi
         assert harness.all_calls()[-1]["model"] == first_model, "同一会话要钉在同一部署"
     finally:
         await harness.container.shutdown()
+
+
+async def test_deployment_affinity_capacity_follows_the_pool(harness: Harness) -> None:
+    """部署粘性的容量必须**活读**池子（credential_affinity.max_sessions）。
+
+    2026-10-24 实锤：scheduler 曾用 getattr 猜属性名（少了下划线）把容量
+    钉死在魔数 64——运营者改配置怎么都不生效；对抗式审查又发现构造期快照
+    会让热重载后的新值永远到不了这里。现在现场读池子，改容量立刻见效。
+    """
+    assert harness.pool.affinity_max_sessions >= 4096  # 容器默认，不是 64
+    harness.pool._affinity_max_sessions = 3  # 缩小容量，LRU 淘汰必须跟着缩
+    for index in range(5):
+        harness.scheduler._note_deployment_affinity(f"s-{index}", "fake-model")
+    assert len(harness.scheduler._deployment_affinity) == 3
+    assert "s-0" not in harness.scheduler._deployment_affinity
+    assert "s-4" in harness.scheduler._deployment_affinity
+
+
+async def test_log_usage_marks_estimates(caplog) -> None:
+    """网关估算的 usage 必须带 (estimated)，不许冒充上游实报的缓存数字。"""
+    from types import SimpleNamespace
+
+    from app.models.response import Usage
+    from app.routing.scheduler import Scheduler
+
+    candidate = SimpleNamespace(deployment=SimpleNamespace(provider_id="p", model="m"))
+    credential = SimpleNamespace(id="k1")
+    with caplog.at_level("INFO", logger="zkai.routing.scheduler"):
+        Scheduler._log_usage(
+            candidate, credential, Usage(prompt_tokens=100, cached_tokens=50), estimated=True
+        )
+        Scheduler._log_usage(candidate, credential, Usage(prompt_tokens=100, cached_tokens=100))
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("(estimated)" in m for m in messages)
+    assert any("cached=100 (100%)" in m and "(estimated)" not in m for m in messages)
+
+
+async def test_success_logs_cache_numbers(harness: Harness, caplog) -> None:
+    """缓存命中数必须落进日志（2026-10-24 缓存分析 §4-E）。
+
+    ``usage.cached_tokens`` 全链打通却没人写日志，``grep cached
+    data/gateway.log`` 恒为 0——命中率优化缺第一手数据。
+    """
+    harness.adapter.queue(Behavior(text="ok", prompt_tokens=1000, completion_tokens=5))
+    with caplog.at_level("INFO", logger="zkai.routing.scheduler"):
+        await harness.request()
+    assert any(
+        "cached=" in r.getMessage() and "prompt=1000" in r.getMessage()
+        for r in caplog.records
+    )

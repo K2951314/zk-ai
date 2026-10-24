@@ -26,6 +26,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
+from typing import Any
 
 from app.core.logging import get_logger
 from app.core.security import resolve_env_reference
@@ -240,6 +241,31 @@ class CredentialPool:
     # ------------------------------------------------------------------ #
     # Conversation affinity (sticky sessions across failover)
     # ------------------------------------------------------------------ #
+    @property
+    def affinity_max_sessions(self) -> int:
+        """LRU cap as a public read (the scheduler's deployment affinity reuses it)."""
+        return self._affinity_max_sessions
+
+    def apply_affinity_config(self, mapping: dict[str, Any] | None) -> None:
+        """热重载时同步 ``credential_affinity`` 段。
+
+        池子只在建池时读它一次；reload 不补这一步，运营者改
+        ``ttl_seconds`` / ``max_sessions`` / ``enabled`` 就是「改完不生效」
+        ——与 2026-10-13 的 CooldownPolicy 同型（AGENTS.md 有档案）。
+        默认值与 ``build_container`` 的构造路径逐字一致。
+        """
+        data = mapping or {}
+        with self._lock:
+            self.affinity_enabled = bool(data.get("enabled", True))
+            self.affinity_ttl = max(30.0, float(data.get("ttl_seconds", 1800.0)))
+            self._affinity_max_sessions = max(16, int(data.get("max_sessions", 4096)))
+
+    @staticmethod
+    def _session_digest(session_key: str) -> str:
+        # Session keys can be client-provided text (session_id / user) or raw
+        # message content - never echo them into logs, only a short digest.
+        return hashlib.sha256(session_key.encode("utf-8", "replace")).hexdigest()[:10]
+
     def note_affinity(self, session_key: str | None, credential_id: str) -> None:
         """Bind *session_key* to the credential that just served it successfully.
 
@@ -249,10 +275,25 @@ class CredentialPool:
         if not self.affinity_enabled or not session_key or not credential_id:
             return
         with self._lock:
+            moment = time.time()
+            previous = self._affinity.get(session_key)
             self._affinity.pop(session_key, None)  # refresh LRU position
-            self._affinity[session_key] = (credential_id, time.time() + self.affinity_ttl)
+            self._affinity[session_key] = (credential_id, moment + self.affinity_ttl)
             while len(self._affinity) > self._affinity_max_sessions:
                 self._affinity.popitem(last=False)
+            # 只在锚点真的挪动时留痕：续期是常态，换锚意味着故障转移把会话
+            # 带到了新缓存空间——这正是「Key 是否在跳」排查要的第一手证据。
+            if (
+                previous is not None
+                and previous[0] != credential_id
+                and previous[1] > moment
+            ):
+                logger.info(
+                    "session %s re-anchored: %s -> %s",
+                    self._session_digest(session_key),
+                    previous[0],
+                    credential_id,
+                )
 
     def _apply_affinity(
         self,
@@ -281,6 +322,25 @@ class CredentialPool:
                 if index:
                     ordered.insert(0, ordered.pop(index))
                 return
+        # 活着的锚，但 Key 没过可用性过滤（冷却 / 限流窗口满 / 被禁用）。
+        # 必须留痕——「粘性 Key 被跳过」正是缓存命中率下滑时运营者要看的信号。
+        # 钉在**别的供应商**的 Key 属于多部署计划的常态，保持沉默别刷屏。
+        pinned = self._credentials.get(credential_id)
+        if pinned is None or pinned.provider_id != provider_id:
+            return
+        limiter = self.rate_limiter
+        rate_full = (
+            limiter is not None
+            and limiter.remaining(provider_id, pinned.id, pinned.tags, now=moment) <= 0
+        )
+        logger.info(
+            "session %s pin skipped: %s not selectable on %s (status=%s%s)",
+            self._session_digest(session_key),
+            pinned.id,
+            provider_id,
+            pinned.status.value,
+            ", rate window full" if rate_full else "",
+        )
 
     def pick(
         self,
@@ -562,10 +622,10 @@ class CredentialPool:
                     continue
                 if expires <= moment:
                     continue
-                digest = hashlib.sha256(session_key.encode("utf-8", "replace")).hexdigest()
+                digest = self._session_digest(session_key)
                 result.append(
                     {
-                        "session": digest[:10],
+                        "session": digest,
                         "credential_id": credential_id,
                         "remaining": round(expires - moment, 1),
                     }

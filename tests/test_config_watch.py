@@ -410,6 +410,37 @@ async def test_editing_the_cooldown_section_reaches_the_pool(tmp_path: Path) -> 
         await container.shutdown()
 
 
+_AFFINITY_B = """\
+credential_affinity:
+  enabled: false
+  ttl_seconds: 14400
+  max_sessions: 128
+"""
+
+
+async def test_editing_the_affinity_section_reaches_the_pool(tmp_path: Path) -> None:
+    """改 credential_affinity 段必须真的改掉池子（2026-10-24 对抗式审查发现）。
+
+    池子只在建池时读这一段；reload 不补读的话，改 ttl/max_sessions/enabled
+    都要重启进程——与 cooldown 段 2026-10-13 那次是同一个洞。
+    """
+    # 复用 cooldown 的容器工厂：只借一个真容器，初始 config.yaml 没写
+    # affinity 段，所以池子应当是构造默认（true / 1800 / 4096）。
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        assert container.pool.affinity_enabled is True
+        assert container.pool.affinity_ttl == 1800.0
+
+        (tmp_path / "config.yaml").write_text(_AFFINITY_B, encoding="utf-8")
+        await container.reload_config()
+
+        assert container.pool.affinity_enabled is False, "reload 后 enabled 还是旧值"
+        assert container.pool.affinity_ttl == 14400.0
+        assert container.pool.affinity_max_sessions == 128
+    finally:
+        await container.shutdown()
+
+
 async def test_a_cooldown_edit_changes_the_failover_decision(tmp_path: Path) -> None:
     """端到端：改完之后，一把 tpm 429 从「直接故障转移」变成「换兄弟 Key」。
 

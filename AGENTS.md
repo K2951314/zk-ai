@@ -175,6 +175,12 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   （钉 `_normalize_throttle` 的真实决策），已用变异法验证鉴别力。
   ⚠ **凡 reload 时重建了一部分派生对象，就要问「还有谁持有旧配置的切片」**——
   这次漏的是 CooldownPolicy，同类候选：RetryPolicy、RateLimiter 的规则表。
+  2026-10-24 同型又抓到两处并已修：①pool 的 `credential_affinity` 三参数
+  只在建池时读一次（reload 现经 `pool.apply_affinity_config` 补读，测试
+  `test_editing_the_affinity_section_reaches_the_pool` 钉住）；②scheduler
+  部署粘性的 TTL/容量是构造期快照（已改成**现场读池子**——快照必然在热重载
+  后变陈旧；顺带修掉了 getattr 猜错属性名恒回落魔数 64 的旧账）。教训的两半：
+  **配置段要有人补读，派生副本不如活读**。
 - **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
   「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
   只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
