@@ -62,11 +62,20 @@ def resolve_command(argv: list[str], which=shutil.which) -> list[str]:
 
     if sys.platform == "win32" and suffix in {".cmd", ".bat"}:
         entry = _npm_entry(path)
-        node = _node_binary(path.parent, which) if entry else None
-        if not entry or not node:
+        if entry is None:
             raise LauncherError(
-                f"{argv[0]!r} 解析到批处理 shim {path}，但无法从中取出 node 入口"
-                "（或找不到 node）。请改用原生 .exe，或按 npm 的 node_modules 布局检查安装。"
+                f"{argv[0]!r} 解析到批处理 shim {path}，但无法从中取出入口脚本。"
+                "请改用原生 .exe，或按 npm 的 node_modules 布局检查安装。"
+            )
+        # npm 包不一定都是 JS：Claude Code 的 shim 直接指向 bin/claude.exe，
+        # 交给 node 会报 ERR_UNKNOWN_FILE_EXTENSION。原生可执行文件直接跑。
+        if entry.suffix.lower() == ".exe":
+            return [str(entry), *argv[1:]]
+        node = _node_binary(path.parent, which)
+        if not node:
+            raise LauncherError(
+                f"{argv[0]!r} 的入口是脚本 {entry}，但本机找不到 node。"
+                "请安装 Node 或改用原生 .exe。"
             )
         return [node, str(entry), *argv[1:]]
 

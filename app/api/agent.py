@@ -94,7 +94,7 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
     for role in registry.known_roles():
         rc = registry.roles[role]
         tool = registry.tools[rc.tool]
-        models = tool.models or [tool.model]
+        models = tool.models or ([tool.model] if tool.model else [])
         items.append({
             "role": role,
             "tool": tool.name,

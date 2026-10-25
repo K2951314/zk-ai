@@ -39,14 +39,25 @@ tools:
   # 非交互模式：claude -p "任务"（--print）；模型用 --model 指定
   # 收费：走 Anthropic 订阅/API 额度，cost_tier 如实标 paid
   # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Claude Code（命令名 claude）—— 能力最强的 agent，模型由 CC Switch 决定
+  # ⚠ model 留空 = 不传 --model，用它自己配置的模型。**别填网关别名**：
+  #    -p 会在客户端校验模型归属，zk-k3 之类直接 unrecognized_model，
+  #    请求到不了网关（2026-10-25 实测）。
+  # ⚠ approval_mode: bypass -> --dangerously-skip-permissions。它没有无头
+  #    可用的只读档，只能开 bypass；只给「用户自己 @」的场景用。
+  # ⚠ 前提：CC Switch 在跑（本地代理），否则 claude 连不上。
+  # -------------------------------------------------------------------------
   claude:
     enabled: false
     command: claude
     backend: official
-    model: claude-sonnet-4-5
+    model: ""
     cost_tier: paid
     timeout: 300
-    approval_mode: default
+    approval_mode: bypass
+    models: []
+    free_models: []
 
   # -------------------------------------------------------------------------
   # Codex CLI —— 未安装，装好后把 enabled 打开
@@ -157,3 +168,6 @@ roles:
   cli-skill:
     tool: codex                   # 需要本机 skill 的活（codex 自带 ~/.codex/skills）
     hint: 需要本机 skill 的任务（外部 CLI 执行）
+  cli-claude:
+    tool: claude                  # 综合能力最强的 agent（模型由 CC Switch 决定）
+    hint: 复杂任务、方案与代码评审（外部 CLI 执行）

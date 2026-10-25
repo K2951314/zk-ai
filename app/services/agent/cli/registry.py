@@ -27,10 +27,16 @@ COST_TIERS = frozenset({"free", "cheap", "paid"})
 #: official = 走工具自家的登录态与额度
 _BACKENDS = frozenset({"gateway", "official"})
 
-#: 外部 CLI 自带的审批级别：只允许这两档。
-#: yolo/auto-edit 之类「自动同意写文件/跑命令」的模式绝不允许——
-#: 那等于让外部工具绕过 zkai 自己的两阶段审批卡。
-_APPROVAL_MODES = frozenset({"plan", "default"})
+#: 外部 CLI 自带的审批级别：
+#: - ``plan``    只读分析（推荐的无头档）
+#: - ``default`` 交互式默认（无头场景可能等审批挂住）
+#: - ``bypass``  自动同意（Claude Code 的 ``--dangerously-skip-permissions``）
+#:
+#: ``bypass`` 会绕过 zkai 自己的两阶段审批卡，所以**只允许用户显式 @ 的执行体**
+#: 在配置里写出来；模型自动派活（delegate_cli）同样会先过审批卡，但外部 CLI
+#: 拿到任务后的写操作不再逐条确认——这是 2026-10-25 为 Claude Code 开的例外，
+#: 它没有无头可用的只读档（``plan`` 也在客户端被判非法）。
+_APPROVAL_MODES = frozenset({"plan", "default", "bypass"})
 
 #: 单次委派超时允许区间（秒）：防止配置写出 0 或一整天
 _TIMEOUT_MIN = 10
@@ -136,9 +142,8 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
         )
         return None
     model = str(raw.get("model") or "").strip()
-    if not model:
-        warnings.append(f"cli_tools: 工具 {name!r} 已启用但 model 为空，已忽略")
-        return None
+    # 空模型 = 用该 CLI 自己配置的模型（Claude Code 走 CC Switch 选定的那个，
+    # 我们不该硬塞一个它认不出的名字）。其它工具有默认模型，通常都会填。
     cost_tier = str(raw.get("cost_tier") or "").strip()
     if cost_tier not in COST_TIERS:
         warnings.append(

@@ -42,15 +42,28 @@ class QwenAdapter(CliAdapter):
 
 
 class ClaudeAdapter(CliAdapter):
-    """Claude Code（命令名 claude，待安装）。
+    """Claude Code（命令名 claude）。
 
-    非交互形态：claude -p "任务"（--print）；模型用 --model 指定。
-    本适配器按公开文档形态先写好，安装后实测校准。
+    无头形态：``claude -p <task>``（``-p`` 是布尔开关，任务走位置参数）。
+
+    - ``model`` 留空 = **不传 ``--model``**，用它自己配置的模型。本机是 CC Switch
+      选定的那个，走 ``127.0.0.1:15721`` 的本地代理。**别硬塞网关别名**：``-p``
+      走 SDK 分支，会在客户端校验模型归属，``zk-k3`` / 连 ``claude-sonnet-4-5``
+      都被判 ``unrecognized_model``（2026-10-25 实测，网关日志里一条请求都没有）。
+    - ``approval_mode: bypass`` → ``--dangerously-skip-permissions``。Claude Code
+      没有无头可用的只读档（``--permission-mode plan`` 同样被客户端判非法），
+      所以要用它只能开 bypass——配置里显式写，且只给用户自己 @ 的执行体。
     """
 
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
-        return [cfg.command, "-p", task, "--model", cfg.model]
+        argv = [cfg.command]
+        if cfg.approval_mode == "bypass":
+            argv.append("--dangerously-skip-permissions")
+        argv += ["-p", task]
+        if cfg.model:
+            argv += ["--model", cfg.model]
+        return argv
 
 
 class CodexAdapter(CliAdapter):

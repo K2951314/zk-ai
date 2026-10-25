@@ -19,6 +19,7 @@ import pytest
 
 from app.services.agent.cli import launcher
 from app.services.agent.cli.adapters import (
+    ClaudeAdapter,
     CodeBuddyAdapter,
     CodexAdapter,
     GeminiAdapter,
@@ -72,6 +73,21 @@ def test_parse_tool_disabled_silent():
     assert warnings == []  # 未启用不算错
 
 
+def test_parse_tool_empty_model_means_cli_default():
+    """空模型 = 用 CLI 自配模型（Claude Code 靠 CC Switch 选模型）。"""
+    warnings: list[str] = []
+    cfg = _parse_tool("claude", _enabled(model=""), warnings)
+    assert cfg is not None and cfg.model == ""
+    assert warnings == []
+
+
+def test_parse_tool_bypass_mode_is_allowed():
+    """bypass 是给 Claude Code 开的例外（它没有无头可用的只读档）。"""
+    warnings: list[str] = []
+    cfg = _parse_tool("claude", _enabled(approval_mode="bypass"), warnings)
+    assert cfg is not None and cfg.approval_mode == "bypass"
+
+
 @pytest.mark.parametrize(
     "over,frag",
     [
@@ -79,7 +95,6 @@ def test_parse_tool_disabled_silent():
         ({"backend": "moon"}, "backend"),
         ({"approval_mode": "yolo"}, "approval_mode"),   # 自动同意模式必须被硬拦
         ({"command": ""}, "command"),
-        ({"model": ""}, "model"),
         ({"command": "definitely-not-exists-cmd-xyz"}, "找不到命令"),
     ],
 )
@@ -390,6 +405,21 @@ def test_codex_default_mode_has_no_sandbox_flag():
     assert "-s" not in argv
 
 
+def test_claude_bypass_with_empty_model_omits_model_flag():
+    """空模型 -> 不传 --model（用 CC Switch 选定的那个）；bypass 才带跳过审批。"""
+    argv = ClaudeAdapter(_cli("claude", "claude", "", "bypass")).build_command("评审方案", "/w")
+    assert argv[0] == "claude"
+    assert "--dangerously-skip-permissions" in argv
+    assert "-p" in argv and argv[-1] == "评审方案"
+    assert "--model" not in argv
+
+
+def test_claude_explicit_model_and_plan_stay_minimal():
+    argv = ClaudeAdapter(_cli("claude", "claude", "some-model", "plan")).build_command("x", "/w")
+    assert argv[argv.index("--model") + 1] == "some-model"
+    assert "--dangerously-skip-permissions" not in argv
+
+
 def test_gemini_argv_plan_mode_and_json():
     argv = GeminiAdapter(_cli("gemini", "gemini", "gemini-2.5-flash", "plan")).build_command(
         "整理清单", "/workspace"
@@ -508,6 +538,27 @@ def test_cmd_shim_without_entry_raises(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(launcher.sys, "platform", "win32")
     with pytest.raises(launcher.LauncherError, match=r"原生 \.exe"):
         launcher.resolve_command(["weird"], which=_fake_which({"weird": str(shim)}))
+
+
+def test_cmd_shim_pointing_at_exe_runs_it_directly(tmp_path: Path, monkeypatch):
+    """Claude Code 的 npm shim 直接指向 bin/claude.exe——不能交给 node。"""
+    shim = tmp_path / "claude.cmd"
+    shim.write_text(
+        '@ECHO off\r\nSETLOCAL\r\nendLocal & "%_prog%"  '
+        '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe" %*\r\n',
+        encoding="utf-8",
+        newline="",
+    )
+    entry = tmp_path / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("", encoding="utf-8")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+
+    argv = launcher.resolve_command(
+        ["claude", "-p", "x"],
+        which=_fake_which({"claude": str(shim), "node": "C:/fake/node.exe"}),
+    )
+    assert argv == [str(entry), "-p", "x"]
 
 
 def test_plain_executable_passthrough(tmp_path: Path, monkeypatch):

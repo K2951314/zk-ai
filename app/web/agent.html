@@ -734,8 +734,8 @@ function renderExecBar(segs) {
       }
       const st = state.segs[i] || segDefaults(s.role);
       const models = selectOpts(
-        (e.models && e.models.length ? e.models : [{ id: e.model, free: false }])
-          .map(m => [m.id, `${m.id}${m.free ? "（免费）" : ""}`]),
+        (e.models && e.models.length ? e.models : [{ id: e.model || "", free: false }])
+          .map(m => [m.id, `${m.id || "CLI 自配模型"}${m.free ? "（免费）" : ""}`]),
         st.model,
       );
       const hasEffort = (e.knobs || []).includes("effort");

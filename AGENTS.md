@@ -492,9 +492,9 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 ## 外部 CLI 执行体：免费档（2026-10-25）
 
-已接三条 `delegate_cli` 执行体：`gemini`（官方免费额度，唯一"正门"）、
-`codebuddy`（腾讯订阅复用）、`qoder`（阿里订阅复用）。全部 `cost_tier: free`，
-本地配置在 `config/cli_tools.yaml`（gitignore），模板同步在 `*example.yaml`。
+已接 5 个 `delegate_cli` 执行体：`gemini` / `codebuddy` / `qoder`（免费档）、
+`codex` / `claude`（付费档，走网关额度或 CC Switch）。本地配置在
+`config/cli_tools.yaml`（gitignore），模板同步在 `*example.yaml`。
 实测报告：`docs/免费档执行体-20261025.md`。
 
 - **npm 装的 CLI 在 Windows 上不能直接 exec**：`shutil.which("codebuddy")` 过得了
@@ -531,7 +531,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   （system prompt 含项目 AGENTS.md）。按单个对象解析会失败并回落到裸文本，
   等于把整份上下文灌回父模型——`_codebuddy_result_event()` 现在只取最后那条
   `type=result`。回归测试 `test_codebuddy_event_array_yields_only_the_result`。
-- **实测三条执行体都能跑（登录后，2026-10-25 21:30）**：codebuddy
+- **实测三条免费档执行体都能跑（登录后，2026-10-25 21:30）**：codebuddy
   `deepseek-v4.1-flash` 9.5s、**自报成本 $0.0000**（入 45,817 / 出 248，
   其中绝大部分是 CLI 自带脚手架）；qoder `DeepSeek-Flash` 29.8s（限时免费至 11-01）；
   gemini `gemini-2.5-flash` 12.2s（入 9,400 / 出 36）。角色名
@@ -559,11 +559,17 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - **skill 不是接口，是提示包**：本机技能只在 `~/.agents/skills`、`~/.claude/skills`、
   `~/.codex/skills`、`~/.catpaw/skills` 四处（codebuddy/qoder/gemini 目录为空）。
   所以「用 skill」= 把活派给装了 skill 的 CLI，而不是给网关加工具。
-  已把 **codex** 接成执行体（角色 `cli-skill`，`plan`→`-s read-only`），
-  它自带 15 个技能、在自己的上下文里跑，`cost_tier: paid`（烧网关上游额度）；
-  ⚠ 网关进程环境里要有 `ZKAI_API_TOKEN`，否则子进程报缺变量。
-  **Claude Code 接不了**：客户端先校验模型 ID，`zk-k3`/`zk-k3[1M]` 直接判
-  `unrecognized_model`，请求都没到网关（CC Switch 里那套配置就是踩在这上面）。
+  `cli-skill`（codex）自带 15 个技能，`cli-claude`（Claude Code）另有 9 个。
+- **Claude Code 只能走 CC Switch 的模型**：`-p` 是 SDK 分支，客户端先校验模型归属，
+  `zk-k3` / 连 `claude-sonnet-4-5` 都判 `unrecognized_model`，请求到不了网关。
+  所以执行体 `model: ""`（不传 `--model`），模型由 CC Switch 决定、走
+  `127.0.0.1:15721` 本地代理，**CC Switch 没开就调不通**。
+  它也没有无头可用的只读档，`approval_mode: bypass` → `--dangerously-skip-permissions`
+  （注册表为此开了显式白名单值，只给用户亲自 @ 的执行体用）。
+  实测经生产路径 ok 但 **130s**——慢在 CC Switch 那条链路，不是我们的超时。
+- **npm shim 指向的入口不一定是 JS**：Claude Code 的 `claude.cmd` 直接指向
+  `bin/claude.exe`，`launcher` 原来一律交给 node，报 `ERR_UNKNOWN_FILE_EXTENSION`。
+  现在 `.exe` 入口直接跑，只有脚本入口才用 node。
 - **`--model` 可选值以 `codebuddy --help` 为准**（glm-5.3 / kimi-k3 /
   deepseek-v4.1-flash 都在列），但"在列"不等于"免费"——**以 JSON 里的
   `total_cost_usd` 为准**，这是唯一客观口径。
