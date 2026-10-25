@@ -767,3 +767,250 @@ async def test_spawn_capacity_is_independent_of_root_capacity(tmp_path: Path) ->
     assert service._sem is not service._child_sem
     assert isinstance(service, AgentService)
     await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# 执行体直跑（控制台 @ / 面板走的那条路）：不起任务循环、不花父模型 token
+# --------------------------------------------------------------------------- #
+
+
+async def test_start_delegation_runs_the_cli_without_touching_the_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import sys
+
+    import yaml
+
+    from app.services.agent.cli.base import CliResult
+
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "cli_tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {
+                    "stub": {
+                        "enabled": True,
+                        "command": sys.executable,   # 一定存在，注册表校验才会过
+                        "backend": "official",
+                        "model": "m",
+                        "cost_tier": "free",
+                        "timeout": 60,
+                        "approval_mode": "plan",
+                    }
+                },
+                "roles": {"cli-stub": {"tool": "stub", "hint": "测试执行体"}},
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config.settings.config_dir = str(cfg_dir)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    calls: list[str] = []
+
+    async def fake_run(cfg, *, task, cwd):
+        calls.append(task)
+        return CliResult(ok=True, output="hello from cli", elapsed=0.42)
+
+    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    created = await service.start_delegation(role="cli-stub", task="说 hello")
+    sid = created["session"]["id"]
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+    assert row["model"] == "cli:stub"      # 会话列表里一眼看出是执行体跑的
+    assert calls == ["说 hello"]           # 任务原样交给 CLI，没经过模型
+    msgs = await service.repo.messages(sid)
+    assert msgs[-1]["content"] == "hello from cli"
+    assert msgs[-1]["data"]["executor"]["elapsed"] == 0.4  # round(elapsed, 1)
+    await harness.container.shutdown()
+
+
+async def test_start_delegations_runs_items_in_order(tmp_path: Path, monkeypatch) -> None:
+    """一条消息点名多个执行体：按顺序串行，每段各落一条消息。"""
+    import sys
+
+    import yaml
+
+    from app.services.agent.cli.base import CliResult
+
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "cli_tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {
+                    "stub": {
+                        "enabled": True,
+                        "command": sys.executable,
+                        "backend": "official",
+                        "model": "m",
+                        "cost_tier": "free",
+                        "timeout": 60,
+                        "approval_mode": "plan",
+                    }
+                },
+                "roles": {
+                    "cli-a": {"tool": "stub", "hint": "A"},
+                    "cli-b": {"tool": "stub", "hint": "B"},
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config.settings.config_dir = str(cfg_dir)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    order: list[tuple[str, str]] = []
+
+    async def fake_run(cfg, *, task, cwd):
+        order.append((cfg.model, task))
+        return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    created = await service.start_delegations(items=[
+        {"role": "cli-a", "task": "先查"},
+        {"role": "cli-b", "task": "再审"},
+    ])
+    sid = created["session"]["id"]
+    assert created["session"]["title"].startswith("[2段]")
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+    assert [task for _, task in order] == ["先查", "再审"]
+    msgs = await service.repo.messages(sid)
+    tasks = [m for m in msgs if m["role"] == "user"]
+    results = [m for m in msgs if m["role"] == "assistant" and m["kind"] == "message"]
+    assert [m["data"]["executor"] for m in tasks] == ["cli-a", "cli-b"]
+    assert [m["content"] for m in results] == ["done:先查", "done:再审"]
+    assert [m["data"]["executor"]["index"] for m in results] == [1, 2]
+    await harness.container.shutdown()
+
+
+async def test_start_delegations_stops_at_first_failure(tmp_path: Path, monkeypatch) -> None:
+    """前一段失败就不再烧后面的额度。"""
+    import sys
+
+    import yaml
+
+    from app.services.agent.cli.base import CliResult
+
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "cli_tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {"stub": {
+                    "enabled": True, "command": sys.executable, "backend": "official",
+                    "model": "m", "cost_tier": "free", "timeout": 60, "approval_mode": "plan",
+                }},
+                "roles": {"cli-a": {"tool": "stub", "hint": "A"}},
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config.settings.config_dir = str(cfg_dir)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    calls: list[str] = []
+
+    async def fake_run(cfg, *, task, cwd):
+        calls.append(task)
+        return CliResult(ok=False, output="boom", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    created = await service.start_delegations(items=[
+        {"role": "cli-a", "task": "第一"},
+        {"role": "cli-a", "task": "第二"},
+    ])
+    sid = created["session"]["id"]
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "failed"
+    assert calls == ["第一"]          # 第二段没跑
+    await harness.container.shutdown()
+
+
+async def test_start_delegation_rejects_unknown_role(tmp_path: Path) -> None:
+    from app.core.errors import ZKAIError
+
+    config = agent_config(tmp_path)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+    with pytest.raises(ZKAIError):
+        await service.start_delegation(role="ghost", task="x")
+    await harness.container.shutdown()
+
+
+async def test_followup_delegation_appends_to_the_same_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """同一轮对话里可以换执行体再派——两条任务都留在同一条 transcript。"""
+    import sys
+    import uuid
+
+    import yaml
+
+    from app.services.agent.cli.base import CliResult
+
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "cli_tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {
+                    "stub": {
+                        "enabled": True,
+                        "command": sys.executable,
+                        "backend": "official",
+                        "model": "m",
+                        "cost_tier": "free",
+                        "timeout": 60,
+                        "approval_mode": "plan",
+                    }
+                },
+                "roles": {"cli-stub": {"tool": "stub", "hint": "测试执行体"}},
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config.settings.config_dir = str(cfg_dir)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    sid = uuid.uuid4().hex
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    await service.repo.create_session(
+        session_id=sid, title="混合任务", model="zk-auto", workspace=str(ws)
+    )
+    # 新建会话的默认状态是 running（正常流程由 start() 拉起循环后改状态）
+    await service.repo.update_status(sid, "done")
+
+    async def fake_run(cfg, *, task, cwd):
+        return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    await service.followup_delegation(sid, role="cli-stub", task="第一条")
+    await wait_for_status(service, sid, {"done", "failed"})
+    await service.followup_delegation(sid, role="cli-stub", task="第二条")
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+
+    msgs = await service.repo.messages(sid)
+    tasks = [m for m in msgs if m["role"] == "user"]
+    results = [m for m in msgs if m["role"] == "assistant" and m["kind"] == "message"]
+    assert [m["content"] for m in tasks] == ["第一条", "第二条"]
+    assert all(m["data"]["executor"] == "cli-stub" for m in tasks)
+    assert [m["content"] for m in results] == ["done:第一条", "done:第二条"]
+    await harness.container.shutdown()
+

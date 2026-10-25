@@ -23,7 +23,7 @@ import asyncio
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,8 @@ from app.database.repository import AgentRepository
 from app.models.request import ChatCompletionRequest, ChatMessage, ToolCall
 from app.services.agent.cli import CliRegistry, load_cli_registry
 from app.services.agent.cli import delegate as cli_delegate
+from app.services.agent.cli.registry import EFFORT_LEVELS
+from app.services.agent.cli.runner import run_delegation
 from app.services.agent.confirm import SessionApprovals
 from app.services.agent.prompts import build_system_prompt
 from app.services.agent.roles import describe_roles, resolve_alias
@@ -202,6 +204,345 @@ class AgentService:
         await self.repo.update_status(session_id, "running", error=None)
         self._spawn(run, resume=True)
         return await self.session_detail(session_id)
+
+    def _resolve_delegation(
+        self,
+        role: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        context_window: int | None = None,
+    ) -> tuple[CliRegistry, Any]:
+        """角色 + 本次覆盖 -> (花名册, 处理过的执行体配置)。"""
+        registry = load_cli_registry(self.settings)
+        config = registry.tool_for_role(role)
+        if config is None:
+            raise ZKAIError(
+                f"执行体角色 {role!r} 不可用（检查 config/cli_tools.yaml）",
+                http_status=400,
+            )
+        overrides: dict[str, Any] = {}
+        if model:
+            overrides["model"] = model.strip()
+        if effort:
+            level = effort.strip().lower()
+            if level not in EFFORT_LEVELS:
+                raise ZKAIError(
+                    f"思考档位 {effort!r} 不合法（可选 {sorted(EFFORT_LEVELS)}）",
+                    http_status=400,
+                )
+            overrides["effort"] = level
+        if context_window:
+            overrides["context_window"] = max(0, int(context_window))
+        if overrides:
+            config = replace(config, **overrides)
+        return registry, config
+
+    async def start_delegation(
+        self,
+        *,
+        role: str,
+        task: str,
+        model: str | None = None,
+        effort: str | None = None,
+        context_window: int | None = None,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        """直接把任务交给外部执行体（不经父模型）。
+
+        控制台里 ``@`` / ``/`` 选执行体走这条：不起任务循环、不花父模型 token，
+        结果作为一条 assistant 消息落库，所以刷新页面还在、左侧列表里能回看。
+        """
+        registry, config = self._resolve_delegation(
+            role, model=model, effort=effort, context_window=context_window
+        )
+        workspace_path = self._resolve_workspace(workspace)
+        session_id = uuid.uuid4().hex
+        first_line = task.strip().splitlines()[0][:60] if task.strip() else "(空任务)"
+        await self.repo.create_session(
+            session_id=session_id,
+            title=f"[{role}] {first_line}",
+            model=f"cli:{config.name}",
+            workspace=str(workspace_path),
+        )
+        await self.repo.add_message(
+            session_id,
+            role="user",
+            kind="task",
+            content=task,
+            data={"executor": role, "model": config.model},
+        )
+        run = _Running(
+            session_id=session_id,
+            workspace=workspace_path,
+            model=f"cli:{config.name}",
+            cli_registry=registry,
+        )
+        self._running[session_id] = run
+        job = asyncio.create_task(self._delegation(run, config, task))
+        _BACKGROUND_TASKS.add(job)
+        job.add_done_callback(_BACKGROUND_TASKS.discard)
+        return {"session": await self.repo.get_session(session_id), "messages": []}
+
+    async def followup_delegation(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        task: str,
+        model: str | None = None,
+        effort: str | None = None,
+        context_window: int | None = None,
+    ) -> dict[str, Any] | None:
+        """在**同一个会话**里再派一次执行体（可以换另一条 CLI）。
+
+        同一轮对话里连续指派不同执行体是正常用法：每条任务各自带
+        ``data.executor``，transcript 顺序保留。
+        """
+        row = await self.repo.get_session(session_id)
+        if row is None:
+            return None
+        if row["status"] in _ACTIVE_STATUSES:
+            raise ZKAIError("会话正在执行中，先等它结束或取消", http_status=409)
+        if row["status"] not in _RESUMABLE_STATUSES:
+            raise ZKAIError(f"会话状态 {row['status']} 不能继续", http_status=409)
+        registry, config = self._resolve_delegation(
+            role, model=model, effort=effort, context_window=context_window
+        )
+        run = _Running(
+            session_id=session_id,
+            workspace=Path(row["workspace"]),
+            model=row["model"],
+            cli_registry=registry,
+        )
+        self._running[session_id] = run
+        await self.repo.add_message(
+            session_id,
+            role="user",
+            kind="task",
+            content=task,
+            data={"executor": role, "model": config.model},
+        )
+        await self.repo.update_status(session_id, "running", error=None)
+        job = asyncio.create_task(self._delegation(run, config, task))
+        _BACKGROUND_TASKS.add(job)
+        job.add_done_callback(_BACKGROUND_TASKS.discard)
+        return await self.session_detail(session_id)
+
+    async def _delegation(self, run: _Running, config: Any, task: str) -> None:
+        """执行体直跑：一次 run_delegation + 两条消息 + SSE 事件。"""
+        session_id = run.session_id
+        outcome: dict[str, Any] = {"session_id": session_id, "status": "failed", "error": None}
+        status = "failed"
+        error: str | None = None
+        info = {
+            "role": config.name,
+            "tool": config.name,
+            "model": config.model,
+            "cost_tier": config.cost_tier,
+            "effort": config.effort,
+            "context_window": config.context_window,
+        }
+        try:
+            await self.repo.update_status(session_id, "running")
+            self._emit(run, {
+                "type": "session_started",
+                "model": config.model,
+                "workspace": str(run.workspace),
+                "resumed": False,
+            })
+            self._emit(run, {"type": "step_start", "step": 1, "model": config.model})
+            result = await run_delegation(config, task=task, cwd=run.workspace)
+            status = "done" if result.ok else "failed"
+            error = None if result.ok else result.output[:300]
+            if run.cancelled:
+                # 子进程已经跑完（run_delegation 不支持中途 kill），但状态要如实
+                # 记成「已取消」，否则界面会覆盖掉用户刚点的停止。
+                status, error = "cancelled", "任务被取消"
+            payload = {**info, "elapsed": round(result.elapsed, 1), "ok": result.ok}
+            seq = await self.repo.add_message(
+                session_id,
+                role="assistant",
+                kind="message",
+                content=result.output,
+                data={"executor": payload},
+            )
+            self._emit(run, {
+                "type": "assistant",
+                "seq": seq,
+                "content": result.output,
+                "thinking": None,
+                "tool_calls": [],
+                "routing": None,
+                "step": 1,
+                "executor": payload,
+            })
+            await self.repo.update_status(session_id, status, steps=1, error=error)
+            self._emit(run, {
+                "type": "session_done",
+                "status": status,
+                **({"error": error} if error else {}),
+            })
+            outcome.update(status=status, error=error)
+        except Exception as exc:  # 执行体崩溃不能把会话永远挂在 running
+            logger.exception("delegation session %s crashed", session_id)
+            message = repr(exc)[:300]
+            try:
+                await self.repo.update_status(session_id, "failed", error=message)
+            except Exception:
+                logger.exception("agent session %s 状态落库失败", session_id)
+            self._emit(run, {"type": "session_done", "status": "failed", "error": message[:200]})
+            outcome.update(status="failed", error=message)
+        finally:
+            run.done.put_nowait(outcome)
+            self._running.pop(session_id, None)
+
+    async def start_delegations(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        session_id: str | None = None,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        """按顺序跑多段执行体任务（一条消息里点名多个 CLI）。
+
+        每段各自带 ``data.executor``；一条消息里「先让 A 查、再让 B 审」是常态，
+        所以这里一次落库全部任务，再串行跑——串行是有意的：免费档额度本来就紧，
+        并发只会互相挤成 429。
+        """
+        if not items:
+            raise ZKAIError("至少要有一段任务", http_status=400)
+        if len(items) > 10:
+            raise ZKAIError("一条消息最多指派 10 段任务", http_status=400)
+
+        resolved: list[tuple[Any, str, str]] = []
+        registry = CliRegistry()
+        for item in items:
+            role = str(item.get("role") or "").strip()
+            task = str(item.get("task") or "").strip()
+            if not task:
+                raise ZKAIError(f"执行体 {role!r} 那段没有任务内容", http_status=400)
+            registry, config = self._resolve_delegation(
+                role,
+                model=item.get("model"),
+                effort=item.get("effort"),
+                context_window=item.get("context_window"),
+            )
+            resolved.append((config, task, role))
+
+        if session_id:
+            row = await self.repo.get_session(session_id)
+            if row is None:
+                raise ZKAIError("会话不存在", http_status=404)
+            if row["status"] in _ACTIVE_STATUSES:
+                raise ZKAIError("会话正在执行中，先等它结束或取消", http_status=409)
+            if row["status"] not in _RESUMABLE_STATUSES:
+                raise ZKAIError(f"会话状态 {row['status']} 不能继续", http_status=409)
+            ws = Path(row["workspace"])
+        else:
+            ws = self._resolve_workspace(workspace)
+            session_id = uuid.uuid4().hex
+            first = resolved[0][1].splitlines()[0][:60]
+            await self.repo.create_session(
+                session_id=session_id,
+                title=f"[{len(resolved)}段] {first}",
+                model=f"cli:{resolved[0][0].name}",
+                workspace=str(ws),
+            )
+
+        for config, task, role in resolved:
+            await self.repo.add_message(
+                session_id,
+                role="user",
+                kind="task",
+                content=task,
+                data={"executor": role, "model": config.model},
+            )
+        run = _Running(
+            session_id=session_id,
+            workspace=ws,
+            model=f"cli:{resolved[0][0].name}",
+            cli_registry=registry,
+        )
+        self._running[session_id] = run
+        await self.repo.update_status(session_id, "running", error=None)
+        job = asyncio.create_task(self._delegation_batch(run, resolved))
+        _BACKGROUND_TASKS.add(job)
+        job.add_done_callback(_BACKGROUND_TASKS.discard)
+        return await self.session_detail(session_id) or {"session": None, "messages": []}
+
+    async def _delegation_batch(
+        self, run: _Running, resolved: list[tuple[Any, str, str]]
+    ) -> None:
+        """串行跑多段：每段一条 assistant 消息，失败即停（后面的段不再烧额度）。"""
+        session_id = run.session_id
+        outcome: dict[str, Any] = {"session_id": session_id, "status": "failed", "error": None}
+        status, error = "done", None
+        try:
+            await self.repo.update_status(session_id, "running")
+            self._emit(run, {
+                "type": "session_started",
+                "model": run.model,
+                "workspace": str(run.workspace),
+                "resumed": False,
+            })
+            for index, (config, task, role) in enumerate(resolved, start=1):
+                if run.cancelled:
+                    status, error = "cancelled", "任务被取消"
+                    break
+                self._emit(run, {"type": "step_start", "step": index, "model": config.model})
+                result = await run_delegation(config, task=task, cwd=run.workspace)
+                payload = {
+                    "role": role,
+                    "tool": config.name,
+                    "model": config.model,
+                    "cost_tier": config.cost_tier,
+                    "effort": config.effort,
+                    "context_window": config.context_window,
+                    "elapsed": round(result.elapsed, 1),
+                    "ok": result.ok,
+                    "index": index,
+                    "total": len(resolved),
+                }
+                seq = await self.repo.add_message(
+                    session_id,
+                    role="assistant",
+                    kind="message",
+                    content=result.output,
+                    data={"executor": payload},
+                )
+                self._emit(run, {
+                    "type": "assistant",
+                    "seq": seq,
+                    "content": result.output,
+                    "thinking": None,
+                    "tool_calls": [],
+                    "routing": None,
+                    "step": index,
+                    "executor": payload,
+                })
+                if not result.ok:
+                    status, error = "failed", result.output[:300]
+                    break
+            await self.repo.update_status(session_id, status, steps=len(resolved), error=error)
+            self._emit(run, {
+                "type": "session_done",
+                "status": status,
+                **({"error": error} if error else {}),
+            })
+            outcome.update(status=status, error=error)
+        except Exception as exc:
+            logger.exception("delegation batch %s crashed", session_id)
+            message = repr(exc)[:300]
+            try:
+                await self.repo.update_status(session_id, "failed", error=message)
+            except Exception:
+                logger.exception("agent session %s 状态落库失败", session_id)
+            self._emit(run, {"type": "session_done", "status": "failed", "error": message[:200]})
+            outcome.update(status="failed", error=message)
+        finally:
+            run.done.put_nowait(outcome)
+            self._running.pop(session_id, None)
 
     async def cancel(self, session_id: str) -> bool:
         row = await self.repo.get_session(session_id)

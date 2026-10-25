@@ -63,11 +63,81 @@ tools:
     timeout: 300
     approval_mode: default
 
+  # -------------------------------------------------------------------------
+  # CodeBuddy / WorkBuddy（腾讯，@tencent-ai/codebuddy-code）—— 免费档
+  # 无头形态：--print + --output-format json（回填会带上游自报 token/成本）
+  # --permission-mode 原生有 plan 档，适配器直接透传
+  # ⚠ 首次使用要在交互式 codebuddy 里 /login：CLI 登录态与桌面端不共享，
+  #    桌面端已登录也会报 Authentication required
+  # -------------------------------------------------------------------------
+  codebuddy:
+    enabled: false
+    command: codebuddy
+    backend: official            # 用自家订阅额度，不指向网关
+    model: glm-5.2               # 可选值以 `codebuddy --help` 的 --model 说明为准
+    cost_tier: free
+    timeout: 300
+    approval_mode: plan          # 无头只允许只读分析；写操作必须人工开档
+    # 思考强度：minimal/low/medium/high/xhigh/max（默认档不是 max，要满档得显式写）
+    effort: ""
+    # 上下文：CodeBuddy 没有 --context-window，等价旋钮是自动压缩阈值 --autocompact
+    # （默认跟随模型窗口；写 1000000 表示到 1M 才压缩）
+    context_window: 0
+    # 控制台「执行体」面板的模型下拉；free_models 只是展示标签，
+    # 真正的计费以工具自报的 total_cost_usd 为准（会把 free_models 当"该标的"）
+    models: [deepseek-v4.1-flash, glm-5.3, glm-5.2, kimi-k3]
+    free_models: [deepseek-v4.1-flash]
+
+  # -------------------------------------------------------------------------
+  # Gemini CLI（@google/gemini-cli）—— 官方免费额度，免费档里最干净的一条
+  # 不靠订阅复用、不用逆向：Google AI Studio 的 key 就有免费配额。
+  # 无头形态：-p/--prompt + -o json（回填带上游自报 token）
+  # ⚠ 跨境访问时网关进程要带 HTTPS_PROXY；适配器会补 NODE_USE_ENV_PROXY=1
+  #    （Node 的 fetch 默认不读环境变量里的代理）
+  # ⚠ 别用 plan 档做改写：Gemini 的 plan 是「把结果写进 plans/*.md 再回一句
+  #    已保存」，正文不进 stdout。机械活要用 default，只读分析才用 plan。
+  # -------------------------------------------------------------------------
+  gemini:
+    enabled: false
+    command: gemini
+    backend: official
+    model: gemini-2.5-flash
+    cost_tier: free
+    timeout: 300
+    approval_mode: default
+    models: [gemini-2.5-flash]
+    free_models: [gemini-2.5-flash]
+
+  # -------------------------------------------------------------------------
+  # Qoder（阿里，@qoder-ai/qodercli 国际版 / @qodercn-ai/qoderclicn 国内版）
+  # ⚠ 它的 --permission-mode 没有 plan 档（default/accept_edits/
+  #    bypass_permissions/dont_ask/auto），适配器把 plan 映射成 dont_ask：
+  #    不弹审批、未预授权一律拒绝——否则无头场景会等审批等到超时
+  # ⚠ 先 `qoder login`，再 `qoder --list-models` 核实模型名后打开 enabled
+  # -------------------------------------------------------------------------
+  qoder:
+    enabled: false
+    command: qoder
+    backend: official
+    model: auto                  # 占位：登录后用 --list-models 的真实值替换
+    cost_tier: free
+    timeout: 300
+    approval_mode: plan
+    # 思考强度映射到 --reasoning-effort（实测接受 max）
+    effort: ""
+    # 上下文窗口映射到 --context-window；**不填时 Qoder 自己按 128K 管理**
+    # ⚠ 这是"按多大窗口管理"，不会把模型窗口变大
+    context_window: 0
+    # 模型名用 `qoder --list-models` 的显示名
+    models: [DeepSeek-Flash, GLM-5.3, GLM-5.3-Flash, Kimi-K3.1-Pro]
+    free_models: [DeepSeek-Flash]
+
 # ---------------------------------------------------------------------------
 # 角色 -> 执行体映射（父 agent 派单时只看到角色名与能力描述）
 # 设计约束（与 app/services/agent/roles.py 内部角色同一套哲学）：
 #   模型说「我要个写代码的」，具体给谁由这张表决定，不由模型指定——
 #   否则等于让模型绕过成本档位自己挑收费渠道。
+# 机械批量活优先指给免费档执行体（codebuddy/qoder），免费档断了再改派。
 # ---------------------------------------------------------------------------
 roles:
   cli-coder:

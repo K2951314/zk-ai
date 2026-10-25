@@ -167,7 +167,28 @@
   form#composer {
     flex: none; border-top: 1px solid var(--border); background: var(--panel);
     padding: 12px 22px; display: flex; gap: 10px; align-items: flex-end;
-    max-width: 924px; margin: 0 auto; width: 100%;
+    max-width: 924px; margin: 0 auto; width: 100%; position: relative;
+  }
+  .exec-menu {
+    position: absolute; bottom: calc(100% - 4px); left: 22px; right: 130px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow-md); max-height: 260px; overflow: auto; z-index: 20;
+  }
+  .exec-item { padding: 8px 12px; cursor: pointer; display: flex; gap: 8px;
+    align-items: center; border-bottom: 1px solid var(--border); }
+  .exec-item:last-child { border-bottom: 0; }
+  .exec-item:hover { background: var(--panel-2); }
+  .exec-bar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 8px 22px 0; max-width: 924px; margin: 0 auto; width: 100%;
+    font-size: 12.5px; color: var(--muted);
+  }
+  .exec-bar select { font-size: 12.5px; padding: 2px 6px; }
+  .exec-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .exec-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 3px 0; }
+  .exec-row .seq {
+    width: 16px; text-align: center; color: var(--muted); font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
   }
   #taskInput {
     flex: 1; resize: vertical; min-height: 44px; max-height: 160px;
@@ -217,8 +238,10 @@
         模型默认走 <code>zk-auto</code>；写文件和跑命令会先请你批准。</p>
       </div>
     </div>
+    <div id="execBar" class="exec-bar" hidden></div>
     <form id="composer">
-      <textarea id="taskInput" placeholder="描述任务，Enter 发送，Shift+Enter 换行"></textarea>
+      <div id="execMenu" class="exec-menu" hidden></div>
+      <textarea id="taskInput" placeholder="描述任务，Enter 发送；@ 可点名执行体，一条消息可点名多个（按顺序串行跑）"></textarea>
       <button type="submit" class="primary" id="sendBtn">▶ 运行</button>
     </form>
   </section>
@@ -266,6 +289,11 @@ const state = {
   streamCtrl: null,    // AbortController for SSE
   pendingApprovals: new Map(),  // approval_id -> seq of rendered card
   autoScroll: true,
+  executors: [],       // 可派的外部执行体（@ 面板）
+  segs: [],            // 每段的覆盖项：[{role, model, effort, context_window}]
+  segsOpen: true,      // 多段设置面板是否展开
+  sig: "",             // 上次渲染的分段签名，避免打字时反复重绘抢焦点
+  asked: new Set(),    // 已经问过真实模型清单的角色
 };
 
 function toast(msg) {
@@ -349,7 +377,10 @@ function appendMessageRow(m) {
     if (m.kind === "summary") {
       addRow(`<div class="card small muted"><b>上下文摘要</b><br>${esc(m.content)}</div>`);
     } else {
-      addRow(`<div class="card">${esc(m.content)}</div>`, "user");
+      const who = (m.data || {}).executor
+        ? `<div class="routing">⚡ 派给 ${esc(m.data.executor)}${m.data.model ? ` · ${esc(m.data.model)}` : ""}</div>`
+        : "";
+      addRow(`<div class="card">${esc(m.content)}${who}</div>`, "user");
     }
     return;
   }
@@ -390,11 +421,17 @@ function appendMessageRow(m) {
   // assistant message
   const routing = d.routing
     ? `<div class="routing">${esc(d.routing.provider || "")} · ${esc(d.routing.model || "")} · ${d.routing.latency_ms ?? "?"}ms</div>` : "";
+  const ex = d.executor
+    ? `<div class="routing">⚡ ${esc(d.executor.role)} · ${esc(d.executor.model)} ·
+       ${d.executor.cost_tier === "free" ? "免费档" : esc(d.executor.cost_tier)} ·
+       思考 ${esc(d.executor.effort || "默认")} · ${fmtCtx(d.executor.context_window)} ·
+       ${d.executor.elapsed ?? "?"}s${d.executor.total > 1 ? ` · 第 ${d.executor.index}/${d.executor.total} 段` : ""}</div>`
+    : "";
   const thinking = d.thinking
     ? `<details><summary>💭 思考过程</summary><pre>${esc(d.thinking)}</pre></details>` : "";
   const pending = d.tool_calls?.length && state.session?.status === "waiting_approval";
   addRow(`<div class="card"><div class="who">🤖 助手 <span class="muted small">#${m.seq}</span></div>
-    <div>${esc(m.content || "")}</div>${toolCallChips(d.tool_calls)}${thinking}${routing}</div>`);
+    <div>${esc(m.content || "")}</div>${toolCallChips(d.tool_calls)}${thinking}${ex}${routing}</div>`);
 }
 
 function renderApprovalCard(m) {
@@ -496,7 +533,7 @@ function handleEvent(ev) {
       return;
     case "assistant":
       state.messages.push({ seq: ev.seq, role: "assistant", kind: "message",
-        content: ev.content || null, data: { tool_calls: ev.tool_calls, thinking: ev.thinking, routing: ev.routing } });
+        content: ev.content || null, data: { tool_calls: ev.tool_calls, thinking: ev.thinking, routing: ev.routing, executor: ev.executor } });
       appendMessageRow(state.messages[state.messages.length - 1]);
       if (!ev.tool_calls?.length) addStepLine(`第 ${ev.step} 步完成，等待模型后续…`);
       return;
@@ -539,6 +576,219 @@ function handleEvent(ev) {
       return;
     }
     default:
+  }
+}
+
+// ---------------------------------------------------------------- executors
+// 输入框任意位置打 @ 点名执行体；一条消息可点名多个，按顺序串行。
+// 每段都能单独设置模型/思考/上下文（可折叠），不设就用该执行体的配置默认。
+function execById(role) {
+  return state.executors.find(e => e.role === role) || null;
+}
+
+function loadExecutors() {
+  api("/zkadmin/agent/executors")
+    .then(d => { state.executors = d.executors || []; })
+    .catch(() => { /* 未启用执行体时静默 */ });
+}
+
+// 光标前正在输入的 mention：`@xxx` 任意位置；`/xxx` 只认行首（避免和路径打架）
+function mentionAt(text, caret) {
+  const before = text.slice(0, caret);
+  // 分隔符与 parseMentions 保持一致：中文标点后也能直接 @
+  let m = /(^|[\s，,。；;、：:])@([A-Za-z0-9_.-]*)$/.exec(before);
+  if (m) return { start: caret - m[2].length - 1, prefix: m[2] };
+  m = /^\/([A-Za-z0-9_.-]*)$/.exec(before);
+  if (m) return { start: 0, prefix: m[1] };
+  return null;
+}
+
+function showExecMenu(prefix) {
+  const menu = $("execMenu");
+  const list = state.executors.filter(e =>
+    e.role.toLowerCase().startsWith(prefix.toLowerCase()) ||
+    e.tool.toLowerCase().startsWith(prefix.toLowerCase()));
+  if (!list.length) { menu.hidden = true; return; }
+  menu.innerHTML = list.map(e => `
+    <div class="exec-item" data-role="${esc(e.role)}">
+      <b>${esc(e.role)}</b>
+      <span class="small muted">${esc(e.tool)} · ${esc(e.model)}</span>
+      <span class="chip">${e.cost_tier === "free" ? "免费档" : esc(e.cost_tier)}</span>
+    </div>`).join("");
+  menu.hidden = false;
+  menu.querySelectorAll(".exec-item").forEach(el => {
+    el.onclick = () => insertMention(el.dataset.role);
+  });
+}
+
+function insertMention(role) {
+  const el = $("taskInput");
+  const caret = el.selectionStart || el.value.length;
+  const hit = mentionAt(el.value, caret);
+  const token = `@${role} `;
+  if (hit) {
+    el.value = el.value.slice(0, hit.start) + token + el.value.slice(caret);
+    el.selectionStart = el.selectionEnd = hit.start + token.length;
+  } else {
+    el.value = `${el.value}${token}`;
+    el.selectionStart = el.selectionEnd = el.value.length;
+  }
+  $("execMenu").hidden = true;
+  el.focus();
+  updateExecBar();
+}
+
+// 段首尾的标点和「用/然后/再」这类连接词不属于任务本身
+function cleanTask(raw) {
+  let t = String(raw || "").trim();
+  // 可能连着好几个连接词（「…，再用」），剥到稳定为止
+  for (let i = 0; i < 5; i++) {
+    const before = t;
+    t = t.replace(/^[，,、;；:：\s]+/, "").replace(/[，,、;；:：\s]+$/, "");
+    t = t.replace(/(用|然后|再|以及|并且|并|和)$/, "").trim();
+    if (t === before) break;
+  }
+  return t;
+}
+
+// 把一条消息切成多段：每段从自己的 @角色 开始，到下一个 @角色 之前结束。
+// 第一个 @ 之前的文字（「帮我」「用」之类）并进第一段，不丢上下文。
+function parseMentions(text) {
+  // 中文里常见「…，@角色」这种不空格的写法，所以分隔符要包含中文标点
+  const re = /(^|[\s，,。；;、：:])@([A-Za-z0-9_.-]+)/g;
+  const hits = Array.from(text.matchAll(re));
+  if (!hits.length) return [];
+  const segments = [];
+  const preamble = cleanTask(text.slice(0, hits[0].index));
+  hits.forEach((m, i) => {
+    const start = m.index + m[0].length;
+    const end = i + 1 < hits.length ? hits[i + 1].index : text.length;
+    let task = cleanTask(text.slice(start, end));
+    if (i === 0 && preamble) task = `${preamble}\n${task}`;
+    segments.push({ role: m[2], task });
+  });
+  return segments;
+}
+
+function segDefaults(role) {
+  const e = execById(role);
+  return {
+    role,
+    model: e ? e.model : "",
+    effort: e ? (e.effort || "") : "",
+    context_window: e ? (e.context_window || 0) : 0,
+  };
+}
+
+// 文本变了就按新分段对齐设置：同一位置同角色保留用户的选择，否则回落到默认。
+function syncSegments(segs) {
+  const next = segs.map((s, i) => {
+    const prev = state.segs[i];
+    return prev && prev.role === s.role ? prev : segDefaults(s.role);
+  });
+  state.segs = next;
+}
+
+async function refreshModels(role) {
+  try {
+    const d = await api(`/zkadmin/agent/executors/${encodeURIComponent(role)}/models`);
+    const e = execById(role);
+    if (!e) return;
+    e.models = d.models || [];
+    state.sig = "";          // 清单变了，强制重绘一次
+    updateExecBar();
+  } catch { /* 拿不到真实清单就继续用配置里的 */ }
+}
+
+function fmtCtx(n) {
+  if (!n) return "默认上下文";
+  return n >= 1000000 ? "1M" : `${Math.round(n / 1000)}K`;
+}
+
+function selectOpts(values, current) {
+  return values.map(([v, label]) =>
+    `<option value="${esc(v)}"${String(v) === String(current) ? " selected" : ""}>${label}</option>`
+  ).join("");
+}
+
+const EFFORT_OPTS = [["", "默认思考"], ["minimal", "minimal"], ["low", "low"],
+  ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"], ["max", "max"]];
+const CTX_OPTS = [[0, "默认上下文"], [128000, "128K"], [200000, "200K"], [1000000, "1M"]];
+
+function renderExecBar(segs) {
+  const bar = $("execBar");
+  const open = state.segsOpen;
+  let html = `<div class="exec-head">
+    <span class="chip">⚡ ${segs.length} 段</span>
+    <span class="small muted">按顺序串行</span>
+    <button type="button" class="linklike" id="execToggle">${open ? "收起设置" : "设置每一段"}</button>
+  </div>`;
+
+  if (open) {
+    html += segs.map((s, i) => {
+      const e = execById(s.role);
+      if (!e) {
+        return `<div class="exec-row"><span class="seq">${i + 1}</span>
+          <span class="chip">⚠️ ${esc(s.role)}</span>
+          <span class="small muted">未知执行体，提交会被拒绝</span></div>`;
+      }
+      const st = state.segs[i] || segDefaults(s.role);
+      const models = selectOpts(
+        (e.models && e.models.length ? e.models : [{ id: e.model, free: false }])
+          .map(m => [m.id, `${m.id}${m.free ? "（免费）" : ""}`]),
+        st.model,
+      );
+      const hasEffort = (e.knobs || []).includes("effort");
+      const hasCtx = (e.knobs || []).includes("context_window");
+      return `<div class="exec-row">
+        <span class="seq">${i + 1}</span>
+        <span class="chip">${esc(e.role)}</span>
+        <label class="small">模型 <select data-i="${i}" data-k="model">${models}</select></label>
+        ${hasEffort ? `<label class="small">思考 <select data-i="${i}" data-k="effort">${selectOpts(EFFORT_OPTS, st.effort)}</select></label>` : ""}
+        ${hasCtx ? `<label class="small">上下文 <select data-i="${i}" data-k="context_window">${selectOpts(CTX_OPTS, st.context_window)}</select></label>` : ""}
+      </div>`;
+    }).join("");
+  } else {
+    html += `<span class="small muted">${segs.map((s, i) => `${i + 1}. ${esc(s.role)}`).join("　")}</span>`;
+  }
+
+  bar.innerHTML = html;
+  bar.hidden = false;
+  $("execToggle").onclick = () => {
+    state.segsOpen = !state.segsOpen;
+    state.sig = "";
+    updateExecBar();
+  };
+  bar.querySelectorAll("select[data-i]").forEach(el => {
+    el.onchange = () => {
+      const i = Number(el.dataset.i);
+      const k = el.dataset.k;
+      if (!state.segs[i]) return;
+      state.segs[i][k] = k === "context_window" ? Number(el.value) : el.value;
+    };
+  });
+}
+
+function updateExecBar() {
+  const bar = $("execBar");
+  const segs = parseMentions($("taskInput").value);
+  if (!segs.length) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    state.segs = [];
+    state.sig = "";
+    return;
+  }
+  syncSegments(segs);
+  const sig = `${segs.map(s => s.role).join("|")}#${segs.length}@${state.segsOpen}`;
+  if (sig === state.sig) return;
+  state.sig = sig;
+  renderExecBar(segs);
+  for (const role of new Set(segs.map(s => s.role))) {
+    if (!state.asked.has(role)) {
+      state.asked.add(role);
+      refreshModels(role);   // 每个角色只问一次真实模型清单
+    }
   }
 }
 
@@ -586,6 +836,48 @@ $("composer").onsubmit = async (e) => {
   const text = input.value.trim();
   if (!text) return;
   try {
+    const segments = parseMentions(text);
+    if (segments.length) {
+      const unknown = segments.filter(s => !execById(s.role));
+      if (unknown.length) {
+        toast(`未知执行体：${unknown.map(s => s.role).join("、")}；可用：${state.executors.map(e => e.role).join("、")}`);
+        return;
+      }
+      const empty = segments.find(s => !s.task);
+      if (empty) {
+        toast(`@${empty.role} 后面还没写任务`);
+        return;
+      }
+      // 每段带上自己在设置面板里的选择（没改过就是执行体默认）
+      const items = segments.map((s, i) => {
+        const st = state.segs[i] || segDefaults(s.role);
+        const item = { role: s.role, task: s.task };
+        if (st.model) item.model = st.model;
+        if (st.effort) item.effort = st.effort;
+        if (st.context_window) item.context_window = st.context_window;
+        return item;
+      });
+      const active = state.session && (state.session.status === "running" ||
+                                       state.session.status === "waiting_approval");
+      const payload = { items };
+      if (state.current && !active) payload.session_id = state.current;   // 同一轮对话里继续追加
+      const created = await api("/zkadmin/agent/delegations", {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      input.value = "";
+      state.current = created.session.id;
+      state.session = created.session;
+      state.messages = created.messages || [];
+      state.segs = [];
+      state.sig = "";
+      state.asked.clear();
+      renderTranscript();
+      updateExecBar();
+      setHeader();
+      connectEvents(state.current);
+      loadSessions();
+      return;
+    }
     if (!state.current) {
       const created = await api("/zkadmin/agent/sessions", {
         method: "POST",
@@ -615,11 +907,26 @@ $("composer").onsubmit = async (e) => {
 };
 
 $("taskInput").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { $("execMenu").hidden = true; return; }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
+    $("execMenu").hidden = true;
     $("composer").requestSubmit();
   }
 });
+
+function refreshMentionMenu() {
+  const el = $("taskInput");
+  const hit = mentionAt(el.value, el.selectionStart || 0);
+  if (hit) showExecMenu(hit.prefix); else $("execMenu").hidden = true;
+}
+
+$("taskInput").addEventListener("input", () => {
+  refreshMentionMenu();
+  updateExecBar();
+});
+$("taskInput").addEventListener("click", refreshMentionMenu);
+$("taskInput").addEventListener("keyup", refreshMentionMenu);
 
 $("newBtn").onclick = () => {
   state.current = null;
@@ -652,6 +959,7 @@ $("stream").addEventListener("scroll", (e) => {
 
 loadSessions();
 loadModels();
+loadExecutors();
 setHeader();
 </script>
 </body>

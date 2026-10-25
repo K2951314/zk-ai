@@ -39,12 +39,18 @@ class CliResult:
 
 
 #: 「未登录」特征：各工具报错文案不同，逐个收录实测形态
+#: 2026-10-25 补 CodeBuddy 的原文（"Authentication required. Please use /login
+#: command to sign in"）——它一个既有 pattern 都不匹配，未登录被当成普通失败，
+#: 父模型会白重试而不是改派。
 _AUTH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         r"no auth type is selected",
         r"not logged in",
         r"please log in",
+        r"please use /login",
+        r"authentication required",
+        r"sign in to your account",
         r"login required",
         r"unauthorized",
         r"invalid api key",

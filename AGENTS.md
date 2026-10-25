@@ -1,8 +1,3 @@
-# AGENTS.md — ZK-AI
-
-个人 AI 网关：OpenAI 兼容的多供应商密钥池网关（商汤日日新 / NVIDIA NIM / 魔搭 / Kimi 官方），
-带能力路由、别名、429 冷却与用量统计；另含一个积分池感知的商汤积分消耗器。
-
 ## 怎么跑
 
 - 双击 `scripts\start_gateway.cmd`（默认端口 8317，可传参换端口）；手动等价命令：
@@ -27,6 +22,9 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - 文档入口：`使用手册.md`（面向使用，先看这个）→ `README.md`（全量参考）
 - `docs/` 放**一次性的排查/审查报告**（带日期的 `*.md`），不是常读文档——
   结论该沉淀的往上写进本文件或 `使用手册.md`，报告本身只作过程留档。
+  另有三份**从本文件拆出的流程文档**（规则文件超 65,536 字节预算）：
+  `docs/服务器同步.md`、`docs/部署与运维坑.md`、`docs/控制台前端约定.md`——
+  只做对应的事时才翻，规则正文仍以本文件为准。
   另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
   （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
@@ -492,109 +490,83 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `tests/test_tray_launcher.py`（argv 里不许带控制字符，且要过 `getaddrinfo`）。
   换机前值得先验一遍 `.env` 换行——现在启动日志会替你把关
 
-## 服务器化改造的坑（2026-10-03）
+## 外部 CLI 执行体：免费档（2026-10-25）
 
-- **Caddy 的 `ZKAI_PUBLIC_TOKEN` 必须与网关 `.env` 的 `ZKAI_API_TOKEN` 同值**：
-  2026-10-07 实测事故——Caddy 用 79 字符的 `zk-ai-lo...`，网关只有 11 字符，
-  于是 `https://120.53.28.29/zkai/v1/models` **永远 401**，客户端怎么配都拿不到模型。
-  Caddy 是 `/v1/*` 的第一道（也是主力）认证：网关自己的 `/v1/models` **没挂**
-  `require_client_auth`（只有 `app/api/chat.py` 挂了），所以 Caddy 一拦错就全错。
-  同步方法：把 `/opt/zkai/.env` 的 `ZKAI_API_TOKEN` 值写进 `/etc/caddy/zkai.env`
-  的 `ZKAI_PUBLIC_TOKEN`，然后 `systemctl reload caddy`。**别为了「统一」去给
-  `/v1/models` 加认证**——OpenAI 客户端拿目录是不带凭据的，加了会破坏兼容。
+已接三条 `delegate_cli` 执行体：`gemini`（官方免费额度，唯一"正门"）、
+`codebuddy`（腾讯订阅复用）、`qoder`（阿里订阅复用）。全部 `cost_tier: free`，
+本地配置在 `config/cli_tools.yaml`（gitignore），模板同步在 `*example.yaml`。
+实测报告：`docs/免费档执行体-20261025.md`。
 
-- **公网入口只能靠 `ZKAI_PUBLIC_BASE_URL` 显式配置，别用 host:port 猜**：网关只听得到
-  自己的 host:port，看不到 Caddy 加的 `/zkai` 前缀。猜出来的地址在公网上打不开，
-  而运营者会把它抄给客户端——这种错误静默且难查。判据集中在
-  `Settings.public_base_url_effective` / `client_base_url` / `is_remote_deploy` 三个
-  属性上，`/health` 的 `deploy` 块与控制台接入面板共用同一份，别在第二处再判一次。
-  未配置时回落 `http://<host>:<port>`，本机零配置可用。
+- **npm 装的 CLI 在 Windows 上不能直接 exec**：`shutil.which("codebuddy")` 过得了
+  注册表校验（返回 `.cmd`），但 `create_subprocess_exec` 走 CreateProcess 会
+  `FileNotFoundError`——qwen/claude/codex/codebuddy/qoder 全中，只是以前没人在
+  Windows 上真跑过委派。已加 `app/services/agent/cli/launcher.py`：读 shim 里
+  固定的 `"%dp0%\node_modules\..."` 行，换成 `node + 入口脚本`。
+  **不要退回 `shell=True`**：那会把模型给的任务文本重新交给 cmd 解析，正好破坏
+  「argv 直传、不经 shell」的安全前提；解析不出来就明确报错，不静默降级。
+- **`proc.returncode` 要 `await proc.wait()` 之后才可信**：只等两路读流到 EOF 就读
+  退出码，asyncio 的子进程回调可能还没跑，`returncode is None` → **成功的委派被判
+  失败**（实测 gemini 已吐出完整 JSON，结果仍报【执行失败】、`exit=None`）。
+  现写法是 `gather(读 stdout, 读 stderr, proc.wait())`，超时分支照旧 kill。
+- **免费额度是「人机对话」的形状，不是 agent 负载的形状**：一次委派（5 条商品
+  描述的 JSON 改写）CLI 自报 **prompt 36,853 tokens**（任务正文才 ~250），
+  40 分钟内十几次请求就把 Gemini 免费配额打空（429 `exceeded your current quota`）。
+  同一模型：直连 4~5s，经 CLI 8.8~18s（进程启动 ~2s + CLI 自己的路由/分类调用 +
+  系统提示与工具清单的 token）。结论：免费档**只当 `delegate_cli` 的派单目标**，
+  不进 `/v1` 热路径、不进 `zk-auto` 候选集。
+- **Gemini 的 `plan` 档不产出正文**：它把结果写进 `~/.gemini/tmp/<proj>/plans/*.md`，
+  stdout 只回一句"已保存"。机械改写要用 `default`，`plan` 只适合只读分析。
+  无头还必须 `GEMINI_CLI_TRUST_WORKSPACE=true`（**字面量 `true`，写 `1` 不认**）
+  + `HTTPS_PROXY`；Node 的 fetch 默认不读代理，适配器补 `NODE_USE_ENV_PROXY=1`。
+- **Qoder 的 `--permission-mode` 没有 plan 档**（default/accept_edits/
+  bypass_permissions/dont_ask/auto），适配器把 `plan` 映射成 `dont_ask`：
+  不弹审批、未预授权一律拒绝。直接透传 `default` 会在无头场景等审批等到超时
+  （runner 的 stdin 是 DEVNULL）。
+- **CodeBuddy/Qoder 的 CLI 登录态与桌面端不共享**：桌面端明明已登录，CLI 仍报
+  `Authentication required` / `Not logged in`，首次要交互式 `/login`、`qoder login`。
+  这两种原文已补进 AUTH 特征（`base.py`），否则会被当普通失败让父模型白重试。
+- **CodeBuddy 的 `--output-format json` 是事件数组，不是单个对象**（2.175.0 实测）：
+  `[{type:"message",…},{type:"reasoning"},{type:"result",result:"pong",
+  total_cost_usd:0,usage:{…}}]`。前面几条 message 事件里带着**完整请求体**
+  （system prompt 含项目 AGENTS.md）。按单个对象解析会失败并回落到裸文本，
+  等于把整份上下文灌回父模型——`_codebuddy_result_event()` 现在只取最后那条
+  `type=result`。回归测试 `test_codebuddy_event_array_yields_only_the_result`。
+- **实测三条执行体都能跑（登录后，2026-10-25 21:30）**：codebuddy
+  `deepseek-v4.1-flash` 9.5s、**自报成本 $0.0000**（入 45,817 / 出 248，
+  其中绝大部分是 CLI 自带脚手架）；qoder `DeepSeek-Flash` 29.8s（限时免费至 11-01）；
+  gemini `gemini-2.5-flash` 12.2s（入 9,400 / 出 36）。角色名
+  `cli-grinder` / `cli-grinder-qoder` / `cli-grinder-gem`。
+- **Qoder 的模型名要用 `qoder --list-models` 的显示名**：`DeepSeek-Flash` /
+  `GLM-5.3` / `GLM-5.3-Flash` / `Kimi-K3.1-Pro` / `Qwen3.8-Max` …，
+  不是官网的 API ID（写 `deepseek-v4.1-flash` 不认）。自建自定义模型在列表里显示成
+  `(qoder-custom-…)`，本机那两条正是指向 zkai 网关的。
+- **执行体的 `effort` / `context_window` 是「上限提示」，不是扩容**：`effort` 映射
+  `--effort`（codebuddy）/ `--reasoning-effort`（qoder），`context_window` 映射
+  `--autocompact`（codebuddy，压缩阈值）/ `--context-window`（qoder，**不填按 128K**）。
+  两家默认都不是满档。实测 max+1M：codebuddy 8.7s、qoder **56.9s**（默认档 29.8s）
+  ——满档思考的代价是墙钟翻倍。**执行体拿不到会话历史**，要长上下文走 `/v1`。
+- **控制台 `@` = 执行体直跑，不是聊天**：`@` 在输入框**任意位置**都能点名
+  （`/` 只认行首，避免和路径打架），**一条消息可点名多个、按顺序串行**——
+  `POST /zkadmin/agent/delegations`（`items` 最多 10 段，带 `session_id` 则追加）；
+  第一段失败即停。分隔符含中文标点（`，。；、：`）；段首尾连接词（用/然后/再/并/和）
+  会连剥多次，第一个 `@` 前的文字并进第一段。**每段在分段面板里单独选模型/思考/
+  上下文**（默认展开可收起，默认值取自配置；改文本时同位置同角色保留选择）。
+  单段直跑用 `POST /zkadmin/agent/executors`。数据源 `GET /executors`（读
+  `cli_tools.yaml` 的 `models`/`free_models`）；模型清单优先用 CLI 自己的口径
+  （`GET /executors/{role}/models`），免费标记只能手工维护。
+  改 Python 要重启网关；只改 yaml 不用（每次新任务重读花名册）。
+  ⚠ 「停止」只改状态，**不 kill 子进程**（`run_delegation` 没有取消句柄）。
+- **`--model` 可选值以 `codebuddy --help` 为准**（glm-5.3 / kimi-k3 /
+  deepseek-v4.1-flash 都在列），但"在列"不等于"免费"——**以 JSON 里的
+  `total_cost_usd` 为准**，这是唯一客观口径。
 
-- **控制台真实地址是裸 `/ui`，不是 Caddyfile 注释里写的 `/zkconsole/ui`**：
-  2026-10-07 被自己的注释带到 404（那个路径没有路由，落到兜底的智能询价）。
-  Caddyfile 的打开地址注释已改；`/ui` 页面壳公开、数据接口仍走 `/admin/*` 的
-  token 分流（XHR 裸请求 → 网关 401 弹登录框、浏览器导航 → 智能询价）。
+## 服务器化改造的坑
 
-- **消耗器账本校准必须注入事件，不能覆盖 burned**：`apply_reconcile()` 写回 burned 时
-  是往 `events` 里追加一个差值事件（负数 = 账本多记了），不是改 burned 值——
-  burner 重启后按「最近 5h 的 events」重算，直接覆盖会让新旧口径在窗口边界上跳变，
-  运营者看到的数字和消耗器实际用的从此对不上。回归测试
-  `tests/test_burner_reconcile.py::TestApplyReconcile::
-  test_calibration_event_shifts_the_window_without_rebuilding_it`。
+（已拆到 `docs/部署与运维坑.md`，做这类事时才需要翻。）
 
-- **消耗器重启是双形态，别默认托盘**：`request_restart_ex()` 检测到 systemd 有
-  `zkai-burner` unit 就 `systemctl restart`，否则走托盘的 restart.request 文件，
-  两者都没有才回 `manual` + 手动命令。服务器上托盘不存在，沿用旧的
-  「写文件等托盘看」会永远不生效。响应带 `restart_mode`
-  （`tray` / `systemd` / `manual`），界面据此提示。
+## 手机版控制台改造
 
-- **polkit 规则不进 git、不随代码同步，换机/重装后必须手工装**（2026-10-21
-  在 211.159.174.204 实测「修好的又坏了」）：控制台「停止/重启消耗器」在这台
-  新服务器上又报 `The "no new privileges" flag is set ... sudo`，退化成
-  「手动执行：sudo systemctl ...」。根因不是代码回退——`deploy-server/
-  50-zkai-burner.rules` 在仓库里好好的，而是**它从不随 `git reset --hard`
-  同步**，要单独 `install` 到 `/etc/polkit-1/rules.d/` 并 `systemctl restart
-  polkit`。这台服务器的 `/etc/polkit-1/rules.d/` 是空的（规则从没装过）。
-  `_run_systemctl_action()` 的顺序是「先裸 `systemctl`、失败才 `sudo -n`」：
-  装了 polkit，裸命令直接被 polkit 放行，永远碰不到 sudo；没装，裸命令被拒 →
-  掉 `sudo -n` → 撞 `zkai.service` 的 `NoNewPrivileges=true` → 报上面的错。
-  **这条报错本身就是「polkit 没生效」的信号**，别再当成 sudoers 配置问题去查。
-  装机/换机清单里必须有这一步（见 deploy-server/README「换服务器」一节），
-  验证一句话：`sudo -u www-data systemctl stop zkai-burner` 退出码 0 即装好。
-  同类「不进 git 的环境文件」还有：`.env`、`config/*.yaml`、systemd unit、
-  Caddyfile——**代码同步救不了它们，各自有各自的安装动作**。
-
-- **消耗器日志 SSE 的 `flush_interval -1` 四个分支都要有**：`/admin/*` 按认证分了
-  四个 `reverse_proxy` 块，漏一个该路径下的 SSE 就被 Caddy 缓冲成一次性返回，
-  「实时」变「日志滚完才给你」。另外 `_follow()` 的预热底料和游标必须同一次算出来
-  （`_warm_up()` 返回 `(text, offset)`）——分开算的话两者之间新追加的内容会被游标
-  跳过，半行测试盯的就是这条。
-
-- **burner 的账本/日志目录可以和网关 `data_dir` 不是同一层，别拼 `data_dir`**（2026-10-03
-  上线时才踩到）：服务器上 `zkai-burner.service` 的 ExecStart 用
-  `--state-file/--log-file /var/lib/zkai/burner/`，比网关的 `ZKAI_DATA_DIR`
-  （`/var/lib/zkai`）深一层。网关侧的 `_burner_paths()` 原来拼
-  `resolved_data_dir / burn_state.json`，控制台的「账号核对」于是去读写一个
-  **不存在的账本**——运营者填了后台真实消耗、点了保存、看到「已应用」，
-  而真正的 burner 什么都没看到。比没有这个功能更糟：它让运营者以为校准生效了。
-  现在走 `Settings.burner_state_path` / `burner_log_path`（`ZKAI_BURNER_DIR`
-  覆盖，默认仍与 data_dir 同目录，本机行为不变），systemd unit 里用
-  `Environment=ZKAI_BURNER_DIR=/var/lib/zkai/burner` 与 ExecStart 对齐。
-  `/health` 的 `deploy.burner_state_path` / `burner_log_path` 把真实路径暴露出来，
-  两边不一致时一眼能看到。回归测试 `tests/test_deploy_config.py::TestBurnerDir`。
-
-## 手机版控制台改造（2026-10-04）
-
-- **桌面端别用 max-width 居中，KPI 布局要看个数选**（2026-10-22 两轮运营者反馈）：
-  ①`section.view` 曾用 `max-width:1480px; margin:0 auto`，内容只有 ~900px 宽时两侧
-  大片留白，被批「大片空白、不像成熟网页」——已改成 `width:100%` 铺满。
-  ②KPI 第一版改成「标签+值+副文案横排一行」，对总览页（2 个 KPI、副文案短）合适，
-  但消耗器页有 **6 个 KPI、副文案长**（「入761/出2292；积分每百万 token；账本口径」），
-  横条被长副文案撑得高低不齐，又被批「卡片那么高」。**定稿是扁平竖排**：
-  第一行标签（小字）、第二行数值（20px 等宽）、第三行副文案**单行截断**
-  （`white-space:nowrap; text-overflow:ellipsis`），高度统一且矮。
-  教训：**「横条省高度」只在 KPI 少、副文案短时成立；KPI 多或副文案长就必须竖排+截断**，
-  改 KPI 布局前先看消耗器页那 6 个长副文案能不能放下。
-- **三件事同时成立，少一个就只是「桌面仪表盘被撞窄」**：底部四条挤指可及的 Tab（总览/模型/消耗器/更多，其余收进抽屉）、表格卡片化（`tbody td::before` + `data-label`，列名显示在值左侧）、长页面手风琴。前端只有一个断点：`@media (max-width: 860px)`，桌面端不变（`#mnav` 默认 `display: none`，只在媒体查询里打开）。
-- **固定定位的底部 Tab 会被子元素带飞**：实测到一个 392px 的 `modelscope → deepseek-ai/...` 把 `#mnav` 带到 869px，Tab 翻到屏幕外。所以三层都要：根节点 `overflow-x: hidden`、`td > * { min-width: 0 }`、长串 `word-break: break-all`（`break-word` 在没空格的链路上仍不断行）。
-- **弹窗的关闭按钮不许藏在可能被 `display:none` 的区块里**（2026-10-05 事故）：
-  「客户端接入」唯一的「取消」按钮原本在 `#cg-local-zone` 内，而服务器部署时
-  整个本机区被隐藏 → 面板上没有**任何**能关它的控件，只能刷新页面；手机上更致命。
-  现在关闭路径有三重且都在条件隐藏之外：卡头 ✕、modal 最外层的关闭按钮、
-  Esc / 点遮罩（`closeModal` 复用，别再写 `classList.remove`）。
-  守卫 `test_console_zh.py::test_chatgpt_modal_close_is_not_inside_the_local_zone`。
-- **顶层 `const`/`let`/`function` 重复声明 = 整个 `<script>` 中止，页面静默失效**
-  （2026-10-07 事故）：我给消耗器页加 `BURNER_GROUPS` 时漏看文件里已有同名声明，
-  `Identifier 'X' has already been declared` 一抛，**后面所有代码都不执行**——
-  连接状态永远「未连接」、登录框永不弹。症状是「网络问题」其实是 JS 挂了。
-  **所有现役测试都抓不到它**（中文扫描只看文案、DOM 契约只看 id），只有浏览器
-  真跑才暴露。守卫 `test_console_js_has_no_duplicate_top_level_declarations`
-  用「顶层声明唯一性」静态兜住，已用变异法验证鉴别力。
-  **给单文件 vanilla JS 加新顶层符号前，先 grep 一遍同名。**
-- **改完前端必须真机验证**：本机 873 个测试全绿、`/health` 也正常，但页面是死的
-  （上面那条）。真机 = 无头 Chromium 打开 `/ui`、走登录、看目标视图，不是看健康检查。
-- **账号核对表单的锚点列恒为空（2026-10-04 修）**：`GET /admin/burner/reconcile` 写死 `_fmt_hhmm(0.0)`，而它对 0 恒返回 `""`。运营者看到空表单会以为账号没配锚点，实际配了。现在走 `account_anchor_ts` / `account_week_anchor_ts`（按账号优先、回落全局、坏值不抛异常）。**周锚点 2026-10-07 改成「月-日 时刻」**（`10-09 18:10`，照抄商汤控制台「周刷新」列），旧格式 `Wed 18:10` 仍兼容；新格式一律向上取未来边界，向下取会凭空少算一个 7 天窗口的额度。
-- **重启网关只能通过托盘**：gateway 是 `tray_launcher.py` spawn 的子进程，而 `RESTART_REQUEST` 邮箱**只对 burner 模式生效**（`_consume_restart_request` 只在 `self._mode == "burner"` 时调），且托盘不会自动拉起已退出的子进程。所以改代码后重启网关 = `python scripts/launch_hidden.py gateway`（它先杀同模式旧托盘，新托盘的 `_guard_port()` 再清旧 uvicorn）。看 `launch_hidden` 的 docstring 会以为它只防双弹托盘，其实它就是重启入口。
+（已拆到 `docs/控制台前端约定.md`，做这类事时才需要翻。）
 
 ## Agent 工作方式（2026-09-23，防半途而废）
 - **本机 shell 是 PowerShell，here-string 会把中文和转义写坏**：写含中文的临时脚本时
@@ -620,63 +592,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），要恢复需同时加回
   providers.yaml 的供应商与 models.yaml 的部署；`kimi-k3-nvidia` 仍保留，靠自动隔离兜底。
 
-## 服务器怎么同步代码（2026-10-20 定规矩）
+## 服务器怎么同步代码
 
-**`/opt/zkai` 现在是真正的 git 检出，同步走 git，不要再手工挑文件传。**
+（已拆到 `docs/服务器同步.md`，做这类事时才需要翻。）
 
-```bash
-# 本地：改完 → 提交 → 推（HTTPS 被本机代理挡时改用 SSH pushurl，推完改回）
-git push origin main
-
-# 服务器（用户 ubuntu 有 sudo，仓库文件属 www-data）
-sudo git -c safe.directory=/opt/zkai -C /opt/zkai fetch origin main
-sudo git -c safe.directory=/opt/zkai -C /opt/zkai reset --hard origin/main
-cd /opt/zkai && sudo git -c safe.directory=/opt/zkai ls-files -z | sudo xargs -0 chown www-data:www-data
-sudo systemctl restart zkai            # 配置热加载，但换代码要重启
-```
-
-⚠ **chown 那行必须先 `cd /opt/zkai`**（2026-10-24 实测踩坑）：`ls-files` 输出的
-是**相对路径**，在 SSH 登录的家目录里跑 `xargs chown` 会整批
-`cannot access`——且它排在 `&&` 链中间，失败会**静默跳过后面的 restart**，
-表现为「代码同步了但服务还在跑旧版」。
-
-- `reset --hard` 只动**被跟踪**的文件：`config/*.yaml`、`.env`、`data/`、`__pycache__`
-  全在 `.gitignore` 里，**不会被覆盖**。服务器上现役配置永远是它自己的那一份，
-  所以 `config/models.yaml` 这类**不受版本控制、但影响行为**的文件要单独同步
-  （本机 scp 不可用，用 `ssh host "cat > /tmp/x" < 文件` 或 base64 管道）。
-- 服务器监听 **8318**，本机是 8317 —— 探活别打错端口。
-- **服务器连不上 GitHub 时的备用通道：git bundle 经 SSH 运输**（2026-10-24
-  实测，GnuTLS -110 / 443 超时）：本地
-  `git bundle create x.bundle <服务器HEAD>..main` →
-  `ssh tandian211 "cat > /tmp/x.bundle" < x.bundle` → 服务器
-  `git fetch /tmp/x.bundle main:refs/remotes/origin/main` 后照常
-  reset/chown/restart。**这仍是 git 同步**（完整对象与引用），只是运输通道
-  换了——比手工挑文件传强在服务器 HEAD 仍然真实可查。纯文档改动可以跳过
-  restart。
-- **现役服务器是 `tandian211`（211.159.174.204，用户 ubuntu，SSH 别名
-  `tandian211`，key `~/.ssh/migrate_211`）**；旧的 120.53.28.29 已停用，
-  本地 `~/.ssh/config` 里那条是另一台内网机，别连错。
-- 服务器本地分支 2026-10-21 已从 `master` 改名 `main` 并 `--set-upstream-to=
-  origin/main`（之前 `reset --hard origin/main` 留下的命名不一致，已对齐）。
-- **服务器 origin 必须用 HTTPS，不能用 SSH**（2026-10-21 实测）：origin 曾是
-  `git@github.com:...`，但服务器 `ubuntu` 用户**没有配任何 GitHub deploy key**
-  （`~/.ssh` 只有 known_hosts），于是 `sudo git fetch` 永远
-  `Permission denied (publickey)`——「同步走 git」其实从没真正拉成功过，
-  全靠手工传文件。这个仓库是**公开仓库**（本机 `git ls-remote
-  https://github.com/K2951314/zk-ai.git` 无需认证即可读），已改
-  `git remote set-url origin https://github.com/K2951314/zk-ai.git`，
-  fetch 即刻恢复。**push 仍走本地（本机有 key），服务器只需要 fetch**，
-  所以服务器不必配 push 权限。若哪天仓库转私有，HTTPS 拉取也要 token，
-  到时给 ubuntu 配一个 read-only deploy key 再切回 SSH。
-- 同步前先留备份：`sudo tar czf /var/backups/zkai/code-$(date +%F-%H%M).tgz -C /opt/zkai
-  --exclude=.venv --exclude=data --exclude=.git --exclude=__pycache__ .`
-- **判断差异别凭 mtime**：本地工作区是 CRLF（`core.autocrlf=true`），服务器是 LF，
-  直接比 sha256 会满屏「不同」。要按**归一化换行后**的内容比，或用
-  `git hash-object` 把两边都过一遍 clean 过滤器再比。
-
-**历史教训（2026-10-20 三方同步时复盘）**：服务器曾经不是 git 检出，于是本地、GitHub、
-服务器三条线各自演进——GitHub 有商汤 rpm 闸、本地有 410 修复、服务器还留着 09-30 的
-文档和已废弃的自带迁移模块，`config/models.yaml` 更被控制台写回了更早的版本（少了
-`glm-5.2`，`zk-auto` 退化成 09-28 的别名套娃形态）。**没有版本控制的地方，就没人知道
-它落后在哪。** 现在 `/opt/zkai` 有 HEAD 了，下次一句 `git status` 就能看清。
-详见 `docs/三方同步-20261020.md`。

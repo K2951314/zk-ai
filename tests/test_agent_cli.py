@@ -10,13 +10,24 @@
 """
 from __future__ import annotations
 
+import json
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from app.services.agent.cli.adapters import GenericAdapter, QwenAdapter
+from app.services.agent.cli import launcher
+from app.services.agent.cli.adapters import (
+    CodeBuddyAdapter,
+    GeminiAdapter,
+    GenericAdapter,
+    QoderAdapter,
+    QwenAdapter,
+)
 from app.services.agent.cli.base import FailureKind, classify_failure, failure_output
 from app.services.agent.cli.delegate import TOOL_NAME, build_schema, prepare
+from app.services.agent.cli.models import parse_codebuddy_models, parse_qoder_models
 from app.services.agent.cli.registry import (
     CliRegistry,
     CliToolConfig,
@@ -33,7 +44,9 @@ from app.services.agent.tools import ToolBox, ToolError
 def _enabled(**over):
     base = {
         "enabled": True,
-        "command": "sh",           # 一定存在于 PATH，绕开「命令不存在」拦截
+        # 用解释器本身当「一定存在」的命令：`sh` 只在装了 Git-Bash 的机器上
+        # 才在 PATH 里，Windows 原生环境会让这一组解析测试整体误报。
+        "command": sys.executable,
         "backend": "gateway",
         "model": "zk-auto",
         "cost_tier": "free",
@@ -83,6 +96,76 @@ def test_parse_tool_timeout_clamped():
     assert cfg2 is not None and cfg2.timeout == 10
 
 
+def test_parse_tool_effort_and_context_window():
+    warnings: list[str] = []
+    cfg = _parse_tool("qoder", _enabled(effort="MAX", context_window=1_000_000), warnings)
+    assert cfg is not None
+    assert cfg.effort == "max"  # 大小写归一
+    assert cfg.context_window == 1_000_000
+    assert warnings == []
+
+
+def test_parse_tool_unknown_effort_warns_but_keeps_tool():
+    """档位写错不该让整个执行体消失——按工具默认跑，并留下告警。"""
+    warnings: list[str] = []
+    cfg = _parse_tool("qoder", _enabled(effort="ultra"), warnings)
+    assert cfg is not None and cfg.effort == ""
+    assert any("effort" in w for w in warnings)
+
+
+def test_parse_tool_context_window_sanitized():
+    warnings: list[str] = []
+    assert _parse_tool("qoder", _enabled(context_window=9_999_999), warnings).context_window == 2_000_000
+    assert _parse_tool("qoder", _enabled(context_window=-5), warnings).context_window == 0
+    assert _parse_tool("qoder", _enabled(context_window="abc"), warnings).context_window == 0
+
+
+def test_parse_tool_models_and_free_models():
+    cfg = _parse_tool(
+        "codebuddy",
+        _enabled(models=["deepseek-v4.1-flash", " glm-5.3 "], free_models=["deepseek-v4.1-flash"]),
+        [],
+    )
+    assert cfg is not None
+    assert cfg.models == ["deepseek-v4.1-flash", "glm-5.3"]
+    assert cfg.free_models == ["deepseek-v4.1-flash"]
+
+
+def test_parse_tool_models_not_a_list_is_ignored_with_warning():
+    """写错类型不该让执行体消失，只是清单为空。"""
+    warnings: list[str] = []
+    cfg = _parse_tool("codebuddy", _enabled(models="a,b"), warnings)
+    assert cfg is not None and cfg.models == []
+    assert any("models" in w for w in warnings)
+
+
+# --------------------------------------------------------------------------- #
+# 模型发现：能用 CLI 自己的口径就别用手抄清单
+# --------------------------------------------------------------------------- #
+
+def test_parse_qoder_models_skips_header_and_blank():
+    text = "MODEL\nAuto\nDeepSeek-Flash\n\nstep-5-preview (qoder-custom-xxx)\n"
+    assert parse_qoder_models(text) == [
+        "Auto",
+        "DeepSeek-Flash",
+        "step-5-preview (qoder-custom-xxx)",
+    ]
+
+
+def test_parse_codebuddy_models_from_help_text():
+    text = (
+        "--model <model>  Model for the current session. Please provide the model ID. "
+        "Currently supported: (default-model, fast-model, glm-5.3, deepseek-v4.1-flash)"
+    )
+    assert parse_codebuddy_models(text) == [
+        "default-model", "fast-model", "glm-5.3", "deepseek-v4.1-flash",
+    ]
+
+
+def test_parse_codebuddy_models_missing_returns_empty():
+    assert parse_codebuddy_models("没有任何清单") == []
+
+
 # --------------------------------------------------------------------------- #
 # 注册表：角色映射与查询
 # --------------------------------------------------------------------------- #
@@ -126,6 +209,9 @@ def test_registry_queries():
     [
         ("No auth type is selected. Please configure an auth type", FailureKind.AUTH),
         ("401 Unauthorized", FailureKind.AUTH),
+        # 2026-10-25 真实输出：CodeBuddy / Qoder 的未登录原文，必须按 AUTH 报
+        ("Authentication required. Please use /login command to sign in to your account", FailureKind.AUTH),
+        ("Not logged in. Run `qodercli login` to authenticate.", FailureKind.AUTH),
         ("429 Too Many Requests", FailureKind.QUOTA),
         ("insufficient_quota: rpm exhausted", FailureKind.QUOTA),
         ("something weird happened", FailureKind.FAILED),
@@ -178,6 +264,147 @@ def test_generic_adapter_fallback():
     assert GenericAdapter(cfg).build_command("干活", "/workspace") == ["whatever", "干活"]
 
 
+def _cli(name: str, command: str, model: str, mode: str) -> CliToolConfig:
+    return CliToolConfig(
+        name=name, command=command, backend="official", model=model,
+        cost_tier="free", timeout=60, approval_mode=mode,
+    )
+
+
+def test_qoder_plan_mode_never_passes_default():
+    """plan 必须映射成 dont_ask：透传 default 会在无头场景等审批等到超时。"""
+    argv = QoderAdapter(_cli("qoder", "qoder", "auto", "plan")).build_command("整理清单", "/workspace")
+    assert argv[argv.index("--permission-mode") + 1] == "dont_ask"
+    assert argv[argv.index("--model") + 1] == "auto"
+    assert argv[-1] == "整理清单" and "--print" in argv
+
+
+def test_qoder_default_mode_passthrough():
+    argv = QoderAdapter(_cli("qoder", "qoder", "auto", "default")).build_command("x", "/workspace")
+    assert argv[argv.index("--permission-mode") + 1] == "default"
+
+
+def test_qoder_effort_and_context_window_flags():
+    cfg = replace(_cli("qoder", "qoder", "DeepSeek-Flash", "plan"), effort="max", context_window=1_000_000)
+    argv = QoderAdapter(cfg).build_command("整理", "/workspace")
+    assert argv[argv.index("--reasoning-effort") + 1] == "max"
+    assert argv[argv.index("--context-window") + 1] == "1000000"
+
+
+def test_codebuddy_effort_and_autocompact_flags():
+    cfg = replace(
+        _cli("codebuddy", "codebuddy", "deepseek-v4.1-flash", "plan"),
+        effort="max",
+        context_window=1_000_000,
+    )
+    argv = CodeBuddyAdapter(cfg).build_command("整理", "/workspace")
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert argv[argv.index("--autocompact") + 1] == "1000000"
+
+
+def test_effort_and_context_default_to_tool_defaults():
+    """不填 = 不传参数，交给工具自己的默认档。"""
+    argv = QoderAdapter(_cli("qoder", "qoder", "DeepSeek-Flash", "plan")).build_command("x", "/w")
+    assert "--reasoning-effort" not in argv and "--context-window" not in argv
+    argv = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan")).build_command("x", "/w")
+    assert "--effort" not in argv and "--autocompact" not in argv
+
+
+def test_codebuddy_argv_uses_json_output_and_plan():
+    argv = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan")).build_command(
+        "整理清单", "/workspace"
+    )
+    assert argv[:1] == ["codebuddy"]
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert argv[argv.index("--model") + 1] == "glm-5.2"
+    assert argv[-1] == "整理清单"
+
+
+def test_codebuddy_parse_output_extracts_result_and_usage():
+    adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
+    payload = json.dumps(
+        {
+            "type": "result",
+            "is_error": False,
+            "result": "pong",
+            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "total_cost_usd": 0.0012,
+        }
+    )
+    out = adapter.parse_output(payload, "")
+    assert "pong" in out
+    assert "入 12" in out and "出 3" in out
+    assert "$0.0012" in out
+
+
+def test_codebuddy_parse_output_falls_back_to_raw_text():
+    adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
+    assert adapter.parse_output("就是一段裸文本", "") == "就是一段裸文本"
+    assert adapter.parse_output("{坏掉的 json", "") == "{坏掉的 json"
+
+
+def test_codebuddy_event_array_yields_only_the_result():
+    """2.175.0 的真实形态是事件数组，前面几条 message 事件带着完整 system prompt。"""
+    adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
+    payload = json.dumps(
+        [
+            {"type": "message", "content": [{"type": "input_text", "text": "AGENTS.md 全文…"}]},
+            {"type": "reasoning", "text": "想想"},
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "pong",
+                "total_cost_usd": 0,
+                "usage": {"input_tokens": 46281, "output_tokens": 30},
+            },
+        ]
+    )
+    out = adapter.parse_output(payload, "")
+    assert out.startswith("pong")
+    assert "AGENTS.md" not in out
+    assert "46281" in out and "$0.0000" in out
+
+
+def test_codebuddy_parse_output_marks_upstream_error():
+    adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
+    out = adapter.parse_output(json.dumps({"result": "被拦了", "is_error": True}), "")
+    assert "is_error=true" in out
+
+
+def test_gemini_argv_plan_mode_and_json():
+    argv = GeminiAdapter(_cli("gemini", "gemini", "gemini-2.5-flash", "plan")).build_command(
+        "整理清单", "/workspace"
+    )
+    assert argv[:2] == ["gemini", "-p"]
+    assert argv[argv.index("-m") + 1] == "gemini-2.5-flash"
+    assert argv[argv.index("--approval-mode") + 1] == "plan"
+    assert argv[argv.index("-o") + 1] == "json"
+
+
+def test_gemini_env_makes_node_proxy_and_trust_work():
+    adapter = GeminiAdapter(_cli("gemini", "gemini", "gemini-2.5-flash", "plan"))
+    env = adapter.build_env()
+    assert env is not None
+    # Node 的 fetch 默认不读 HTTPS_PROXY，跨境访问必须靠这个开关
+    assert env["NODE_USE_ENV_PROXY"] == "1"
+    # 无头模式不信任任何目录，缺了它只回一句 not running in a trusted directory
+    assert env["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+
+
+def test_gemini_parse_output_extracts_response_and_tokens():
+    adapter = GeminiAdapter(_cli("gemini", "gemini", "gemini-2.5-flash", "plan"))
+    payload = json.dumps(
+        {
+            "response": "pong",
+            "stats": {"models": {"gemini-2.5-flash": {"tokens": {"prompt": 10, "candidates": 2}}}},
+        }
+    )
+    out = adapter.parse_output(payload, "")
+    assert "pong" in out and "入 10" in out and "出 2" in out
+
+
 # --------------------------------------------------------------------------- #
 # 委派工具：schema 与 prepare
 # --------------------------------------------------------------------------- #
@@ -222,3 +449,65 @@ def test_prepare_rejects_escaping_cwd(tmp_path: Path):
     tb = ToolBox(tmp_path)
     with pytest.raises(ToolError, match="越出工作区"):
         prepare(_reg(), tb, {"role": "cli-coder", "task": "x", "cwd": "../etc"})
+
+
+# --------------------------------------------------------------------------- #
+# 命令解析：Windows 下 npm 的 .cmd shim 不能直接 exec
+# --------------------------------------------------------------------------- #
+
+_SHIM = (
+    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\n"
+    "SETLOCAL\r\nCALL :find_dp0\r\n\r\n"
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+    '"%dp0%\\node_modules\\@tencent-ai\\codebuddy-code\\bin\\codebuddy" %*\r\n'
+)
+
+
+def _fake_which(mapping: dict[str, str]):
+    def which(name: str) -> str | None:
+        return mapping.get(name)
+
+    return which
+
+
+def test_cmd_shim_resolved_to_node_entry(tmp_path: Path, monkeypatch):
+    shim = tmp_path / "codebuddy.cmd"
+    shim.write_text(_SHIM, encoding="utf-8", newline="")
+    entry = tmp_path / "node_modules" / "@tencent-ai" / "codebuddy-code" / "bin" / "codebuddy"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+
+    argv = launcher.resolve_command(
+        ["codebuddy", "--print", "只回复 pong"],
+        which=_fake_which({"codebuddy": str(shim), "node": "C:/fake/node.exe"}),
+    )
+    assert argv == ["C:/fake/node.exe", str(entry), "--print", "只回复 pong"]
+
+
+def test_cmd_shim_without_entry_raises(tmp_path: Path, monkeypatch):
+    shim = tmp_path / "weird.cmd"
+    shim.write_text("@echo off\r\nREM 没有 npm 的标准收尾行\r\n", encoding="utf-8", newline="")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    with pytest.raises(launcher.LauncherError, match=r"原生 \.exe"):
+        launcher.resolve_command(["weird"], which=_fake_which({"weird": str(shim)}))
+
+
+def test_plain_executable_passthrough(tmp_path: Path, monkeypatch):
+    exe = tmp_path / "tool.exe"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    assert launcher.resolve_command(["tool", "a"], which=_fake_which({"tool": str(exe)})) == [
+        str(exe),
+        "a",
+    ]
+
+
+def test_ps1_shim_goes_through_pwsh(tmp_path: Path, monkeypatch):
+    script = tmp_path / "thing.ps1"
+    script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    argv = launcher.resolve_command(
+        ["thing", "-x"], which=_fake_which({"thing": str(script), "pwsh": "C:/pwsh.exe"})
+    )
+    assert argv == ["C:/pwsh.exe", "-NoProfile", "-File", str(script), "-x"]

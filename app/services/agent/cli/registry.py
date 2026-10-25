@@ -37,6 +37,13 @@ _TIMEOUT_MIN = 10
 _TIMEOUT_MAX = 1800
 _TIMEOUT_DEFAULT = 300
 
+#: 思考强度档位（CodeBuddy 的 --effort 取值；Qoder 的 max 已实测接受）。
+#: 不同 CLI 支持的档位可能更少，写超集由各适配器按工具映射。
+EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+
+#: 上下文窗口上限：只做粗校验（2M 已经超过现役所有模型），0 = 用工具默认
+_CONTEXT_WINDOW_MAX = 2_000_000
+
 
 @dataclass(slots=True, frozen=True)
 class CliToolConfig:
@@ -53,6 +60,15 @@ class CliToolConfig:
     base_url: str = ""
     #: backend=gateway 时随调用带上的 key；本机网关不校验时填占位即可
     api_key: str = ""
+    #: 思考强度（空串 = 用工具默认）；语义是"上限提示"，不同 CLI 支持档位不同
+    effort: str = ""
+    #: 上下文窗口（0 = 用工具默认）。注意：这是**告诉 CLI 按多大管理**，
+    #: 不会把模型窗口变大；Qoder 留空时自己按 128K 算
+    context_window: int = 0
+    #: 控制台「执行体」面板里可选的模型清单（空 = 只认 model 那一个）
+    models: list[str] = field(default_factory=list)
+    #: models 里哪些按免费档展示（只是标签，真正的计费以工具自报为准）
+    free_models: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -142,6 +158,28 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
     except (TypeError, ValueError):
         timeout = _TIMEOUT_DEFAULT
     timeout = max(_TIMEOUT_MIN, min(_TIMEOUT_MAX, timeout))
+    effort = str(raw.get("effort") or "").strip().lower()
+    if effort and effort not in EFFORT_LEVELS:
+        warnings.append(
+            f"cli_tools: 工具 {name!r} 的 effort={effort!r} 不在已知档位"
+            f"{sorted(EFFORT_LEVELS)} 里，已按工具默认处理"
+        )
+        effort = ""
+    try:
+        context_window = int(raw.get("context_window") or 0)
+    except (TypeError, ValueError):
+        context_window = 0
+    context_window = max(0, min(_CONTEXT_WINDOW_MAX, context_window))
+
+    def _str_list(key: str) -> list[str]:
+        value = raw.get(key)
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            warnings.append(f"cli_tools: 工具 {name!r} 的 {key} 不是列表，已忽略")
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
     return CliToolConfig(
         name=name,
         command=command,
@@ -152,6 +190,10 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
         approval_mode=approval_mode,
         base_url=str(raw.get("base_url") or "").strip(),
         api_key=str(raw.get("api_key") or "").strip(),
+        effort=effort,
+        context_window=context_window,
+        models=_str_list("models"),
+        free_models=_str_list("free_models"),
     )
 
 

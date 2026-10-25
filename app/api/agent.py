@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from app.api.deps import ContainerDep, require_admin
 from app.core.container import Container
 from app.core.errors import ZKAIError
+from app.services.agent.cli import load_cli_registry
+from app.services.agent.cli.models import discover_models
 from app.services.agent.service import AgentService
 
 router = APIRouter(prefix="/zkadmin/agent", tags=["agent"],
@@ -45,11 +47,125 @@ class StartPayload(BaseModel):
 
 class FollowupPayload(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
+    #: 带执行体 = 这一条消息直接交给 CLI；不带 = 照旧走父模型
+    executor_role: str | None = Field(default=None, max_length=64)
+    model: str | None = Field(default=None, max_length=128)
+    effort: str | None = Field(default=None, max_length=16)
+    context_window: int | None = Field(default=None, ge=0, le=2_000_000)
 
 
 class ApprovalPayload(BaseModel):
     approved: bool
     remember: bool = False
+
+
+class ExecutorRunPayload(BaseModel):
+    """控制台「执行体」面板提交的任务：直接跑 CLI，不经父模型。"""
+
+    role: str = Field(min_length=1, max_length=64)
+    task: str = Field(min_length=1, max_length=20_000)
+    model: str | None = Field(default=None, max_length=128)
+    effort: str | None = Field(default=None, max_length=16)
+    context_window: int | None = Field(default=None, ge=0, le=2_000_000)
+    workspace: str | None = Field(default=None, max_length=500)
+
+
+class DelegationItem(BaseModel):
+    role: str = Field(min_length=1, max_length=64)
+    task: str = Field(min_length=1, max_length=20_000)
+    model: str | None = Field(default=None, max_length=128)
+    effort: str | None = Field(default=None, max_length=16)
+    context_window: int | None = Field(default=None, ge=0, le=2_000_000)
+
+
+class DelegationPayload(BaseModel):
+    """一条消息里点名多个执行体：按顺序串行跑。"""
+
+    items: list[DelegationItem] = Field(min_length=1, max_length=10)
+    session_id: str | None = Field(default=None, max_length=64)
+    workspace: str | None = Field(default=None, max_length=500)
+
+
+@router.get("/executors")
+async def list_executors(container: ContainerDep) -> dict[str, Any]:
+    """可派的执行体花名册（控制台 @ / 面板的数据源）。"""
+    registry = load_cli_registry(container.settings)
+    items: list[dict[str, Any]] = []
+    for role in registry.known_roles():
+        rc = registry.roles[role]
+        tool = registry.tools[rc.tool]
+        models = tool.models or [tool.model]
+        items.append({
+            "role": role,
+            "tool": tool.name,
+            "model": tool.model,
+            "cost_tier": tool.cost_tier,
+            "effort": tool.effort,
+            "context_window": tool.context_window,
+            "hint": rc.hint,
+            # 只有这两家 CLI 有思考/上下文旋钮；gemini 0.61 没有暴露
+            "knobs": ["effort", "context_window"] if tool.name in {"codebuddy", "qoder"} else [],
+            "models": [
+                {
+                    "id": model_id,
+                    "free": model_id in tool.free_models
+                    if tool.free_models
+                    else tool.cost_tier == "free",
+                }
+                for model_id in models
+            ],
+        })
+    return {"executors": items}
+
+
+@router.get("/executors/{role}/models")
+async def executor_models(role: str, container: ContainerDep) -> dict[str, Any]:
+    """该执行体**真正能调**的模型清单（能用 CLI 自己的口径就用它）。
+
+    qoder 走 ``--list-models``，codebuddy 解析 ``--help`` 的 --model 说明；
+    两条都拿不到时回落到 cli_tools.yaml 里的 ``models``。
+    """
+    registry = load_cli_registry(container.settings)
+    config = registry.tool_for_role(role)
+    if config is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"执行体角色 {role!r} 不可用")
+    live = await asyncio.to_thread(discover_models, config.name, config.command)
+    ids = live or config.models or [config.model]
+    free = set(config.free_models)
+    return {
+        "role": role,
+        "source": "live" if live else "config",
+        "models": [{"id": model_id, "free": model_id in free} for model_id in ids],
+    }
+
+
+@router.post("/delegations", status_code=201)
+async def run_delegations(payload: DelegationPayload, agent: AgentDep) -> dict[str, Any]:
+    """多段执行体任务：按顺序串行跑，结果逐段落进同一条 transcript。"""
+    try:
+        return await agent.start_delegations(
+            items=[item.model_dump() for item in payload.items],
+            session_id=payload.session_id,
+            workspace=payload.workspace,
+        )
+    except ZKAIError as exc:
+        raise HTTPException(exc.http_status, exc.message) from exc
+
+
+@router.post("/executors", status_code=201)
+async def run_executor(payload: ExecutorRunPayload, agent: AgentDep) -> dict[str, Any]:
+    """建一个「执行体直跑」会话；结果通过既有 SSE 流回来。"""
+    try:
+        return await agent.start_delegation(
+            role=payload.role,
+            task=payload.task,
+            model=payload.model,
+            effort=payload.effort,
+            context_window=payload.context_window,
+            workspace=payload.workspace,
+        )
+    except ZKAIError as exc:
+        raise HTTPException(exc.http_status, exc.message) from exc
 
 
 @router.get("/models")
@@ -91,7 +207,18 @@ async def get_session(session_id: str, agent: AgentDep) -> dict[str, Any]:
 async def followup(session_id: str, payload: FollowupPayload,
                    agent: AgentDep) -> dict[str, Any]:
     try:
-        detail = await agent.followup(session_id, payload.content)
+        if payload.executor_role:
+            # 同一个会话里换执行体再派一次：结果照样落进这条 transcript
+            detail = await agent.followup_delegation(
+                session_id,
+                role=payload.executor_role,
+                task=payload.content,
+                model=payload.model,
+                effort=payload.effort,
+                context_window=payload.context_window,
+            )
+        else:
+            detail = await agent.followup(session_id, payload.content)
     except ZKAIError as exc:
         raise HTTPException(exc.http_status, exc.message) from exc
     if detail is None:

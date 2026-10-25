@@ -21,6 +21,7 @@ from app.services.agent.cli.base import (
     classify_failure,
     failure_output,
 )
+from app.services.agent.cli.launcher import LauncherError, resolve_command
 from app.services.agent.cli.registry import CliToolConfig
 
 #: 单路输出最多读多少字节（超出即丢弃剩余，进程照常等死）
@@ -60,6 +61,16 @@ async def run_delegation(
     extra = adapter.build_env()
     if extra is not None:
         env = {**os.environ, **extra}
+    try:
+        # npm 装的 CLI 在 Windows 上只有 .cmd/.ps1 shim，CreateProcess 不能
+        # 直接执行；这里解析成 node + 入口脚本，argv 仍然不经 shell。
+        argv = resolve_command(argv)
+    except LauncherError as exc:
+        return CliResult(
+            ok=False,
+            output=failure_output(FailureKind.FAILED, str(exc)),
+            failure=FailureKind.FAILED,
+        )
     started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -86,8 +97,16 @@ async def run_delegation(
             failure=FailureKind.FAILED,
         )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            asyncio.gather(_read_limited(proc.stdout), _read_limited(proc.stderr)),
+        # 必须把 proc.wait() 和两路读流一起 await：只读到 EOF 时 asyncio 的
+        # 子进程回调可能还没跑，proc.returncode 仍是 None，原来那句
+        # `if code == 0` 就会把**成功的**委派判成失败（2026-10-25 实测：
+        # gemini 已经吐出完整 JSON，结果被标成【执行失败】，exit=None）。
+        stdout, stderr, _ = await asyncio.wait_for(
+            asyncio.gather(
+                _read_limited(proc.stdout),
+                _read_limited(proc.stderr),
+                proc.wait(),
+            ),
             timeout=config.timeout,
         )
     except TimeoutError:
