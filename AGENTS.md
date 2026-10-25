@@ -556,6 +556,14 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   （`GET /executors/{role}/models`），免费标记只能手工维护。
   改 Python 要重启网关；只改 yaml 不用（每次新任务重读花名册）。
   ⚠ 「停止」只改状态，**不 kill 子进程**（`run_delegation` 没有取消句柄）。
+- **skill 不是接口，是提示包**：本机技能只在 `~/.agents/skills`、`~/.claude/skills`、
+  `~/.codex/skills`、`~/.catpaw/skills` 四处（codebuddy/qoder/gemini 目录为空）。
+  所以「用 skill」= 把活派给装了 skill 的 CLI，而不是给网关加工具。
+  已把 **codex** 接成执行体（角色 `cli-skill`，`plan`→`-s read-only`），
+  它自带 15 个技能、在自己的上下文里跑，`cost_tier: paid`（烧网关上游额度）；
+  ⚠ 网关进程环境里要有 `ZKAI_API_TOKEN`，否则子进程报缺变量。
+  **Claude Code 接不了**：客户端先校验模型 ID，`zk-k3`/`zk-k3[1M]` 直接判
+  `unrecognized_model`，请求都没到网关（CC Switch 里那套配置就是踩在这上面）。
 - **`--model` 可选值以 `codebuddy --help` 为准**（glm-5.3 / kimi-k3 /
   deepseek-v4.1-flash 都在列），但"在列"不等于"免费"——**以 JSON 里的
   `total_cost_usd` 为准**，这是唯一客观口径。

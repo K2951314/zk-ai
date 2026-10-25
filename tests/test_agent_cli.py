@@ -20,6 +20,7 @@ import pytest
 from app.services.agent.cli import launcher
 from app.services.agent.cli.adapters import (
     CodeBuddyAdapter,
+    CodexAdapter,
     GeminiAdapter,
     GenericAdapter,
     QoderAdapter,
@@ -371,6 +372,22 @@ def test_codebuddy_parse_output_marks_upstream_error():
     adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
     out = adapter.parse_output(json.dumps({"result": "被拦了", "is_error": True}), "")
     assert "is_error=true" in out
+
+
+def test_codex_plan_mode_uses_read_only_sandbox():
+    argv = CodexAdapter(_cli("codex", "codex", "zk-auto", "plan")).build_command(
+        "查一下配置", "/workspace"
+    )
+    assert argv[:2] == ["codex", "exec"]
+    assert "--skip-git-repo-check" in argv     # 工作区不一定是 git 仓库
+    assert argv[argv.index("-m") + 1] == "zk-auto"
+    assert argv[argv.index("-s") + 1] == "read-only"   # plan -> 只读沙箱
+    assert argv[-1] == "查一下配置"
+
+
+def test_codex_default_mode_has_no_sandbox_flag():
+    argv = CodexAdapter(_cli("codex", "codex", "zk-auto", "default")).build_command("x", "/w")
+    assert "-s" not in argv
 
 
 def test_gemini_argv_plan_mode_and_json():

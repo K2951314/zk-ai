@@ -54,14 +54,24 @@ class ClaudeAdapter(CliAdapter):
 
 
 class CodexAdapter(CliAdapter):
-    """Codex CLI（命令名 codex，待安装）。
+    """Codex CLI（命令名 codex）。
 
-    非交互形态：codex exec "任务"。安装后实测校准。
+    非交互形态：``codex exec``；``-s read-only`` 对应 plan 档——它自己的沙箱策略，
+    比让审批弹窗挂起可靠。``--skip-git-repo-check`` 是给「工作区不是 git 仓库」兜底
+    （任务台的 workspace 可以指到任意目录）。
+
+    ⚠ 它走的是 ``~/.codex/config.toml`` 里配的 provider（本机是 zkai 网关），
+    所以**网关进程环境里必须有 ``ZKAI_API_TOKEN``**，否则子进程报
+    ``Missing environment variable``。
     """
 
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
-        return [cfg.command, "exec", task, "-m", cfg.model]
+        argv = [cfg.command, "exec", "--skip-git-repo-check", "-m", cfg.model]
+        if cfg.approval_mode == "plan":
+            argv += ["-s", "read-only"]
+        argv.append(task)
+        return argv
 
 
 class QoderAdapter(CliAdapter):

@@ -58,10 +58,15 @@ tools:
     enabled: false
     command: codex
     backend: official
-    model: gpt-5-codex
+    # 走 ~/.codex/config.toml 里的 provider（可以是本网关的别名）
+    model: zk-auto
     cost_tier: paid
     timeout: 300
-    approval_mode: default
+    approval_mode: plan          # plan -> -s read-only
+    # 它自带 ~/.codex/skills，需要本机 skill 的活派给它最省事
+    # ⚠ 走网关时网关进程环境里要有 ZKAI_API_TOKEN，否则子进程报缺变量
+    models: [zk-auto, zk-k3, zk-long]
+    free_models: []
 
   # -------------------------------------------------------------------------
   # CodeBuddy / WorkBuddy（腾讯，@tencent-ai/codebuddy-code）—— 免费档
@@ -149,3 +154,6 @@ roles:
   cli-grinder:
     tool: qwen                    # 机械批量活，用免费档跑
     hint: 机械改写、批量整理（外部 CLI 执行）
+  cli-skill:
+    tool: codex                   # 需要本机 skill 的活（codex 自带 ~/.codex/skills）
+    hint: 需要本机 skill 的任务（外部 CLI 执行）
