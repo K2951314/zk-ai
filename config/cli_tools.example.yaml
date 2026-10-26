@@ -133,7 +133,7 @@ tools:
   # -------------------------------------------------------------------------
   qoder:
     enabled: false
-    command: qoder
+    command: qodercli
     backend: official
     model: DeepSeek-Flash        # 占位：登录后用 --list-models 的真实显示名替换
     cost_tier: free
@@ -145,7 +145,8 @@ tools:
     # ⚠ 这是"按多大窗口管理"，不会把模型窗口变大
     context_window: 0
     # 模型名用 `qoder --list-models` 的显示名
-    models: [DeepSeek-Flash, GLM-5.3, GLM-5.3-Flash, Kimi-K3.1-Pro]
+    # 2026-10-26 实测：当前账号 --list-models 只有这两个；面板以 live 结果为准
+    models: [DeepSeek-Flash, Qwen3.8-Flash]
     free_models: [DeepSeek-Flash]
 
 # ---------------------------------------------------------------------------

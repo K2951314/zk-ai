@@ -605,11 +605,20 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   stdin 是 DEVNULL，它等不到确认就一直挂到超时（不是快速失败）。原文已进
   AUTH 特征表，现在报「未登录」。要恢复得在真终端跑一次 `gemini` 走 OAuth。
 - **qoder / codebuddy 的 CLI 登录态与桌面端不共享，而且会过期**：2026-10-26
-  重装后两台都要求重新登录（`qoder login` / codebuddy 交互式里 `/login`）。
+  重装后两台都要求重新登录（`qodercli login` / codebuddy 交互式里 `/login`）。
   另：从 agent 会话里直接跑 `qoder` 会继承一堆 `QODER_*`（含
   `QODER_AGENT_SDK_ENTRYPOINT`），报 `sdk_invalid_args: Agent SDK entrypoint
   env is set...`——测 CLI 先把 `QODER_*` 全 unset；网关托盘进程没有这些变量，
   不受影响。`config/cli_tools.yaml` 是 gitignore 的，换机要重新生成。
+- **Qoder 执行体必须写 `command: qodercli`，不能写 `qoder`**（2026-10-26 实测）：
+  桌面端会在 `~/.qoder/entry/` 装一个 PowerShell 转发器 `qoder.CMD`，PATH 可能
+  先命中它；launcher 只认 npm shim 里的 `node_modules` 入口，从转发器里取不出
+  脚本，委派直接报「无法从中取出口脚本」。`qodercli` 是 npm 包的原生命令，
+  解析成 node + bundle/qodercli.js，实测 `pong` 通过；登录也用 `qodercli login`。
+- **Qoder 的模型清单以 `qodercli --list-models` 为准，桌面端目录不可解析**：
+  2026-10-26 实测当前账号只有 `DeepSeek-Flash` / `Qwen3.8-Flash` 两个；桌面端的
+  `.qoder/.models/*/catalog-*` 是加密文件（头 `QMC`），别去解它。面板下拉走
+  live 发现（`source: live`），静态 `models` 只是未登录时的兜底。
 
 ## 服务器化改造的坑
 
