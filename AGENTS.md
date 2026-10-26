@@ -2,7 +2,9 @@
 
 - 双击 `scripts\start_gateway.cmd`（默认端口 8317，可传参换端口）；手动等价命令：
   `.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8317`
-- 依赖用 uv 管理（`uv sync` 自动装 Python 3.12+）；首次先 `python scripts/init_db.py` 建表
+- 依赖用 uv 管理（`uv sync` 自动装 Python 3.12+）；**门禁/测试要
+  `uv sync --extra dev`**（pytest/ruff/mypy 是 optional extra，plain sync 不装）；
+  首次先 `python scripts/init_db.py` 建表
 - 提交前门禁必须全绿：`ruff check` + `mypy` + `pytest`（README §20）
 
 ## 技术栈
@@ -179,6 +181,11 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   部署粘性的 TTL/容量是构造期快照（已改成**现场读池子**——快照必然在热重载
   后变陈旧；顺带修掉了 getattr 猜错属性名恒回落魔数 64 的旧账）。教训的两半：
   **配置段要有人补读，派生副本不如活读**。
+- **`config.yaml` 的 `deploy:` 段不参与热加载**（2026-10-26 实测）：`reload_config`
+  只重建 router / 别名 / 凭据 / 冷却策略，`load_app_config(self.settings)` 返回的
+  新 Settings **没有写回 container**，所以改 `deploy.public_base_url` / `exposure`
+  仍要重启网关——热加载日志会显示成功，`/health` 却还是旧值。启动期设置
+  （host/port/log/db 一类）同理，别把「已自动 reload N 次」当成所有段都生效。
 - **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
   「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
   只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
@@ -437,6 +444,20 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   https://pypi.tuna.tsinghua.edu.cn/simple`**：PyPI 直连和走 10808 代理都能挂死，
   镜像几秒完成；代价是它会把 `uv.lock` 里的 URL 改成镜像域（哈希不变，纯 URL churn），
   同步完 `git checkout -- uv.lock` 复原
+- **`uv trampoline failed to spawn Python child process` = uv 托管的解释器被删了**
+  （2026-10-26 实测）：`.venv\Scripts\python.exe` 是 uv 生成的跳板，它记死
+  `pyvenv.cfg` 里那个绝对路径（本例 `%APPDATA%\uv\python\cpython-3.13.5-…`，被
+  C 盘清理删掉，同目录只剩 3.11），目录没了就报 `os error 2`——**不是 .venv 坏了，
+  是宿主解释器没了**。修复：`uv sync`（会删掉重建并回落到系统 Python，实测
+  `D:\软件\Python\3.13.2`）；要跑门禁再加 `--extra dev`。**dev 依赖是
+  `optional-dependencies`，plain `uv sync` 不装 pytest/ruff/mypy**——README §20
+  的 `uv run pytest` 在全新环境会直接报找不到。
+  `start_gateway.cmd` 的自动重建原本排在 `first_run.py` 之后，环境一坏第一步就失败、
+  被误判成「.env 没填」，又用同一个坏 python 打中文提示 → 只看到两条一模一样的
+  trampoline 报错 + pause，自愈永远走不到。已调序，`test_start_msg.py::test_
+  gateway_launcher_repairs_a_broken_venv_before_using_it` 钉住（变异验证过）。
+  ⚠ 这类「用坏掉的解释器打印坏掉的解释器的报错」在本脚本里仍有残留（`venv-broken`
+  等提示本身要靠 python），所以自愈时看到的是 uv 自己的英文输出，属预期。
 - **导入迁移包前必须先停网关**（2026-09-21 为这条流过血）：换机包覆盖 `data/zkai.db`
   时，若同目录还留着上一代的 `-wal`/`-shm`，下次开库会把别人的 WAL 帧回放到新库上 →
   `database disk image is malformed`，且**不是警告是真损坏**（本机 `requests`/
@@ -573,6 +594,22 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - **`--model` 可选值以 `codebuddy --help` 为准**（glm-5.3 / kimi-k3 /
   deepseek-v4.1-flash 都在列），但"在列"不等于"免费"——**以 JSON 里的
   `total_cost_usd` 为准**，这是唯一客观口径。
+- **CodeBuddy 未登录时退出码是 0**（2026-10-26 实测，2.176.0）：stdout 只有一行
+  `Authentication required. Please use /login command to sign in`，runner 原来按
+  「退出码 0 = 成功」把它记成 done，登录提示被当成答案回给父模型。已加
+  `CliAdapter.fatal_output()` 钩子（只有 CodeBuddy 覆盖，且只认它自己的登录
+  原文，避免正常回答里的 "401" 被误判），runner 在成功分支也过一遍；
+  回归测试 `test_runner_treats_auth_text_with_exit_zero_as_failure` 钉住接线。
+  **别再退回「只看退出码」的写法**——这类 CLI 的失败信号不一定在退出码里。
+- **Gemini 登录态过期会先弹 `Opening authentication page ... [Y/n]`**（2026-10-26）：
+  stdin 是 DEVNULL，它等不到确认就一直挂到超时（不是快速失败）。原文已进
+  AUTH 特征表，现在报「未登录」。要恢复得在真终端跑一次 `gemini` 走 OAuth。
+- **qoder / codebuddy 的 CLI 登录态与桌面端不共享，而且会过期**：2026-10-26
+  重装后两台都要求重新登录（`qoder login` / codebuddy 交互式里 `/login`）。
+  另：从 agent 会话里直接跑 `qoder` 会继承一堆 `QODER_*`（含
+  `QODER_AGENT_SDK_ENTRYPOINT`），报 `sdk_invalid_args: Agent SDK entrypoint
+  env is set...`——测 CLI 先把 `QODER_*` 全 unset；网关托盘进程没有这些变量，
+  不受影响。`config/cli_tools.yaml` 是 gitignore 的，换机要重新生成。
 
 ## 服务器化改造的坑
 

@@ -52,6 +52,9 @@ _AUTH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"authentication required",
         r"sign in to your account",
         r"login required",
+        # 2026-10-26 实测：Gemini CLI 登录态过期时先弹这句（stdin 是 DEVNULL，
+        # 它等到 EOF 才继续，最终按失败退出），原文必须认成未登录。
+        r"opening authentication page",
         r"unauthorized",
         r"invalid api key",
         r"authentication failed",
@@ -130,6 +133,14 @@ class CliAdapter:
 
     def build_env(self) -> dict[str, str] | None:
         """需要追加/覆盖的环境变量；None 表示沿用当前环境。子类可覆盖。"""
+        return None
+
+    def fatal_output(self, stdout: str, stderr: str) -> FailureKind | None:
+        """退出码 0、但输出其实是失败时，返回失败分类。子类按需覆盖。
+
+        不是所有 CLI 都用退出码表达失败：CodeBuddy 未登录时退出 0、只吐一行
+        登录提示（2026-10-26 实测），不拦就会被记成「成功」。
+        """
         return None
 
     def preview(self, task: str, cwd: str) -> str:

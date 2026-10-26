@@ -91,7 +91,21 @@ def test_the_helpers_own_messages_are_chinese() -> None:
     assert 'MSG unknown key' not in buf2.getvalue()
 
 
-def test_burner_argparse_errors_are_chinese() -> None:
+def test_gateway_launcher_repairs_a_broken_venv_before_using_it() -> None:
+    """venv 健康检查必须是第一步，否则自愈分支永远走不到（2026-10-26）。
+
+    事故现场：uv 托管的 3.13.5 被 C 盘清理删掉 → .venv 的跳板指向空路径。
+    旧顺序先跑 first_run.py，它一失败脚本就当成「.env 没填」，接着又用同一个
+    坏 python 去打中文提示——两次都是 uv trampoline 报错，最后只剩一句 pause，
+    自动重建那段根本没执行到。
+    """
+    text = (_SCRIPTS / "start_gateway.cmd").read_text(encoding="ascii")
+    check_at = text.index(r'".venv\Scripts\python.exe" -c "pass"')
+    rebuild_at = text.index("call uv sync")
+    first_run_at = text.index(r"scripts\first_run.py")
+    assert check_at < rebuild_at < first_run_at, (
+        "start_gateway.cmd 的顺序退化了：必须先检查/重建 .venv，再跑 first_run.py")
+
     """argparse 自己的报错也已中文化——传错参数是运营者最常撞上的。
 
     2026-09-30 修：之前只中文化了 --help，error() 分支仍吐英文

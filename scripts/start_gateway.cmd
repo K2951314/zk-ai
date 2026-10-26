@@ -45,16 +45,13 @@ if exist ".env" (
 )
 if not defined ZKAI_HOST set "ZKAI_HOST=127.0.0.1"
 
-REM ---- First run: materialise .env / config templates, then tell what to fill ----
-.venv\Scripts\python.exe scripts\first_run.py
-if errorlevel 1 (
-  echo.
-.venv\Scripts\python.exe scripts\start_msg.py env-fill
-  pause
-  goto :end
-)
-
-REM ---- Ensure a WORKING .venv (missing or copied-and-broken triggers rebuild) ----
+REM ---- Ensure a WORKING .venv BEFORE anything else ----
+REM Order matters (2026-10-26 incident): every later step needs python, and the
+REM Chinese messages (start_msg.py) need it too. When the venv's base Python
+REM had been deleted, first_run.py failed first, the launcher misread that as
+REM "env not filled", and the repair block was never reached - the operator saw
+REM two identical trampoline errors and a bare pause. A broken venv is
+REM repairable: "uv sync" deletes it and rebuilds with another 3.12+ Python.
 set "VENV_OK="
 if exist ".venv\Scripts\python.exe" (
   ".venv\Scripts\python.exe" -c "pass" >nul 2>&1
@@ -92,6 +89,15 @@ pause
 goto :end
 
 :envready
+REM ---- First run: materialise .env / config templates, then tell what to fill ----
+.venv\Scripts\python.exe scripts\first_run.py
+if errorlevel 1 (
+  echo.
+.venv\Scripts\python.exe scripts\start_msg.py env-fill
+  pause
+  goto :end
+)
+
 REM ---- Port guard: kills OUR stale instance, refuses on foreign process ----
 .venv\Scripts\python.exe scripts\port_guard.py
 set GUARD=%ERRORLEVEL%

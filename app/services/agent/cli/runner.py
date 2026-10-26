@@ -127,6 +127,17 @@ async def run_delegation(
     code = proc.returncode
     combined = f"{stdout}\n{stderr}"
     if code == 0:
+        # 个别 CLI 用退出码 0 表达登录失败（CodeBuddy 2.176.0 实测），
+        # 不拦就会被记成「成功」并把登录提示当成答案回给父模型。
+        fatal = adapter.fatal_output(stdout, stderr)
+        if fatal is not None:
+            return CliResult(
+                ok=False,
+                output=failure_output(fatal, combined.strip()),
+                failure=fatal,
+                elapsed=elapsed,
+                exit_code=code,
+            )
         return CliResult(
             ok=True,
             output=adapter.parse_output(stdout, stderr) or "（执行成功，无文本输出）",

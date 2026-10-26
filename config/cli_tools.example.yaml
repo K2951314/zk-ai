@@ -76,7 +76,7 @@ tools:
     approval_mode: plan          # plan -> -s read-only
     # 它自带 ~/.codex/skills，需要本机 skill 的活派给它最省事
     # ⚠ 走网关时网关进程环境里要有 ZKAI_API_TOKEN，否则子进程报缺变量
-    models: [zk-auto, zk-k3, zk-long]
+    models: [zk-auto, deepseek-flash, ds4.1, kimi-k3, glm-5.3]
     free_models: []
 
   # -------------------------------------------------------------------------
@@ -90,7 +90,7 @@ tools:
     enabled: false
     command: codebuddy
     backend: official            # 用自家订阅额度，不指向网关
-    model: glm-5.2               # 可选值以 `codebuddy --help` 的 --model 说明为准
+    model: deepseek-v4.1-flash   # 免费档；可选值以 `codebuddy --help` 为准
     cost_tier: free
     timeout: 300
     approval_mode: plan          # 无头只允许只读分析；写操作必须人工开档
@@ -135,7 +135,7 @@ tools:
     enabled: false
     command: qoder
     backend: official
-    model: auto                  # 占位：登录后用 --list-models 的真实值替换
+    model: DeepSeek-Flash        # 占位：登录后用 --list-models 的真实显示名替换
     cost_tier: free
     timeout: 300
     approval_mode: plan
@@ -156,18 +156,18 @@ tools:
 # 机械批量活优先指给免费档执行体（codebuddy/qoder），免费档断了再改派。
 # ---------------------------------------------------------------------------
 roles:
-  cli-coder:
-    tool: qwen                    # 写代码/改代码的默认执行体
-    hint: 写代码、改代码、调试（外部 CLI 执行）
-  cli-reviewer:
-    tool: claude                  # 评审/把关（装好 claude 后启用）
-    hint: 代码评审、方案把关（外部 CLI 执行）
-  cli-grinder:
-    tool: qwen                    # 机械批量活，用免费档跑
-    hint: 机械改写、批量整理（外部 CLI 执行）
-  cli-skill:
-    tool: codex                   # 需要本机 skill 的活（codex 自带 ~/.codex/skills）
-    hint: 需要本机 skill 的任务（外部 CLI 执行）
   cli-claude:
     tool: claude                  # 综合能力最强的 agent（模型由 CC Switch 决定）
     hint: 复杂任务、方案与代码评审（外部 CLI 执行）
+  cli-grinder:
+    tool: codebuddy               # 机械批量活优先免费档
+    hint: 机械改写、批量整理（免费档）
+  cli-grinder-qoder:
+    tool: qoder                   # 第二条免费档，与 codebuddy 互为备份
+    hint: 机械改写、批量整理（Qoder 免费档）
+  cli-grinder-gem:
+    tool: gemini                  # 第三条免费档，官方额度最干净
+    hint: 机械改写、批量整理（Gemini 免费档）
+  cli-skill:
+    tool: codex                   # 需要本机 skill 的活（codex 自带 ~/.codex/skills）
+    hint: 需要本机 skill 的任务（外部 CLI 执行）

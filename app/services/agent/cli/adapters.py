@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar
 
-from app.services.agent.cli.base import MAX_OUTPUT, CliAdapter
+from app.services.agent.cli.base import MAX_OUTPUT, CliAdapter, FailureKind, classify_failure
 
 #: 走本机网关时的默认端点与占位 key（网关 /v1/* 当前不校验 key）
 _DEFAULT_GATEWAY_URL = "http://127.0.0.1:8317/v1"
@@ -180,6 +180,19 @@ class CodeBuddyAdapter(CliAdapter):
         if len(body) > MAX_OUTPUT:
             body = body[:MAX_OUTPUT] + f"\n…(输出已截断，共 {len(body)} 字符)"
         return body
+
+
+    def fatal_output(self, stdout: str, stderr: str) -> FailureKind | None:
+        """未登录时 codebuddy 退出码 0、只吐一行纯文本（2.176.0 实测）。
+
+        2026-10-26：控制台把这种委派显示成「成功」，正文却是登录提示。
+        这里只认它自己的登录原文，不用通用分类——正常回答里也可能出现
+        "401" 之类字样，不能一律当失败。
+        """
+        text = f"{stdout}\n{stderr}".lower()
+        if "authentication required" in text or "please use /login" in text:
+            return classify_failure(text)
+        return None
 
 
 class GeminiAdapter(CliAdapter):

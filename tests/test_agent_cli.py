@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.agent.cli import launcher
+from app.services.agent.cli import launcher, runner
 from app.services.agent.cli.adapters import (
     ClaudeAdapter,
     CodeBuddyAdapter,
@@ -228,6 +228,9 @@ def test_registry_queries():
         # 2026-10-25 真实输出：CodeBuddy / Qoder 的未登录原文，必须按 AUTH 报
         ("Authentication required. Please use /login command to sign in to your account", FailureKind.AUTH),
         ("Not logged in. Run `qodercli login` to authenticate.", FailureKind.AUTH),
+        # 2026-10-26 实测：Gemini CLI 登录态过期时只弹这一句（stdin=DEVNULL 后照旧退出 1）
+        ("Opening authentication page in your browser. Do you want to continue? [Y/n]:",
+         FailureKind.AUTH),
         ("429 Too Many Requests", FailureKind.QUOTA),
         ("insufficient_quota: rpm exhausted", FailureKind.QUOTA),
         ("something weird happened", FailureKind.FAILED),
@@ -242,6 +245,58 @@ def test_classify_failure(text, kind):
 def test_failure_output_contains_hint():
     out = failure_output(FailureKind.QUOTA, "429 boom")
     assert "额度耗尽" in out and "改派其他角色" in out
+
+
+def test_codebuddy_auth_text_is_detected_even_with_exit_zero():
+    """CodeBuddy 2.176.0：未登录时退出码 0、只吐一行纯文本。
+
+    2026-10-26 实测：控制台把这种委派显示成「成功」，正文却是登录提示，
+    父模型会把它当成任务结果。钩子只认它自己的登录原文，避免把正常回答
+    （里面也可能出现 401 之类字样）误判成失败。
+    """
+    adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
+    text = "Authentication required. Please use /login command to sign in to your account"
+    assert adapter.fatal_output(text, "") is FailureKind.AUTH
+    assert adapter.fatal_output('[{"type":"result","result":"pong"}]', "") is None
+    assert adapter.fatal_output("", "") is None
+
+
+class _FakeReader:
+    def __init__(self, data: bytes) -> None:
+        self._data, self._pos = data, 0
+
+    async def read(self, size: int) -> bytes:
+        chunk = self._data[self._pos:self._pos + size]
+        self._pos += len(chunk)
+        return chunk
+
+
+class _FakeProc:
+    def __init__(self, out: bytes, code: int = 0) -> None:
+        self.stdout, self.stderr = _FakeReader(out), _FakeReader(b"")
+        self.returncode = code
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+
+async def test_runner_treats_auth_text_with_exit_zero_as_failure(monkeypatch):
+    """接线测试：适配器认出登录提示还不够，runner 必须真的记成失败。"""
+    cfg = _cli("codebuddy", "codebuddy", "glm-5.2", "plan")
+    proc = _FakeProc(b"Authentication required. Please use /login command to sign in")
+
+    async def fake_exec(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(runner, "resolve_command", lambda argv: argv)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_exec)
+    result = await runner.run_delegation(cfg, task="pong", cwd=Path("."))
+    assert result.ok is False
+    assert result.failure is FailureKind.AUTH
+    assert "未登录" in result.output
 
 
 # --------------------------------------------------------------------------- #
