@@ -1106,3 +1106,52 @@ def test_budget_park_and_rate_park_are_independent() -> None:
     assert burner2.budget_allow(acct2, 30.0) is False
     assert acct2.parked_until > time.time()
     assert acct2.rate_park_until == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# 灰色停用闸（2026-10-27）
+# --------------------------------------------------------------------------- #
+def test_disabled_is_a_known_config_key(tmp_path: Path) -> None:
+    """``disabled`` 必须在白名单里，否则写在 burner.yaml 里会被静默忽略。
+
+    2026-10-27 商汤下线 Flash-Lite 消费返赠，消耗器「烧专属池换 K3 积分」
+    的整个前提消失。运营者要求「先灰色停用、以防以后再用」——那么
+    ``disabled: true`` 必须真的被执行，而不是写了个没人读的键。
+    """
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("disabled: true\n", encoding="utf-8")
+    assert load_config(cfg)["disabled"] is True
+
+
+def test_disabled_reaches_parsed_args(tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """配置里的 true 要真的变成 ``args.disabled``，中间不许被吞掉。
+
+    两份白名单（scripts 的 _CONFIG_KEYS 与 burner_service 的 CONFIG_KEYS）
+    必须同步——只改一处会让「控制台点停用、下次启动照烧」。
+    """
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("disabled: true\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+    args = burn_sensenova.parse_args([])
+    assert args.disabled is True
+
+
+def test_disabled_false_by_default(tmp_path: Path,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """没写这个键时必须默认开烧——不能因为新增闸门就让老配置静默罢工。"""
+    cfg = tmp_path / "burner.yaml"
+    cfg.write_text("rate_out: 2292\n", encoding="utf-8")
+    monkeypatch.setattr(burn_sensenova, "CONFIG_FILE", cfg)
+    args = burn_sensenova.parse_args([])
+    assert args.disabled is False
+
+
+def test_both_config_key_tables_agree() -> None:
+    """两份白名单的一致性守卫（AGENTS.md 记过同类坑）。"""
+    from app.services.burner_service.config_io import CONFIG_KEYS as SERVICE_KEYS
+
+    missing_in_service = set(burn_sensenova._CONFIG_KEYS) - set(SERVICE_KEYS)
+    missing_in_script = set(SERVICE_KEYS) - set(burn_sensenova._CONFIG_KEYS)
+    assert not missing_in_service, f"控制台白名单缺键：{missing_in_service}"
+    assert not missing_in_script, f"脚本白名单缺键：{missing_in_script}"

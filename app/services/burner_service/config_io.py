@@ -49,6 +49,9 @@ CONFIG_KEYS: dict[str, type] = {
     "read_timeout": float,
     "summary_interval": float,
     "only": str,
+    # 灰色停用闸（2026-10-27）。不加进白名单的话，写在 burner.yaml 里会被
+    # 静默忽略——运营者以为停了，其实下次启动照烧（同 starve_after 的坑）。
+    "disabled": bool,
 }
 
 #: 控制台表单字段（顺序即展示顺序）。其余键仍有默认值但不进表单。

@@ -583,6 +583,10 @@ _CONFIG_KEYS: dict[str, type] = {
     "read_timeout": float,
     "summary_interval": float,
     "only": str,
+    # 灰色停用闸（2026-10-27）。**必须与 app/services/burner_service/config_io.py
+    # 的 CONFIG_KEYS 同步**，否则控制台写得进、脚本读不到（或反之），
+    # 表现是「点了停用下次启动照烧」。
+    "disabled": bool,
 }
 
 
@@ -1721,6 +1725,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.set_defaults(_config_used=dict(cfg))
 
     opt("--model", default="sensenova-6.8-flash-lite", help="上游模型 ID")
+    opt("--disabled", action="store_true", default=False,
+                   help="灰色停用（burner.yaml 写 disabled: true）。配置与启动按钮都保留，"
+                        "只是拒绝真的开烧。2026-10-27 商汤下线 Flash-Lite 消费返赠后，"
+                        "烧专属池不再回充 K3 积分，继续烧只是净消耗一份会到期的固定余额")
     opt("--base-url",
                    default=os.environ.get("SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1"),
                    help="商汤 OpenAI 兼容接口地址")
@@ -1862,6 +1870,20 @@ def main(argv: list[str] | None = None) -> int:
               f"       可另开实例并行烧）。", file=sys.stderr)
         return 2
     group_accounts(keys, args.account_groups)
+
+    if getattr(args, "disabled", False):
+        # 灰色停用：配置与按钮都保留，只是拒绝真的开烧。为什么需要这个开关：
+        # 2026-10-27 商汤下线 Flash-Lite 消费返赠，「烧专属池 → 1:1 回充成
+        # K3 积分」的整个前提不存在了，继续烧只是消耗一份带到期日的固定余额。
+        # 但直接删配置会让「以后要不要恢复」变成考古，所以留一个显式闸。
+        print(
+            "消耗器已停用（config/burner.yaml 的 disabled: true）。\n"
+            "  背景：2026-10-27 商汤下线 Flash-Lite 消费返赠活动，烧专属池\n"
+            "  不再回充 kimi-k3 积分，继续烧只是净消耗一份会到期的固定余额。\n"
+            "  要恢复：把 burner.yaml 的 disabled 改成 false，并先确认返赠机制回来。",
+            file=sys.stderr,
+        )
+        return 0
 
     burner = Burner(args, keys)
     if args.anchors:
