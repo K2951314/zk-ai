@@ -364,7 +364,11 @@ def apply_reconcile(
             # 用固定窗口算 burned（与 account_view 同一口径）。
             # 旧代码用滚动窗口 ts > now - WIN，和 account_view 的固定窗口 ts >= ws
             # 不一致，校准事件注入后两边对不上，会出现「额度越用越多」。
-            from scripts.burn_sensenova import DEFAULT_SAFETY_MARGIN
+            from scripts.burn_sensenova import (
+                DEFAULT_SAFETY_MARGIN,
+                DEFAULT_WEEKLY_CREDITS,
+                DEFAULT_WINDOW_CREDITS,
+            )
             anchor_ts = float(blob.get("anchor_ts") or 0.0)
             if anchor_ts:
                 ws5 = anchor_ts + int((now - anchor_ts) // WIN_5H) * WIN_5H
@@ -378,10 +382,23 @@ def apply_reconcile(
             else:
                 burned_week_now = max(0.0, sum(c for ts, c in events if ts > now - WIN_WEEK))
             # cap 从配置算（与 status.py 的 account_view 同一算法）。
-            cap5h = float(config.get("window_credits") or 60000.0) * \
-                float(config.get("safety_margin") or DEFAULT_SAFETY_MARGIN)
-            capweek = float(config.get("weekly_credits") or 600000.0) * \
-                float(config.get("safety_margin") or DEFAULT_SAFETY_MARGIN)
+            # 用 is None 判缺失而不是 ``or``：额度显式写 0 是「不限制」的意图，
+            # 不该被静默换成兜底上限。
+            margin = float(
+                config["safety_margin"]
+                if config.get("safety_margin") is not None
+                else DEFAULT_SAFETY_MARGIN
+            )
+            cap5h = float(
+                config["window_credits"]
+                if config.get("window_credits") is not None
+                else DEFAULT_WINDOW_CREDITS
+            ) * margin
+            capweek = float(
+                config["weekly_credits"]
+                if config.get("weekly_credits") is not None
+                else DEFAULT_WEEKLY_CREDITS
+            ) * margin
             for field_name, current, cap, win_start in (
                 ("left_5h", burned_5h_now, cap5h, ws5 if anchor_ts else 0.0),
                 ("left_week", burned_week_now, capweek, wsw if week_anchor_ts else 0.0),

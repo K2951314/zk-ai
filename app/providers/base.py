@@ -104,6 +104,16 @@ class ProviderContext:
     timeout: float = 60.0
     stream: bool = False
     attempt: int = 1
+    #: Cap for *this* attempt, in seconds (0 = no per-attempt cap).
+    #:
+    #: Distinct from ``timeout`` on purpose. ``timeout`` is the provider's own
+    #: configured ceiling; this is the slice of the request's wall-clock budget
+    #: the scheduler has allocated to the attempt currently in flight. Without
+    #: it a single slow leg can consume the whole budget and the remaining
+    #: providers never get tried - measured 2026-10-25: one AMD attempt ran
+    #: 701s while the request had a 300s budget, and 48 of 154 failed ds
+    #: requests (31%) died that way with two healthy providers untouched.
+    attempt_timeout: float = 0.0
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -221,14 +231,23 @@ class ProviderAdapter(abc.ABC):
         ``request_timeout``: reasoning models (K3, GLM-5.2) legitimately run for
         minutes, and a global default - or a smoke-test override - must not
         silently cap them. The larger of the two is the effective read timeout.
+
+        ``ctx.attempt_timeout`` is the exception, and it only ever *lowers* the
+        ceiling: it is the slice of the request's wall-clock budget the scheduler
+        allocated to this one attempt (see ``ProviderContext.attempt_timeout``).
+        A single slow leg must not be able to eat the budget the remaining
+        providers need.
         """
+        provider_cap = self.config.timeout
+        if ctx.attempt_timeout and ctx.attempt_timeout > 0:
+            provider_cap = min(provider_cap, ctx.attempt_timeout)
         if ctx.stream:
             return httpx.Timeout(
-                self.config.timeout,
+                provider_cap,
                 connect=min(10.0, self.config.connect_timeout),
-                read=self.config.timeout,
+                read=provider_cap,
             )
-        timeout = max(ctx.timeout or 0.0, self.config.timeout)
+        timeout = max(ctx.timeout or 0.0, provider_cap)
         return httpx.Timeout(timeout, connect=min(10.0, self.config.connect_timeout))
 
     # ------------------------------------------------------------------ #

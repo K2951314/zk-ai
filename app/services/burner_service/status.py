@@ -20,7 +20,11 @@ from app.services.burner_service.config_io import (
     read_config,
 )
 from app.services.burner_service.restart import restart_pending
-from scripts.burn_sensenova import DEFAULT_SAFETY_MARGIN
+from scripts.burn_sensenova import (
+    DEFAULT_SAFETY_MARGIN,
+    DEFAULT_WEEKLY_CREDITS,
+    DEFAULT_WINDOW_CREDITS,
+)
 
 WIN_5H = 5 * 3600
 WIN_WEEK = 7 * 86400
@@ -61,8 +65,8 @@ class BurnerStatus:
     # 没有本地兜底值：直接 import burn_sensenova 的唯一常量。这里曾写死 0.45，
     # 于是控制台按 27 万画熔断线、消耗器按 54 万跑，同一块屏幕两个数。
     safety_margin: float = DEFAULT_SAFETY_MARGIN
-    window_credits: float = 60000.0
-    weekly_credits: float = 600000.0
+    window_credits: float = DEFAULT_WINDOW_CREDITS
+    weekly_credits: float = DEFAULT_WEEKLY_CREDITS
     pool_total_credits: float = 0.0
 
 
@@ -73,8 +77,18 @@ def read_status(state_file: Path, config: dict[str, Any]) -> BurnerStatus:
         rate_in=float(config.get("rate_in") or 0.0),
         rate_out=float(config.get("rate_out") or 0.0),
         safety_margin=float(config.get("safety_margin") or DEFAULT_SAFETY_MARGIN),
-        window_credits=float(config.get("window_credits") or 60000.0),
-        weekly_credits=float(config.get("weekly_credits") or 600000.0),
+        # ``or`` 会把合法的 0 也当成「没配」——额度写成 0 是明确的「不限制」意图，
+        # 不该被静默换成兜底上限。只在键缺失/None 时回落。
+        window_credits=float(
+            config["window_credits"]
+            if config.get("window_credits") is not None
+            else DEFAULT_WINDOW_CREDITS
+        ),
+        weekly_credits=float(
+            config["weekly_credits"]
+            if config.get("weekly_credits") is not None
+            else DEFAULT_WEEKLY_CREDITS
+        ),
         pool_total_credits=float(config.get("pool_total_credits") or 0.0),
     )
     try:

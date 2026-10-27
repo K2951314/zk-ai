@@ -146,6 +146,19 @@ WIN_WEEK = 7 * 86400
 #: 费率已按控制台实读数校准，10% 缓冲等于每账号每周白丢约 6 万回赠积分。
 DEFAULT_SAFETY_MARGIN = 0.95
 
+#: 商汤官方积分窗口上限（每账号，单位：积分）。
+#:
+#: 2026-10-27 商汤公告翻倍：滚动 5h 60,000 → **120,000**、周 600,000 → **1,200,000**。
+#: 公告同时说明「生效时统一重置所有用户的当前可用额度至新上限」，所以切配置不会
+#: 和旧账本打架。同日 Flash-Lite 消费返赠活动下线——专属池不再因消费增长，
+#: 只是一份带到期日的固定余额，别再把它当可循环资源。
+#:
+#: 为什么要有常量而不是散落魔数：`burner_service` 的 status/reconcile 都拿它当
+#: 「配置没写时的兜底」，config.yaml 改完但兜底没改 = 控制台按旧线画、
+#: 消耗器按旧线停，同一块屏幕两个数（safety_margin 当年就是这么错的）。
+DEFAULT_WINDOW_CREDITS = 120_000.0
+DEFAULT_WEEKLY_CREDITS = 1_200_000.0
+
 
 def is_above_default_margin(margin: float) -> bool:
     """安全系数是否被调到了默认值以上（缓冲带因此比设计更薄）。
@@ -1740,10 +1753,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     opt("--filler-chars", type=int, default=6000,
                    help="输入填充材料的字符数（烧输入 token，对耗时影响很小）")
     # ---- 积分池预算（防溢出烧到通用池） ----
-    opt("--window-credits", type=float, default=60000,
-                   help="每账号 Flash-lite 专属池 5h 窗口积分上限（官方 6 万）")
-    opt("--weekly-credits", type=float, default=600000,
-                   help="每账号 Flash-lite 专属池每周积分上限（官方 60 万；"
+    opt("--window-credits", type=float, default=DEFAULT_WINDOW_CREDITS,
+                   help="每账号 5h 窗口积分上限（2026-10-27 官方 6 万→12 万）")
+    opt("--weekly-credits", type=float, default=DEFAULT_WEEKLY_CREDITS,
+                   help="每账号每周积分上限（2026-10-27 官方 60 万→120 万；"
                         "若控制台显示的实际规模更小，请按控制台填）")
     opt("--safety-margin", type=float, default=DEFAULT_SAFETY_MARGIN,
                    help="预算安全系数（熔断线 = 上限 × 该系数）。2026-09-24 从 0.45 "

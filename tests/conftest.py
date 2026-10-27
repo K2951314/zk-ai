@@ -100,6 +100,7 @@ class FakeAdapter(ProviderAdapter):
                 "stream": stream,
                 "status": behavior.status,
                 "error": type(behavior.error).__name__ if behavior.error else None,
+                "attempt_timeout": ctx.attempt_timeout,
             }
         )
         return behavior

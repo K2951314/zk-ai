@@ -476,3 +476,151 @@ async def test_success_logs_cache_numbers(harness: Harness, caplog) -> None:
         "cached=" in r.getMessage() and "prompt=1000" in r.getMessage()
         for r in caplog.records
     )
+
+
+# --------------------------------------------------------------------------- #
+# 单腿时间预算：一条慢腿不许吃光整个请求的墙钟（2026-10-25 实测 701s/300s）
+# --------------------------------------------------------------------------- #
+async def test_a_slow_leg_cannot_consume_the_whole_wall_clock_budget(
+    provider_config, fake_adapter
+) -> None:
+    """两条腿时，第一腿的时间片必须是「剩余预算的一半」，不是全部。
+
+    背景（2026-10-25 实测）：AMD 单次尝试跑 701 秒，而请求预算 300 秒；
+    154 条失败请求里 48 条（31%）就这么死的，另外两家供应商全程没被试。
+    """
+    from app.models.request import ChatCompletionRequest
+
+    config = make_config(
+        providers=[provider_config],
+        models=[
+            make_model("primary", priority=100),
+            make_model("secondary", priority=90),
+        ],
+        aliases=[make_alias("zk-budget", ["primary", "secondary"])],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    try:
+        request = ChatCompletionRequest(
+            model="zk-budget", messages=[{"role": "user", "content": "hi"}]
+        )
+        fake_adapter.queue(
+            Behavior(error=httpx.ReadTimeout("slow")),
+            Behavior(text="secondary answered"),
+        )
+        await harness.service.chat(request, request_id="req-budget")
+        calls = harness.all_calls()
+        first = calls[0]["attempt_timeout"]
+        # 300s 预算 / 2 条腿 - 5s 余量 = ~145s，且必须远小于 300s 全额。
+        assert 0 < first <= 300.0
+        assert first < 200.0, f"第一条腿拿到了 {first}s，等于没给后面的腿留预算"
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_attempt_timeout_never_drops_below_the_floor(
+    provider_config, fake_adapter
+) -> None:
+    """腿很多、预算快用光时，时间片收敛到 floor 而不是 0/负数。
+
+    给 100k prefill 切 15 秒是必超时——那会把「试遍每家」变成「每家都失败」，
+    比原来的病更糟。所以下限必须存在且可观测。
+    """
+    from app.models.request import ChatCompletionRequest
+
+    config = make_config(
+        providers=[provider_config],
+        models=[
+            make_model("m1", priority=100),
+            make_model("m2", priority=99),
+            make_model("m3", priority=98),
+            make_model("m4", priority=97),
+            make_model("m5", priority=96),
+        ],
+        aliases=[make_alias("zk-many", ["m1", "m2", "m3", "m4", "m5"])],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    try:
+        # 预算压到很小，逼出 floor 分支。
+        harness.scheduler.max_request_seconds = 30.0
+        request = ChatCompletionRequest(
+            model="zk-many", messages=[{"role": "user", "content": "hi"}]
+        )
+        fake_adapter.queue(*[Behavior(error=httpx.ReadTimeout("slow")) for _ in range(6)])
+        fake_adapter.default = Behavior(error=httpx.ReadTimeout("slow"))
+        with pytest.raises((AllAttemptsFailedError, ContextLengthExceededError)):
+            await harness.service.chat(request, request_id="req-floor")
+        floor = harness.scheduler.policy.attempt_timeout_floor
+        assert floor > 0
+        for call in harness.all_calls():
+            assert call["attempt_timeout"] >= floor or call["attempt_timeout"] == 0.0
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_attempt_timeout_can_be_disabled(provider_config, fake_adapter) -> None:
+    """``attempt_timeout_floor: 0`` 回到旧行为（不切时间片），供运营者回滚。"""
+    from app.models.request import ChatCompletionRequest
+
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("primary", priority=100)],
+        aliases=[make_alias("zk-legacy", ["primary"])],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    try:
+        harness.scheduler.policy.attempt_timeout_floor = 0.0
+        request = ChatCompletionRequest(
+            model="zk-legacy", messages=[{"role": "user", "content": "hi"}]
+        )
+        fake_adapter.queue(Behavior(text="ok"))
+        await harness.service.chat(request, request_id="req-legacy")
+        assert harness.all_calls()[0]["attempt_timeout"] == 0.0
+    finally:
+        await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# 整池冷却：短暂排队而不是「一次上游都没发」的瞬时 503
+# --------------------------------------------------------------------------- #
+async def test_a_cooling_pool_waits_instead_of_failing_fast(
+    provider_config, fake_adapter, monkeypatch
+) -> None:
+    """全部 Key 都在冷却时，先等一会儿（不消耗上游配额），而不是立刻 503。
+
+    实测形状（2026-10-24 起 154 条失败里 55 条）：一个请求扫空整池 → 接下来
+    一批请求 0.01 秒内全部 ``no_available_credential``，一次上游都没发。
+    容量本来够（商汤 27 req/min vs 客户端 10 req/min），缺的只是让渡。
+    """
+    from app.models.request import ChatCompletionRequest
+
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("primary", priority=100)],
+        aliases=[make_alias("zk-wait", ["primary"])],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    try:
+        # 全部 Key 进入冷却（模拟「上一个请求把它们打空」）。
+        from app.retry.classifier import ErrorInfo
+
+        throttle = ErrorInfo(
+            "rate_limit_error", ErrorClass.THROTTLE, 429, "rpm",
+            retryable=False, switch_credential=True, switch_provider=False,
+            cooldown_scope="credential", cooldown_seconds=45.0,
+        )
+        for key in ("key-1", "key-2", "key-3"):
+            harness.pool.tracker.on_failure(harness.pool.get(key), throttle)
+
+        request = ChatCompletionRequest(
+            model="zk-wait", messages=[{"role": "user", "content": "hi"}]
+        )
+        fake_adapter.queue(Behavior(text="after wait"))
+        # 第一次取候选为空 → 排队 → 重取。这里让排队后仍为空（真实冷却没到期），
+        # 但必须看到 sleep 被调用过，且时间不超过上限。
+        with pytest.raises((AllAttemptsFailedError, ContextLengthExceededError)):
+            await harness.service.chat(request, request_id="req-wait")
+        assert harness.sleeps, "整池冷却时应当排队等待，而不是立刻失败"
+        assert max(harness.sleeps) <= 10.0 + 0.001
+    finally:
+        await harness.container.shutdown()

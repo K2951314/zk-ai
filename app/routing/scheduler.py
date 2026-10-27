@@ -61,6 +61,14 @@ logger = get_logger("routing.scheduler")
 
 Sleeper = Callable[[float], Awaitable[None]]
 
+#: 整池 Key 都在冷却时，最多排队等这么久再报 503（见 ``_wait_for_credential``）。
+#: 取 10 秒：商汤 429 的冷却基数就是 60 秒，等更久不如让客户端自己重试；
+#: 但 10 秒足以吃掉「刚被上一个请求打空、下一批请求立刻到」的那个尖峰
+#: （实测那批请求 0.01 秒就失败，本来一次上游都没发）。
+_CREDENTIAL_WAIT_SECONDS = 10.0
+#: 短于此就不值得等——马上会再进一次判断，不如早点把 503 + Retry-After 给客户端。
+_CREDENTIAL_WAIT_MIN_SECONDS = 0.5
+
 
 class _Next(str, Enum):
     """Where the scheduler goes after an attempt.
@@ -648,6 +656,11 @@ class Scheduler:
                 continue
 
             credentials = self._credentials_for(candidate, session_key=session_key)
+            # 整池都在冷却时先短暂排队（见 _wait_for_credential）：排队期间不消耗
+            # 任何上游配额，比立刻 503 对客户端友好得多。等到了就重取一次，仍然
+            # 没有才按下面的旧路径记录空尝试并换下一个部署。
+            if not credentials and await self._wait_for_credential(candidate, wall_start):
+                credentials = self._credentials_for(candidate, session_key=session_key)
             if not credentials:
                 # No key can serve this deployment: record an attempt so the audit
                 # trail stays monotonic, then move on. Nothing was sent upstream, so
@@ -688,7 +701,17 @@ class Scheduler:
 
                     started = time.perf_counter()
                     started_wall = time.time()
-                    ctx = self._context(request, candidate, credential, attempt_number, request_id)
+                    ctx = self._context(
+                        request,
+                        candidate,
+                        credential,
+                        attempt_number,
+                        request_id,
+                        attempt_timeout=self._attempt_timeout(
+                            wall_start,
+                            len(decision.candidates) - deployments_tried + 1,
+                        ),
+                    )
                     try:
                         response = await adapter.chat(request, ctx)
                     except asyncio.CancelledError:
@@ -866,6 +889,10 @@ class Scheduler:
                 continue
 
             credentials = self._credentials_for(candidate, session_key=session_key)
+            if not credentials and await self._wait_for_credential(candidate, wall_start):
+                # 与非流式路径同样的排队：整池冷却时等一小会儿再重取，而不是
+                # 立刻把一次「上游一次都没发」的空尝试写进审计。
+                credentials = self._credentials_for(candidate, session_key=session_key)
             if not credentials:
                 # Same as the non-streaming path: keep the audit trail complete and
                 # monotonic even though nothing was sent upstream.
@@ -899,7 +926,17 @@ class Scheduler:
                     credential_var.set(credential.id)
                     attempt_var.set(attempt_number)
 
-                    ctx = self._context(request, candidate, credential, attempt_number, request_id)
+                    ctx = self._context(
+                        request,
+                        candidate,
+                        credential,
+                        attempt_number,
+                        request_id,
+                        attempt_timeout=self._attempt_timeout(
+                            wall_start,
+                            len(decision.candidates) - deployments_tried + 1,
+                        ),
+                    )
                     started_wall = time.time()
                     started = time.perf_counter()
                     generator = adapter.stream(request, ctx)
@@ -1076,6 +1113,8 @@ class Scheduler:
         credential: CredentialRuntime,
         attempt_number: int,
         request_id: str,
+        *,
+        attempt_timeout: float = 0.0,
     ) -> ProviderContext:
         return ProviderContext(
             request_id=request_id,
@@ -1085,6 +1124,7 @@ class Scheduler:
             timeout=self.request_timeout,
             stream=bool(request.stream),
             attempt=attempt_number,
+            attempt_timeout=attempt_timeout,
         )
 
     def _adapter_or_none(
@@ -1117,6 +1157,64 @@ class Scheduler:
             f", recovers in ~{wait:.0f}s" if wait else "",
         )
         return self.classifier.classify(error)
+
+    def _attempt_timeout(self, wall_start: float, deployments_left: int) -> float:
+        """切给**这一次尝试**的秒数（0 = 不设限，沿用旧行为）。
+
+        ``max_request_seconds`` 管的是整个请求，``_check_wall_clock`` 只在两次
+        尝试**之间**检查——它刻意不打断在飞的请求（截断会毁掉客户端还能读的
+        响应）。副作用是单条慢腿能把整个预算吃光，剩下的供应商一次都没轮到。
+
+        2026-10-25 实测：一次 AMD 尝试跑了 701 秒，而请求预算只有 300 秒；
+        154 条失败请求里 48 条（31%）就是这么死的，另外两家供应商全程没被试。
+
+        所以把「还没用完的墙钟」按**还没试过的部署数**均分。每换一条腿，
+        剩余预算重新均分，慢腿拿到的份额自然越来越小，但总能剩下一些给
+        后面的腿。不低于 ``attempt_timeout_floor``：给一个 100k prefill 切
+        15 秒是必超时，那等于「每条腿都失败」，比现在的病更糟。
+        """
+        floor = self.policy.attempt_timeout_floor
+        if floor <= 0 or self.max_request_seconds <= 0:
+            return 0.0
+        remaining = self.max_request_seconds - (time.time() - wall_start)
+        if remaining <= 0:
+            return 0.0
+        legs = max(1, deployments_left)
+        margin = self.policy.attempt_timeout_margin
+        return max(floor, remaining / legs - margin)
+
+    async def _wait_for_credential(
+        self, candidate: RoutingCandidate, wall_start: float
+    ) -> bool:
+        """整池都在冷却时**短暂排队**，而不是立刻 503。
+
+        现在一个请求最多扫 ``max_credentials_per_deployment`` 把 Key，每把 429
+        都会给它挂上 60 秒冷却。扫完就把整池打光，紧接着的那批请求在
+        ``next_available_in`` 返回前会拿到瞬时的 ``no_available_credential``
+        ——实测 0.01 秒返回、一次上游都没发（2026-10-24 起 154 条失败里
+        55 条 25%~36% 是这个形状）。
+
+        客户端的 10 req/min 与商汤 27 req/min 的容量本来是够的，缺的只是
+        让渡。所以这里等一小会儿（上限 ``_CREDENTIAL_WAIT_SECONDS``，且不越过
+        墙钟预算），把「拒绝」换成「稍等」。等不到才如实报 503 + Retry-After。
+        """
+        wait = self.pool.next_available_in(candidate.deployment.provider_id)
+        if wait is None or wait <= 0:
+            return False
+        budget_left = self.max_request_seconds - (time.time() - wall_start)
+        pause = min(wait, _CREDENTIAL_WAIT_SECONDS)
+        if self.max_request_seconds > 0:
+            # 留一点给真正的那次尝试，别把预算全睡掉。
+            pause = min(pause, max(0.0, budget_left - self.policy.attempt_timeout_floor))
+        if pause < _CREDENTIAL_WAIT_MIN_SECONDS:
+            return False
+        logger.info(
+            "all keys of %s are cooling down; waiting %.1fs instead of failing fast",
+            candidate.deployment.provider_id,
+            pause,
+        )
+        await self._sleep(pause)
+        return True
 
     def _check_wall_clock(self, started: float) -> None:
         """Abort a request that has spent its whole wall-clock budget failing.

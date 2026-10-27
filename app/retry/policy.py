@@ -25,6 +25,9 @@ class RetryPolicy:
         Absolute ceiling across the whole request - the anti-infinite-loop guard.
     stream_open_retries:
         Retries allowed while *opening* a stream (before the first chunk).
+    attempt_timeout_margin:
+        Seconds subtracted from an attempt's time slice to leave room for the
+        next provider (see :meth:`Scheduler._attempt_timeout`).
     """
 
     max_retries_per_credential: int = 2
@@ -32,6 +35,13 @@ class RetryPolicy:
     max_deployments: int = 3
     max_total_attempts: int = 8
     stream_open_retries: int = 1
+    #: Floor for a per-attempt time slice. Below this an attempt is not worth
+    #: dispatching at all - a sub-15s slice on a 100k-token prefill is a
+    #: guaranteed timeout, which would turn "try every provider" into "fail
+    #: everywhere". ``0`` disables per-attempt slicing entirely (old behaviour:
+    #: one slow leg may consume the whole wall-clock budget).
+    attempt_timeout_floor: float = 20.0
+    attempt_timeout_margin: float = 5.0
     base_delay: float = 0.5
     max_delay: float = 8.0
     multiplier: float = 2.0
@@ -48,6 +58,8 @@ class RetryPolicy:
         self.max_retries_per_credential = max(0, self.max_retries_per_credential)
         self.max_credentials_per_deployment = max(1, self.max_credentials_per_deployment)
         self.max_deployments = max(1, self.max_deployments)
+        self.attempt_timeout_floor = max(0.0, self.attempt_timeout_floor)
+        self.attempt_timeout_margin = max(0.0, self.attempt_timeout_margin)
         self.backoff = BackoffCalculator(
             base_delay=self.base_delay,
             max_delay=self.max_delay,
