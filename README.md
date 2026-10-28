@@ -87,7 +87,7 @@
 | **流式** | 纯 `data:` + `data: [DONE]`，OpenAI SDK 直接可用；路由元数据走 SSE **注释行**，不污染 chunk 流。 |
 | **零秘密泄漏** | Key 只从环境变量解析；日志、数据库、admin API 一律脱敏。 |
 | **可审计** | SQLite/SQLAlchemy 2.x 落库：requests、request_attempts、usage_records、health_checks。 |
-| **积分消耗器** | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。控制台「🔥 积分消耗器」页可看每账号 5h/周窗口余量与下一边界、改 `config/burner.yaml`（模板 `burner.example.yaml`）并一键重启；`model` 硬校验只能是 Flash-lite 家族。换机时随迁移包携带（见 §20.1）。见使用手册「后台烧 flash-lite 积分」。 |
+| **积分消耗器**（2026-10-27 起**已停用**） | `scripts/burn_sensenova.py` 后台常驻烧商汤 flash-lite 专属池积分（曾按 1:1 折算成 kimi-k3 可用积分）；积分池感知预算熔断，绝不溢出扣到通用池。**商汤 2026-10-27 下线消费返赠后前提消失**，已设 `config/burner.yaml` 的 `disabled: true` 灰色停用——配置与控制台「🔥 积分消耗器」页都保留，恢复只需改回 `false`（先核实返赠是否回来）。内部机制见 `docs/消耗器内部机制.md`。 |
 
 ---
 
@@ -590,13 +590,15 @@ curl.exe -s -X POST http://127.0.0.1:8317/v1/chat/completions \
 > （整个供应商一起冷 + 换部署），`frequency` / `unknown` 默认 `credential`
 > （只冷这把）。**额度类 429 会把同 `account-*` 标签的 Key 一起冷却**
 > （`tags` 在 `quota` + `account` 口径下才参与调度，见 `cooldown.throttle_scopes`）。
-> 唯一要确认的是 `config.yaml` 的 `retry.max_credentials_per_deployment`
-> 不小于实际账号数（否则试到一半就停了）——本仓库已配成 `8`（≥ 现役 7 账号，
-> 全可达；加账号时同步 +1，删这行不会取消限制，会回落到代码默认 3）。
+> ⚠ **`retry.max_credentials_per_deployment` 不是「能用几把 Key」，而是
+> 「一个请求最多扫几把」**。本仓库现设 **3**，**故意小于账号数 9**——
+> 设成等于账号数时，一个请求会把整池打进 60 秒冷却，紧接着的并发请求
+> 0.01 秒内全部失败、一次上游都没发（2026-10-27 实测 154 条失败里 55 条是
+> 这个形状）。加账号时**不要**跟着 +1；删掉这行会回落到代码默认 3，行为不变。
 >
-> 本项目商汤现役 **7 把 Key = 7 个账号，每账号正好一把**（03~09；01/02 原同属
-> 账号 A，2026-09-20 已禁用），所以有 7 份独立额度。`config/providers.yaml` 里
-> 用 `tags: ["account-x"]` 标出归属。
+> 本项目商汤现役 **9 把 Key = 9 个账号，每账号正好一把**（01~09，2026-10-08
+> 确认 01/02 不再同账号），所以有 9 份独立额度。`config/providers.yaml` 里
+> 用 `tags: ["account-a"]`~`["account-i"]` 标出归属。
 >
 > 实测效果：`zk-k3` 在 try 到第 4 把（跨 4 个账号）时才拿到额度并成功返回。
 
@@ -724,6 +726,8 @@ retry:
   max_deployments: 3
   max_total_attempts: 8         # 单请求硬顶
   stream_open_retries: 1
+  attempt_timeout_floor: 20.0   # 单次尝试的时间片下限（秒）；0=关闭，见 §3.5
+  attempt_timeout_margin: 5.0   # 时间片里给下一条腿预留的余量（秒）
   base_delay: 0.5
   max_delay: 8.0
   multiplier: 2.0

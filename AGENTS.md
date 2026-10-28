@@ -27,6 +27,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   另有三份**从本文件拆出的流程文档**（规则文件超 65,536 字节预算）：
   `docs/服务器同步.md`、`docs/部署与运维坑.md`、`docs/控制台前端约定.md`——
   只做对应的事时才翻，规则正文仍以本文件为准。
+  第四份 `docs/消耗器内部机制.md`（2026-10-28 拆出）：消耗器已停用（见「当前状态」），
+  AIMD 饥饿救济 / 限流停靠 / 费率校准优先级这些实现细节不再需要每次会话都看。
   另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
   （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
@@ -76,6 +78,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `only:` 列的是 `SENSENOVA_API_KEY_01`~`_09`（2026-10-05 统一改名，原 `_10` 值移到 `_01`）。
   消耗器满速烧时，网关打这些账号的 kimi-k3 必然
   撞 tpm/rpm 429。**诊断网关 429 先看消耗器是否在烧**，这不是网关的错。
+  ⚠ **2026-10-27 起消耗器已灰色停用**（`burner.yaml` 的 `disabled: true`），
+  所以现在看到 429 就是**纯 tpm 容量问题**，别再往消耗器上想。停用原因见下条。
 - **探针能判「这个 ID 能不能调」，判不了「你要的产品是哪个 ID」**（2026-09-29
   被用户当面纠正）：`deepseek-v4.1-flash` 403 之后，我据一篇 **09-04 的二手文章**
   断言「正确 id 是 deepseek-v4-flash」。用户拿出 **09-22 的官方公告**：
@@ -101,7 +105,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   商汤公测**可调用列表**（官方文档）：`deepseek-v4-pro`、`deepseek-v4-flash`、
   `glm-5.2`、`kimi-k3`、`sensenova-6.8-flash-lite`、`sensenova-u1-fast`、
   `sensenova-u1.5-lite` —— **没有** `deepseek-v4.1-flash`，但目录里列了它。
-  顺带证实积分规则就是「5h 6 万 / 周 60 万」，与 burner.yaml 一致。
+  顺带证实积分规则当时是「5h 6 万 / 周 60 万」——**2026-10-27 已翻倍为 12 万 / 120 万**。
   已把 `glm-5.2`（实测 200）加进链，补 NVIDIA 失效后的 GLM 档位。
 - **NVIDIA 404「Function Not Found」是账号权限问题，不是模型问题**（2026-09-29
   查官方 + 论坛确认）：官方 developer.nvidia.com/nim 明确写「**Developer Program
@@ -238,25 +242,10 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   按 targets 顺序的优先级策略，看起来像「关闭开关没生效」，其实是策略不同。
   与 `pin_first` 的区别：`pin_first` 钉 `targets[0]` 且由控制台热切换托管，
   `front_model` 独立于 targets 顺序，换它不用重排列表。
-- **消耗器改费率：改 `burner.yaml` 必须重启，改 `burn_state.json` 不用**（2026-09-29
-  踩到）：加载顺序是 `args`(yaml) → `_load_rates_from_state()` 用 state **覆盖** args →
-  进内存；而 `save_state()` 又把内存值**写回** state。这个环意味着
-  **手工改 `burn_state.json` 会长命进程的下一次保存抹掉**——看起来「校准生效过又没了」。
-  已加 `_rate_fields()` 守护：进程记住自己加载时见过的费率，发现文件被外部改过就
-  保留文件值并打 WARN（要生效仍需重启，因为记账用的是内存里的旧值）。
-  回归测试 `test_external_rate_calibration_survives_a_running_process`。
-  ⚠ 别把 `_loaded_rate_in == 0` 当成「外部改成了 0」——那只是本进程还没加载过账本。
-
-- **费率优先级是「命令行 > burner.yaml > 账本」，账本不许覆盖配置文件**（2026-09-30
-  修，K_02 提前停的根因）：`_load_rates_from_state()` 原来无条件用账本覆盖 args，于是
-  运营者在 `config/burner.yaml` 里写死的校准值被账本里的旧值盖掉——日志实锤
-  「已从账本恢复校准费率：入830/出2500」而 yaml 写的是 761/2292。费率偏高 9.1%
-  的后果不是「算错数」而是**真金白银少烧**：K_02 按虚高记账撞上 54 万熔断线停靠
-  （账本估 539,964），真实只烧 495,085、控制台剩 104,488——运营者看到「明明还剩
-  10 万却在限流」。判据是 `args._config_used`（`parse_args` 记下哪些键来自配置文件），
-  只有 yaml 没提的键才回落账本；生效值同时写回账本，否则下次重启旧值又被当成
-  「上次校准」恢复。**凡「账本/缓存覆盖显式配置」的写法都要产质疑一遍**：记忆盖掉
-  明确意图 = bug。回归测试三条（yaml 赢账本 / 账本兜底 / 命令行最高）。
+- **费率优先级「命令行 > burner.yaml > 账本」的来龙去脉见
+  `docs/消耗器内部机制.md`**。规则本体仍有效且通用：**账本/缓存不许覆盖显式配置**
+  ——记忆盖掉明确意图 = bug（同一类坑在 config 热重载上也犯过）。
+  当前费率 `rate_in: 761` / `rate_out: 2292`。
 - **`ModelAliasConfig.front_model` 以控制台为准，且会写回 `models.yaml`**：
   `POST /admin/aliases` 走 `_write_alias_file()` 落盘，所以「配置文件里是 A、实际
   生效是 B」通常不是 bug，而是有人在控制台改过。排查前先 `grep front_model= data/gateway.log`
@@ -317,6 +306,38 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   回归测试 `tests/test_limits.py` 的 `test_sensenova_has_a_tuned_rpm_rule_in_real_config`
   与 `test_the_rpm_rule_actually_gates_in_the_limiter` 钉住「规则必须存在、数值=3、
   第 4 个请求必须被拦、换账号不受牵连」。
+  ⚠ **但「rpm 惩罚」不能解释 2026-10-24~25 的整池瘫痪**（2026-10-27 复查推翻
+  这条的适用范围）：那两天每把 Key 每分钟只发 **1.2 次**（远在 rpm 3 之下），
+  可是 9 把从 04:29 到 15:33 **连续 429、一次都没恢复**（每把 81~91 次）。
+  同批请求平均 **18.7 万 token**，`tpm/rpm` 混合报错 577 次。
+  结论：**小 prompt 时是 rpm 惩罚，长上下文时是 tpm**；同一个 `max_requests: 3`
+  对后者无效。判据是「每分钟请求数 vs 每请求 token 量」，别只量前者。
+- **一个请求扫满整池 Key，会让后续并发请求连一个上游都发不出去**（2026-10-27
+  修）：`retry.max_credentials_per_deployment` 曾是 **9**（等于池大小），
+  一个请求按序扫完 9 把、每把 429 挂 60s 冷却 → **整池瞬间真空**。紧接着的
+  请求在 `/credential` 阶段就空转返回，`no_available_credential` **0.01 秒**
+  命中、上游一次没发。实测 154 条失败请求里 **55 条（35.7%）是这个形状**。
+  已降到 **3**：单请求不再有资格独占整池。容量本来就够（商汤 9×3=27 req/min
+  vs 客户端峰值 10 req/min），缺的是让渡，不是总量。
+  回归测试 `tests/test_limits.py` 钉「配置值是 3」。
+- **墙钟预算只在两次尝试之间检查，单条慢腿能吃光整个请求**（2026-10-27 修）：
+  `_check_wall_clock` 刻意不打断在飞的请求（截断会毁掉客户端还能读的响应），
+  于是实测**一次 AMD 尝试跑 701 秒**，而请求预算只有 300 秒——48 条失败
+  （31%）就这么死的，其余供应商全程没被试。
+  已加 `retry.attempt_timeout_floor`（默认 20s）+ `attempt_timeout_margin`（5s）：
+  每次尝试的读超时 = min(provider 超时, 剩余墙钟 ÷ 剩余部署数 - margin)。
+  **floor 是硬下限**：给 100k prefill 切 15 秒等于「每家都失败」，比原来的病更糟。
+  `attempt_timeout_floor: 0` 回到旧行为。
+  误杀评估：商汤 227 次成功**全部在 30 秒内**，145 秒时间片误杀率 0%。
+  ⚠ **它管不了链上最后一条腿**——最后一条按定义拿剩余全额预算。
+  `ds` 链实际只有 2 条可用腿（`ds4.1m` 停用），AMD 是最后一条，所以
+  「静默等 AMD 300 秒」只能靠降 provider 超时解决：压到 120s 会丢 59 次慢成功
+  （235→176），是产品决策。
+- **整池冷却时排队，而不是瞬时 503**（2026-10-27 加）：`_wait_for_credential`
+  在上游无可用 Key 时先等（上限 10s、不越过墙钟）再重取。
+  ⚠ **实测救 0 条**：那 55 条瞬时 503 之后，下一个商汤成功的中位等待是
+  **333 秒**——整池是真的真空，不是差一点。所以它只是兜底（避免 0.01s 空跑），
+  **不是解药**；真解药是容量（充值/加账号/分流）。别把这条当成已解决。
 - **K3 的 `request_requires: {reasoning: 4.0}` 已删除**（2026-09-28）：它拿
   `capability.py` 的**关键词命中**当硬门槛，而 zk-auto 别名地板把 reasoning 权重
   钉在 2.0，于是非推理关键词请求永远 `gated_out`——「你好」、短代码、工具回执
@@ -341,39 +362,10 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   根本没读它。现已接 `AsyncHTTPTransport(retries=...)`（**连接级**重试，
   不是读重试——挂起的请求仍旧只能靠上层冷却+换渠道）。注意 `trust_env=True`
   必须显式写，替换默认 transport 正是丢掉 Windows 系统代理的方式。
-- **消耗器的账号间 TPM/RPM 争抢，以及 AIMD 会饿死账号**（2026-09-19 首见、
-  2026-09-28 修）：商汤的 `tpm`/`rpm`/`rps` 是**账号间共享的桶**，一个实例里多个
-  账号在烧就是在互相挤。
-  - 现象：某个账号稳定吃到高并发（实测并发 16、43 次采样全是 16 从不回落），
-    其余账号撞 429 → AIMD 减半 → 锁在 1 → 永远挤不进来。实测五个账号连续
-    77 次采样 **0 成功**，全站 19,714 次 429 对 80,345 次成功（19.7% 纯空转）。
-  - 根因：`scripts/burn_sensenova.py` 的加性增只看「自己 60s 没撞 429」就 +1，
-    **不看同实例其他账号占了多少**——马太效应，零让出机制。
-  - 修法（`_rebalance_concurrency`）：饥饿救济。饿超 `--starve-after`（默认 300s）
-    的账号临时借 1~2 级并发，成功一次收回；**三条限制必须一起看**：
-    ①`--starve-grace`（默认 120s）启动宽限期——旧账本没 `last_ok`，不宽限会让
-    所有账号同时算「从未成功」、一秒内一起借出（实测 7 个账号同时借出后
-    tpm 35 / rpm 20 / rps 19 三种 429 齐炸）；
-    ②**频率类限流不救**——`rpm`/`rps`/`qps`/`tps` 卡的是"发得多频"，加并发只会
-    撞得更狠，只救 `tpm`（吞吐类）；
-    ③借出后仍撞 429 立刻收回，不爬到硬顶。
-  - **诊断时先分清 429 类型**：`tpm exhausted`=吞吐不够，
-    `rpm/rps exhausted`=发得太频，`entitlement exhausted`=额度真用尽（长停靠）。
-    控制台「积分消耗器」页已把三者拆开显示（限流 / 额度用尽 / 已救济）。
-
-      - **限流停靠：治「挤了也没用」的空转**（2026-09-30 加，`rate_park_after` /
-        `rate_park_seconds`，默认 5 次 / 600s）。饥饿救济治「从没挤进去过」，这条治
-        「挤了也没用」：账号被 AIMD 压到并发 1 后，每 60s 冷却期满又去撞一次，撞完
-        继续被压回 1——**永远在试，永远失败**。判据是账号级 `rate_streak`（成功即清零，
-        不用 Key 级 `streak`：一个账号可能有多把 Key，只看一把会把「换把 Key 就好」
-        误判成死锁），达到阈值就把 `rate_park_until` 推到 10 分钟后，`pick_key` 跳过。
-        停靠与预算熔断**互相独立**：预算够但挤不进桶 → 限流停靠；桶空了但积分烧完 →
-        `budget_allow` 停靠到窗口边界。两个都落盘，重启不清零。
-        ⚠ 改它要同步三处：`burn_sensenova.py` 的 `_CONFIG_KEYS`、`app/services/
-        burner_service.py` 的 `CONFIG_KEYS`（控制台白名单）、`config/burner.example.yaml`。
-  - 老坑仍然有效：满速烧 flash-lite 时同账号 K3 报 `inference exceeds tpm/rpm
-    limit`——K3 频繁 429 先查消耗器是否在烧，用它时把消耗器停掉或调低
-    `--per-account-max`
+- **消耗器已停用**（2026-10-27，见「当前状态」）。它内部的 AIMD 饥饿救济、
+  限流停靠、费率校准优先级等实现细节已拆到 `docs/消耗器内部机制.md`——
+  要重启它或排查积分账本时才翻。**一条老坑仍然有效**：满速烧 flash-lite 时
+  同账号 K3 报 `inference exceeds tpm/rpm limit`，所以即便恢复也要错开使用。
 - **`retry.max_deployments` 是路由计划硬顶**：按 zk-k3 的 3 部署估成 4，zk-auto 全链
   6 部署时 DeepSeek/Qwen 根本进不了计划，坏渠道烧光 `max_total_attempts` 就整体失败
   （已改 8）。**NVIDIA `max_retries` 会让挂起重试翻倍墙钟**（60s 超时→120s+/次），
@@ -648,9 +640,27 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   与用户「省 token」的核心诉求方向相反。要高质量产出走 `/ui/agent` 任务台
   （一次任务付一次编排成本），不走对外路径。**真正管 token 的是客户端侧**：
   claude-cli 每轮重发全量历史，网关分工管不了它，杠杆是「适时开新会话」。
-- 主干功能完整；消耗器已上线（费率实测校准、AIMD 自适应并发、账本持久化）。
+- 主干功能完整。**消耗器 2026-10-27 起已灰色停用**（`burner.yaml` 的
+  `disabled: true`）：商汤当天下线 Flash-Lite **消费返赠**，而消耗器的全部意义
+  是「烧专属池 → 1:1 回充成 kimi-k3 积分」，返赠没了继续烧就是净消耗一份
+  带到期日（2026-11-09）的固定余额。配置与启动按钮都保留，恢复只需改回
+  `disabled: false`，**但恢复前先核实返赠机制是否回来**。
   moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），要恢复需同时加回
   providers.yaml 的供应商与 models.yaml 的部署；`kimi-k3-nvidia` 仍保留，靠自动隔离兜底。
+- **商汤额度 2026-10-27 翻倍，改配置时必须同步三处**：5h 窗口 6万→**12 万**积分、
+  周窗口 60万→**120 万**。公告同时说明会统一重置当前可用额度至新上限。
+  三处是：①`providers.yaml` 的 `rate_limits`（token 口径，5h 3亿→**6 亿**、
+  周 30亿→**60 亿**）②`burner.yaml` 的 `window_credits`/`weekly_credits`
+  ③`scripts/burn_sensenova.py` 的 `DEFAULT_WINDOW_CREDITS`/`DEFAULT_WEEKLY_CREDITS`
+  （status/reconcile 的兜底来源）。**只改前两处不够**——配置键缺失时会回落到
+  代码常量，两者不一致就会出现「控制台按旧线画、脚本按旧线停」。
+  顺带修掉 `config.get(x) or 默认值` 把合法的 **0** 当成缺失换掉的坑
+  （额度写 0 是「不限制」的明确意图），改用 `is None` 判缺失。
+- **Flash-Lite 现在连调都调不通**（2026-10-27 实测）：`sensenova-6.8-flash-lite`
+  仍躺在 `/v1/models` 目录里，但实际调用返回 **404 `model route not found`**；
+  `6.7-flash-lite`、`u1.5-lite` 同样 404，而 `deepseek-flash` 返回 429（说明有效）。
+  所以「把那 119 万专属池余额当执行体免费后端」这条路**走不通**，
+  已实测否决。又一处「目录里有 ≠ 能调用」（同 §已知坑 的三反例表）。
 
 ## 服务器怎么同步代码
 
