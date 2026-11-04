@@ -29,6 +29,9 @@ from app.models.provider import DeploymentConfig
 
 logger = logging.getLogger("check_config")
 
+#: 仓库根目录。``check_config.py`` 在 ``scripts/`` 下，所以上跳一级。
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def _live_deployments(config: AppConfig, model_id: str) -> list[DeploymentConfig]:
     """该模型真正可达的部署：部署自身启用，且它所属的供应商也启用。"""
@@ -138,6 +141,167 @@ def _os_has(name: str) -> bool:
     return bool(os.environ.get(name))
 
 
+# --------------------------------------------------------------------------- #
+# 事件规则（config/events.yaml）
+# --------------------------------------------------------------------------- #
+#: 判断「skill 装了没有」时按顺序找的目录。跟 `cli_tools.yaml` 的 codex 一致：
+#: codex 只读 ``~/.codex/skills``，claude 读 ``~/.claude/skills``。
+_SKILL_ROOTS = ("~/.codex/skills", "~/.claude/skills", "~/.agents/skills", "~/.catpaw/skills")
+
+
+def _skill_exists(name: str) -> bool:
+    for root in _SKILL_ROOTS:
+        base = Path(root).expanduser()
+        if (base / name / "SKILL.md").is_file():
+            return True
+        # 也接受 ``my-skills/<name>/SKILL.md`` 这种分层布局
+        if (base / "my-skills" / name / "SKILL.md").is_file():
+            return True
+    return False
+
+
+def _check_events_rules(
+    repo_root: Path, errors: list[str], warnings: list[str]
+) -> None:
+    """事件规则引用了不存在的东西 —— 派出去等于让 Agent 自由发挥。
+
+    为什么单列一道（2026-11-03）：``events.yaml`` 三条规则全部写了
+    ``skill: zkai-ops`` / ``zkai-sync``，而这两个 skill 在本机任何 skills 目录里
+    都不存在。``build_task`` 只把名字拼成一句话，执行体找不到就按自己的理解干——
+    输出看起来同样像模像样，运营者以为它是按 SOP 办的。这跟「规则写进文档 ≠ 会执行」
+    是同一条教训：**引用必须被机器校验，不能靠人记得**。
+
+    同时检查 ``to`` 对应的执行体角色是否可用、``cwd`` 是否存在——这两个出错
+    的症状分别是「事件永远停在 received」和「worker 判工作目录越界」，都很隐蔽。
+    """
+    config_dir = repo_root / "config"
+    rule_file = None
+    for candidate in ("events.yaml", "events.yml"):
+        if (config_dir / candidate).is_file():
+            rule_file = config_dir / candidate
+            break
+    if rule_file is None:
+        # 没启用中台就没有可检查的，不算错
+        return
+
+    from app.services.events.rules import RuleLoader
+
+    ruleset = RuleLoader(config_dir).load()
+    for warn in ruleset.warnings:
+        warnings.append(f"[事件规则] {warn}")
+
+    if not ruleset.rules:
+        warnings.append(f"[事件规则] {rule_file.name} 里一条规则都没有：所有事件都会以 dropped 落库")
+        return
+
+    try:
+        from app.services.agent.cli.registry import load_cli_registry
+
+        app_config = load_app_config()
+        available_roles = set(load_cli_registry(app_config.settings).known_roles())
+    except Exception as exc:  # 执行体花名册读不出来不能挡住其他检查
+        logger.warning("执行体花名册读取失败，跳过角色校验：%s", exc)
+        available_roles = set()
+
+    for rule in ruleset.rules:
+        if rule.skill and not _skill_exists(rule.skill):
+            warnings.append(
+                f"[事件规则] 规则 {rule.name!r} 引用的 skill {rule.skill!r} 本机不存在"
+                f"（找过 {'、'.join(_SKILL_ROOTS)}）——派出去后 Agent 会自由发挥，"
+                "结论不可复现"
+            )
+        if rule.to and available_roles and rule.to not in available_roles:
+            errors.append(
+                f"[事件规则] 规则 {rule.name!r} 的 to={rule.to!r} 不是可用执行体角色"
+                f"（可用：{'、'.join(sorted(available_roles)) or '无'}）"
+                "——这条规则永远卡在 received"
+            )
+        if rule.cwd and rule.cwd not in (".", "./"):
+            target = Path(rule.cwd)
+            if not target.is_absolute():
+                target = repo_root / target
+            if not target.is_dir():
+                errors.append(
+                    f"[事件规则] 规则 {rule.name!r} 的 cwd={rule.cwd!r} 不存在"
+                    "——worker 会判工作目录越界，任务直接失败"
+                )
+
+
+def _check_event_types_declared(
+    repo_root: Path, warnings: list[str]
+) -> None:
+    """规则监听了采集器永远不会产出的类型 —— 那条规则会静静躺一辈子。
+
+    2026-11-03 实测：``events.yaml`` 写了 ``rate_limit.burst`` 和 ``config.invalid``，
+    而 ``event_watch.py`` 只会产出 health.quarantined / health.degraded /
+    config.drift / git.behind。两条规则从写下那天起就没可能触发。
+    """
+    watcher = repo_root / "scripts" / "event_watch.py"
+    config_dir = repo_root / "config"
+    if not watcher.is_file():
+        return
+    rule_file = None
+    for candidate in ("events.yaml", "events.yml"):
+        if (config_dir / candidate).is_file():
+            rule_file = config_dir / candidate
+            break
+    if rule_file is None:
+        return
+
+    import re
+
+    produced = set(re.findall(r'"type":\s*"([a-z_.]+)"', watcher.read_text(encoding="utf-8")))
+    if not produced:
+        return
+
+    from app.services.events.rules import RuleLoader
+
+    ruleset = RuleLoader(config_dir).load()
+    dead: dict[str, list[str]] = {}
+    for rule in ruleset.rules:
+        if not rule.types or not rule.sources:
+            continue
+        # 通配符不做静态判断（可能命中未来新增的类型）
+        if any(any(ch in pattern for ch in "*?[") for pattern in rule.types):
+            continue
+        # 只判来源是 event_watch 的规则；外部来源（邮件、GitHub…）在别处产出
+        if not any(src in ("zkai-gateway", "server") for src in rule.sources):
+            continue
+        for event_type in rule.types:
+            if event_type in produced or _has_other_producer(event_type, repo_root):
+                continue
+            dead.setdefault(event_type, []).append(rule.name)
+
+    for event_type, rule_names in sorted(dead.items()):
+        rules = "、".join(f"{name!r}" for name in rule_names)
+        warnings.append(
+            f"[事件规则] 类型 {event_type!r}（规则 {rules}）没有任何产出方："
+            f"event_watch.py 只会产出 {'、'.join(sorted(produced))}"
+            "——这一条监听永远不会触发"
+        )
+
+
+def _has_other_producer(event_type: str, repo_root: Path) -> bool:
+    """这个类型有没有 event_watch 之外的产出方。
+
+    两类要认：
+    1. 别的脚本里直接写了这个类型串（以后加的采集器、运维脚本）；
+    2. ``<x>.decided`` —— 这类由 :meth:`EventService.decide` 在拍板后派生，
+       源码里是 ``f"{parent_type}.decided"`` 拼出来的，静态搜字符串搜不到。
+       不认这一类的话，新加的闭环规则会被误报成「永不触发」。
+    """
+    if event_type.endswith(".decided"):
+        return True
+    needle = f'"{event_type}"'
+    for path in (repo_root / "scripts").glob("*.py"):
+        try:
+            if needle in path.read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _check_shadowed_envs(warnings: list[str]) -> None:
     """OS 环境变量顶掉了 .env 的值——只打 stderr 的警告不算警告。
 
@@ -173,6 +337,12 @@ def _report(config: AppConfig) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="配置自洽性体检")
     parser.add_argument("--strict", action="store_true", help="有警告也返回非 0")
+    parser.add_argument(
+        "--emit-event",
+        action="store_true",
+        help="有错误时往事件中台投一条 config.invalid（配合定时任务使用）",
+    )
+    parser.add_argument("--gateway", default="http://127.0.0.1:8317", help="事件中台地址")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
@@ -194,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
     _check_alias_provider_breadth(config, warnings)
     _check_credential_envs(config, warnings)
     _check_shadowed_envs(warnings)
+    _check_events_rules(REPO_ROOT, errors, warnings)
+    _check_event_types_declared(REPO_ROOT, warnings)
     for item in getattr(config, "warnings", None) or []:
         warnings.append(f"[loader] {item}")
     try:
@@ -213,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ✗ {item}")
 
     print("\n" + "=" * 72)
+    if args.emit_event and errors:
+        _emit_invalid_event(errors, args.gateway)
     if errors:
         print(f"结论：{len(errors)} 个错误、{len(warnings)} 个警告")
         return 1
@@ -221,6 +395,43 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"结论：无错误，{len(warnings)} 个警告")
     return 0
+
+
+def _emit_invalid_event(errors: list[str], gateway: str) -> None:
+    """体检报错 -> 投一条 ``config.invalid`` 事件。
+
+    为什么需要这一脚（2026-11-03）：``events.yaml`` 监听了 ``config.invalid``，
+    但全仓没有任何地方产出它——那条规则从写下那天起就不会触发。
+    体检本来就是「唯一会知道配置坏了」的程序，让它在报错时顺手投一条，
+    规则才不是死的。
+
+    投递失败**不影响退出码**：体检本身已经用非 0 表达了失败，
+    中台没起来不应该把 CI 也一起弄坏。
+    """
+    import os
+
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx 是运行期依赖，不该缺
+        return
+    token = os.environ.get("ZKAI_ADMIN_TOKEN", "")
+    payload = {
+        "source": "zkai-gateway",
+        "type": "config.invalid",
+        "object": "check_config",
+        "summary": f"配置体检报出 {len(errors)} 个错误",
+        "link": "",
+        "payload": {"errors": errors, "fingerprint": "|".join(sorted(errors))[:300]},
+    }
+    try:
+        httpx.post(
+            f"{gateway.rstrip('/')}/zkadmin/events",
+            json=payload,
+            headers={"X-Admin-Token": token} if token else {},
+            timeout=10,
+        )
+    except Exception as exc:  # 中台没起来是常态，不该打断体检
+        logger.warning("投递 config.invalid 事件失败：%s", exc)
 
 
 if __name__ == "__main__":

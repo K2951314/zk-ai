@@ -19,6 +19,7 @@ _WEB = Path(__file__).resolve().parent.parent / "web"
 _INDEX = _WEB / "index.html"
 _AGENT = _WEB / "agent.html"
 _REPORT = _WEB / "report.html"
+_EVENTS = _WEB / "events.html"
 
 #: CSS/JS companions for ``index.html`` (split out so the browser can cache them
 #: independently and the HTML shell stays under 1k lines).
@@ -70,6 +71,23 @@ async def health_report() -> HTMLResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "体检页面文件缺失"}},
+        ) from exc
+    return HTMLResponse(html)
+
+
+@router.get("/ui/events", include_in_schema=False, response_class=HTMLResponse)
+async def events_console() -> HTMLResponse:
+    """事件流页面：看得见「什么信号进来了、派给了谁、结论是什么」。
+
+    这一页存在的理由和隔离横幅一样：自动化在后台跑，**必须让人看见它在跑什么**，
+    否则「今天怎么一条都没有」会被当成系统坏了去查。
+    """
+    try:
+        html = _EVENTS.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - file ships with the package
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": {"message": "事件流页面文件缺失"}},
         ) from exc
     return HTMLResponse(html)
 

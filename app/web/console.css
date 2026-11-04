@@ -277,6 +277,21 @@
   section.view { display: none; width: 100%; }
   section.view.active { display: block; }
 
+  /* ---------- 内嵌页视图（事件流 / Agent 任务台） ----------
+     这两页本身是完整应用，用 iframe 装进右侧内容区，不再另开标签页。
+     关键三点：
+       1. 主区去掉 padding —— 否则 iframe 四周多出一圈空白，看起来像没铺满；
+       2. 高度必须显式给，`.content` 是 flex 列 + 100vh，main flex:1 有确定高度，
+          所以 section 用 height:100% 就能撑满；
+       3. iframe 只建一次（见 console.js 的 embedFrame）：Agent 正在跑的会话
+          不能因为控制台每 10 秒自动刷新就重建。 */
+  body.embed-view main { padding: 0; }
+  section.view.embed { height: 100%; }
+  /* overflow:hidden 防「iframe 比容器高 1px → 外层多一条滚动条 → 底部被切」，
+     这是把整页塞进 iframe 时最典型的观感问题。 */
+  section.view.embed.active { display: flex; flex-direction: column; overflow: hidden; }
+  .view-frame { flex: 1 1 auto; width: 100%; min-height: 70vh; border: 0; display: block; }
+
   /* ---------- 页头 / 工具条 ---------- */
   .view-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
   .view-head h2 { font-size: var(--fs-20); }

@@ -23,6 +23,7 @@ from app.database.db import Database
 from app.database.repository import (
     AgentRepository,
     ConfigRepository,
+    EventRepository,
     HealthRepository,
     RequestRepository,
     UsageRepository,
@@ -32,6 +33,7 @@ from app.routing.limits import RateLimiter
 from app.routing.router import Router
 from app.routing.scheduler import Scheduler
 from app.services.agent.service import AgentService
+from app.services.events.service import EventService
 from app.services.health_service import HealthService
 from app.services.model_service import ModelService
 from app.services.request_service import RequestService
@@ -69,6 +71,8 @@ class Container:
     health_repository: HealthRepository
     agent_repository: AgentRepository
     agent_service: AgentService
+    event_repository: EventRepository
+    event_service: EventService
     started_at: float = field(default_factory=time.time)
     ready: bool = False
     #: Set once the file watcher is running; None when disabled or not started.
@@ -117,6 +121,21 @@ class Container:
                 logger.info("marked %d agent session(s) interrupted", interrupted)
         except Exception:
             logger.exception("agent session housekeeping failed")
+        # 事件中台：进程重启时把「认领了但没交活」的事件放回队列，
+        # 否则 worker 一崩，那条事件就永远停在 running，看起来像「还在跑」。
+        try:
+            reclaimed = await self.event_repository.reclaim_stale(older_than_seconds=0.0)
+            # reclaim_stale 返回 (退回条数, 判死条数)，判死是 0.0 秒这条捷径下的
+            # 例外：只该发生在 attempts 已达上限的事件上，计数要看得见。
+            if reclaimed:
+                logger.info("事件认领状态已重置：退回 %d 条，判死 %d 条", *reclaimed)
+            purged = await self.event_repository.purge_older_than(
+                days=int(getattr(self.settings, "events_retention_days", 90))
+            )
+            if purged:
+                logger.info("清理 %d 条超过保留期的事件", purged)
+        except Exception:
+            logger.exception("事件中台启动清理失败")
         try:
             await self.health_service.startup()
         except Exception:
@@ -452,6 +471,7 @@ async def build_container(
     usage_repository = UsageRepository(database)
     health_repository = HealthRepository(database)
     agent_repository = AgentRepository(database)
+    event_repository = EventRepository(database)
 
     usage_service = UsageService(config, usage_repository)
     health_service = HealthService(
@@ -469,6 +489,11 @@ async def build_container(
         config=config,
         request_service=request_service,
         repository=agent_repository,
+    )
+    event_service = EventService(
+        settings=settings,
+        repository=event_repository,
+        config_dir=settings.resolved_config_dir,
     )
 
     container = Container(
@@ -489,6 +514,8 @@ async def build_container(
         health_repository=health_repository,
         agent_repository=agent_repository,
         agent_service=agent_service,
+        event_repository=event_repository,
+        event_service=event_service,
     )
 
     if start_services:

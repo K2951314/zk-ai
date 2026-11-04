@@ -50,10 +50,11 @@ function mnavMore() {
     { view: "requests", ico: "📨", label: "请求记录" },
     { view: "usage", ico: "📈", label: "用量统计" },
     { view: "report", ico: "🩺", label: "体检" },
-    { href: "/ui/agent", ico: "🤖", label: "Agent 任务台" },
+    { view: "events", ico: "📡", label: "事件流" },
+    { view: "agent", ico: "🤖", label: "Agent 任务台" },
   ];
   const rows = items.map(m => {
-    const attrs = m.href ? `href="${m.href}"` : `href="javascript:void 0" data-go="${m.view}"`;
+    const attrs = `href="javascript:void 0" data-go="${m.view}"`;
     return `<a class="mnav-row" ${attrs}><span class="ico">${m.ico}</span>`
       + `<span class="grow" style="text-align:left">${m.label}</span><span class="muted">›</span></a>`;
   }).join("");
@@ -70,8 +71,11 @@ function mnavMore() {
 function mnavSync() {
   const bar = $("#mnav");
   if (!bar) return;
+  // 内嵌页视图（事件流 / Agent）没有自己的底部 Tab，落在「更多」名下
+  const tabs = new Set(MNAV.map(m => m.view));
+  const active = tabs.has(state.view) ? state.view : "more";
   bar.querySelectorAll("a[data-mnav]").forEach(a => {
-    a.classList.toggle("on", a.dataset.mnav === state.view);
+    a.classList.toggle("on", a.dataset.mnav === active);
   });
 }
 
@@ -289,11 +293,36 @@ async function api(path, opts = {}) {
 const LOADERS = {
   overview: loadOverview, pool: loadPool, requests: loadRequests,
   usage: loadUsage, models: loadModels, burner: loadBurner, report: loadReport,
+  events: loadEvents, agent: loadAgent,
 };
+//: 内嵌页视图：这两页是独立应用（事件流 / Agent 任务台），用 iframe 装进右侧
+//: 内容区，而不是另开标签页——切走再切回来要保留现场（Agent 正在跑的会话
+//: 不能因为刷新一次就重建）。所以 frame 只建一次。
+const EMBED_VIEWS = new Set(["events", "agent"]);
+const _frames = {};
+function embedFrame(id, src) {
+  const host = $("#view-" + id);
+  if (!host) return;
+  const built = _frames[id];
+  if (built && host.contains(built)) return;   // 已经挂好，别重建
+  const frame = document.createElement("iframe");
+  frame.className = "view-frame";
+  frame.title = id === "agent" ? "Agent 任务台" : "事件流";
+  frame.src = src;
+  host.innerHTML = "";
+  host.appendChild(frame);
+  _frames[id] = frame;
+}
+function loadEvents() { embedFrame("events", "/ui/events?embed=1"); }
+//: Agent 页自带模型选择 / 新任务 / 停止这些必需控件，所以不隐藏它的顶栏，
+//: 直接整页嵌进来 —— 它是「右侧的一个应用」，不是控制台的一段内容。
+function loadAgent() { embedFrame("agent", "/ui/agent"); }
 function switchView(name) {
   if (state.view === "burner" && name !== "burner") blStop();
   if (state.view === "report" && name !== "report") reportStop();
   state.view = name;
+  // 内嵌页自己管滚动与内边距，主区留 padding 会多出一圈空白
+  document.body.classList.toggle("embed-view", EMBED_VIEWS.has(name));
   document.querySelectorAll("nav button").forEach(b =>
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll("section.view").forEach(s =>
@@ -1829,12 +1858,14 @@ async function openMarketModal(presetPid) {
             : `<button class="mini primary" data-add-model="${idx}" ${v && !v.ok ? 'disabled title="实测不可调用，别加"' : ""}>＋ 添加</button>`}</td>
           <td class="name"><b>${esc(x.suggested_model_id)}</b><span class="sub">${esc(x.upstream_model)}</span></td>
           <td class="small">${cell}</td>
-          <td class="small">${fmtK(x.discovered?.context_window ?? x.preset.context_window)}
-            ${x.discovered_known
-              ? '<span class="chip" title="来自供应商 API 实测">实测</span>'
-              : (x.context_window_source === "official"
-                  ? '<span class="chip" title="来自模型社区官方资料页">官方</span>'
-                  : '<span class="chip muted" title="官方未公开，按模型名经验预估">预估</span>')}</td>
+          <td class="small">${fmtK(x.preset.context_window)}
+            ${x.context_window_conflict
+              ? `<span class="chip amber" title="供应商目录报 ${esc(String(x.context_window_conflict.provider))}，官方文档是 ${esc(String(x.context_window_conflict.spec))}——已按较大的那个填，加之前先点「验证可调用」确认">⚠ 目录与文档不一致</span>`
+              : (x.discovered_known
+                  ? '<span class="chip" title="来自供应商 API 实测">实测</span>'
+                  : (x.context_window_source === "official"
+                      ? '<span class="chip" title="来自模型社区官方资料页">官方</span>'
+                      : '<span class="chip muted" title="官方未公开，按模型名经验预估">预估</span>'))}</td>
           <td class="small muted">${esc(x.preset.description)}</td>
           <td class="small">${x.preset.input_price
             ? ("$" + x.preset.input_price + "/" + x.preset.output_price
@@ -1865,7 +1896,7 @@ async function openMarketModal(presetPid) {
             owned_by: providerId,
             description: p.description,
             enabled: true,
-            context_window: x.discovered?.context_window || p.context_window,
+            context_window: p.context_window,
             capabilities: normCaps(p.capabilities),
             // 实测事实随表单一起带过去：表单据此决定哪些参数可调、哪些直接定值
             discovered: x.discovered,
@@ -1876,7 +1907,7 @@ async function openMarketModal(presetPid) {
               provider_id: providerId,
               model: x.upstream_model,
               priority: 100,
-              context_window: x.discovered?.context_window || p.context_window,
+              context_window: p.context_window,
               // 最大输出：官方核实值优先，没有就不瞎填 32768（让运营者自己定）
               max_output_tokens: x.max_output_tokens
                 || x.preset?.max_output_tokens

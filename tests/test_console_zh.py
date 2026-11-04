@@ -201,7 +201,8 @@ def test_console_localises_the_key_prompts() -> None:
 def test_console_keeps_untouched_dom_contract() -> None:
     """结构重构不能动 JS 依赖的钩子：视图 id、弹窗容器、导航 data-view。"""
     text = _html("index.html")
-    for view in ("view-overview", "view-pool", "view-requests", "view-usage", "view-models"):
+    for view in ("view-overview", "view-pool", "view-requests", "view-usage", "view-models",
+                 "view-events", "view-agent"):
         assert f'id="{view}"' in text, f"视图 {view} 必须保留"
     for modal in (
         "model-modal", "alias-modal", "limits-modal", "market-modal",
@@ -466,10 +467,65 @@ def test_console_links_to_the_report_page() -> None:
     assert 'href="/ui/report"' not in text, "体检已改为内置视图，不再用 a 跳转"
 
 
-def test_console_links_to_the_agent_page() -> None:
+def test_console_embeds_agent_and_events_instead_of_new_tabs() -> None:
+    """Agent 任务台与事件流是**内置视图**（右侧内容区 iframe），不另开标签页。
+
+    2026-11-02 运营者反馈：「不用其它标签打开，直接在右侧显示不行吗？
+    包括 agent 工作台也一样」。所以旧写法
+    ``<a href="/ui/agent" target="_blank">`` 已废弃 —— 独立路由仍保留
+    （直接访问、外部链接、iframe 源都靠它），但控制台入口必须走 data-view。
+    """
     text = _raw_html("index.html")
-    assert 'href=\"/ui/agent\"' in text
-    assert "Agent 任务台" in text
+    for view in ("agent", "events"):
+        assert f'data-view="{view}"' in text, f"侧栏该有「{view}」内置入口"
+        assert f'id="view-{view}"' in text, f"缺 {view} 的视图容器，switchView 会切不过去"
+        # 旧的另开标签页写法必须清掉，否则两个入口并存、行为不一致
+        assert f'href="/ui/{view}"' not in text, f"{view} 已改为内置视图，不再用 a 跳转"
+
+
+def test_embedded_views_build_their_frame_only_once() -> None:
+    """iframe 不能每次刷新都重建。
+
+    控制台每 10 秒自动 refresh()，而 refresh() 会调当前视图的 loader。
+    如果 loader 每次都重建 iframe，Agent 正在跑的会话会被反复重置 ——
+    这是把页面塞进 iframe 时最容易踩的坑，所以单独守一条。
+    """
+    js = _html("index.html")
+    assert "function embedFrame(" in js
+    assert "if (built && host.contains(built)) return;" in js, "缺「已挂好就别重建」的短路"
+    assert "EMBED_VIEWS" in js, "内嵌视图要单独成集合，否则主区 padding 判断会漏"
+    assert "embed-view" in js, "切到内嵌视图时主区要去 padding"
+
+
+def test_assistant_markdown_is_rendered_not_dumped_as_text() -> None:
+    """模型回的是 Markdown，必须渲染成表格/列表/代码块，不能原样塞进 div。
+
+    2026-11-02 运营者反馈：助手消息里的表格显示成「一整段竖线」。
+    根因不是模型写错了，是前端只做了 ``esc()`` 就塞进 ``<div>`` ——
+    div 折叠换行，``| 角色 | 执行体 |`` 于是糊成一坨，人根本读不了。
+    """
+    text = _html("agent.html")
+    assert "function md(" in text, "缺 Markdown 渲染器"
+    assert "function mdTable(" in text and "function mdInline(" in text
+    # 助手正文必须过 md()
+    assert 'class="md">${md(m.content)}' in text
+    assert '<div>${esc(m.content || "")}</div>' not in text, "助手正文又退回纯文本了"
+    # 渲染产物用到的样式必须真的定义了，否则表格出来是没边框的一堆字
+    for css in (".md table {", ".md pre.md-code {", ".md blockquote {", ".md code {"):
+        assert css in text, f"缺少 {css}"
+    # 安全前提：先 esc 再解析，模型输出里夹带的 HTML 不能变成可执行结构
+    assert "mdInline(esc(" in text, "行内渲染必须先转义再解析"
+
+
+def test_agent_page_supports_session_deep_link() -> None:
+    """``?session=<id>`` 直达某个会话。
+
+    事件中台的设计里有一条「点开任何一件任务，能直接跳到当时 Agent 干活的
+    那个会话」—— 没有这个参数就实现不了，只能让人自己在列表里翻。
+    """
+    text = _html("agent.html")
+    assert 'new URLSearchParams(location.search).get("session")' in text
+    assert "if (wanted) openSession(wanted);" in text
 
 
 def test_agent_page_renders_spawn_cards_in_chinese() -> None:

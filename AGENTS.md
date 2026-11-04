@@ -616,6 +616,82 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 （已拆到 `docs/部署与运维坑.md`，做这类事时才需要翻。）
 
+## 事件中台（2026-11-02，自动化调度）
+
+给已有 Agent 执行层装「点火器」：**让任务起点从人身上移开**。完整设计见
+`docs/事件中台.md`，这里只留会踩的规则。
+
+- 三层各管各的，别混：
+  **事件规则只决定 `to: 角色`**（`config/events.yaml`）→
+  **角色决定 CLI/模型/成本档**（`config/cli_tools.yaml`）→
+  **模型决定供应商/Key/失败转移**（`config/models.yaml` + 路由层）。
+  想换模型改第二层一行，别去动事件规则。
+- **`enabled: true` ≠ 装了**（2026-11-02 实测）：`cli_tools.yaml` 里 `claude` 标着启用，
+  但本机根本没有 `claude` 命令 → 注册表把 `cli-claude` 角色整个忽略，
+  规则派过去就是每单必失败。所以事件规则默认写 `cli-skill`（codex，自带 skills）。
+  **改规则里的 `to` 之前，先看 `agent_worker.py` 启动日志打印的「可用角色」那一行。**
+- **去重键必须是语义键**（source+type+object+指纹），不是消息 id：
+  来源侧网络抖一下会重发、同事补一句话又是一条。按消息 id 去重等于没去重。
+- **未命中规则的事件也落库**（`state=dropped`）。不落库的话
+  「为什么这条没触发」就是一句无法回答的话——而这是运营者第一个会问的问题。
+- **worker 只能主动拉，不能被动推**：本机在 NAT 后、中台在公网服务器上，
+  长轮询（`POST /zkadmin/events/claim`）是唯一方向。锁屏不休眠就够，
+  休眠会让任务积压但不会丢。
+- **`Database.session()` 是进程级串行锁**：长轮询**不能**持锁 sleep，
+  必须是「短事务取一次 → 放锁 → sleep 再取」。
+- **结论里的决策标记是契约**：worker 侧指令要求最后一行输出
+  `[[NEED_DECISION]] yes|no`，中台据此决定要不要弹卡片。
+  靠自然语言猜「这句话算不算要人拍板」是不可靠的，而这个判断决定半夜是否吵醒你。
+- 审批推送走**飞书群自定义机器人 webhook**（`${FEISHU_WEBHOOK}` 在 `.env`），
+  卡片按钮只跳控制台、不带回调 —— 自建应用 + 卡片回调是第二阶段的事。
+- 入口：控制台侧栏「事件流」（内置视图，独立路由 `/ui/events` 仍可用）、`scripts/event_watch.py`（采信号）、
+  `scripts/agent_worker.py`（接单）。`ZKAI_EVENTS_ENABLED=false` 整体下线。
+
+### 2026-11-03 复查补的六条（都是实测出来的）
+
+详细记录见 `docs/事件中台.md` §7.1 / §10，这里只留会写错的地方：
+
+- **审批是闭环不是终点**：`decide()` 默认派生一条 `<父类型>.decided` 事件重走
+  规则引擎（`followup: false` = 我自己去办）。**新加一条流水线 = 补一条
+  `types: [xxx.decided]` 的规则**，不用改代码。
+- **`.env` 不会自动进进程环境**：`ZKAI_ADMIN_TOKEN` 只在 `load_app_config()`
+  之后才在 `os.environ` 里，而 argparse 的 `default` 在 `parse_args` 时求值。
+  **新写的脚本要先加载再取令牌**，否则调用被 401 静默拒掉，
+  而 `/health` 不需要令牌 → 很容易误判成「连通性正常、这轮没异常」。
+- **`parallel` 是假并行**：worker 单循环串行，`parallel` 只限制同组 running 条数。
+  设 3 不会快 3 倍，反会让排队事件被 `reclaim_stale` 当超时回收。
+  **要真并行就多开 worker 进程**（claim 原子取一条，多进程安全）。
+- **事件规则必须被机器校验**：`check_config.py` 会查 skill 是否存在、`to` 是否
+  在花名册、`cwd` 是否存在、**规则监听的事件类型有没有产出方**。改完必跑。
+- **`ZKAI_EVENTS_MAX_ATTEMPTS`（默认 3）**：认领 N 次仍没交活判 `failed`，
+  不再无限重投刷手机。
+- **`budget_cny` 目前是死字段，成本恒为 0**：worker 交活不带成本，
+  `CliResult` 也没有成本字段。控制台与卡片上的花费数字**不可信**。
+  **先接成本，再谈熔断。**
+
+### 2026-11-04 借鉴 Agent-Autoloop 后定的四条硬规矩
+
+卡兹克开源了 [agent-autoloop](https://github.com/KKKKhazix/agent-autoloop)。
+**没照搬架构**（Node + 零依赖 + 无数据库服务；本项目有 FastAPI / SQLite / 控制台 /
+路由层），细节见 `docs/事件中台.md` §10。
+
+- **跳数熔断的深度由中台算**：`events.hops` 只从 `parent_id` 推导，事件体里写的
+  **一律忽略**（执行体不能自己赦免自己）。上限 `ZKAI_EVENTS_MAX_HOPS`（默认 8）。
+  ⚠ 派生事件的去重键必须带 `parent_id|hops`，否则同对象链路会被 30 分钟去重窗口
+  吃掉、`hops` 停在 0，熔断形同虚设。**人工拍板也算一跳、不清零。**
+- **`complete()` 必须幂等**：已结束 + 结论相同 = 同一次交活，只回一声不重复推送；
+  结论不同**不覆盖**。重交绝不能把 `cost_tokens` 清零。
+- **回执标记只有一处定义**（`RECEIPT_MARKER`）：提示词教的和解析器认的必须是
+  同一个字面量，两处各写一份 = 配置漂移（系统照常跑，只是永远没人回执）。
+- **SQLite 的 DateTime 列丢时区**：写 `03:48+00:00` 读出是 naive 的 `03:48`，
+  而仓库层比较全用 `utcnow()`（UTC）。**任何参与时间比较的新列都必须存 UTC**，
+  否则凭空差出时区偏移（实测差 8 小时 → 复查永不到期）。
+
+⚠ **它的 `askFirst` 别照抄**：那是语义词拼进提示词，靠模型自己判断
+「我干的算不算删数据」；它同时有执行体的 `access`（read/edit/full）才是真权限档，
+**两套没绑定**。要做决策边界就该绑：`tell: needed` 的规则，
+`to` 必须指向 `approval_mode: plan` 的执行体。
+
 ## 手机版控制台改造
 
 （已拆到 `docs/控制台前端约定.md`，做这类事时才需要翻。）
@@ -627,6 +703,10 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - **回复全程用中文**：文件路径、命令、字段名保留原文，但叙述不用英文；用户把「回复夹英文」
   列为明确不满，动手写每句话前先确认这一点
 - 临时脚本统一放 `exports/_*.py`，跑完即删；不要把审计脚本留在工作区
+
+## 加模型前先核对官方文档
+
+见 `docs/模型市场与预设.md`。
 
 ## 当前状态（持续整理：2026-10-07）
 

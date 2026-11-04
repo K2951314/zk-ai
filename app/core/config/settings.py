@@ -260,6 +260,25 @@ class Settings(BaseSettings):
     #: 例：{"vision": "zk-vision", "coder": "zk-auto"}
     agent_role_aliases: str = ""
 
+    # ---- 事件中台（自动化调度：/zkadmin/events + scripts/agent_worker.py）---- #
+    #: 总闸。关掉后 /zkadmin/events/* 一律 404，worker 也拉不到活。
+    events_enabled: bool = True
+    #: 一条事件被认领后多久没交活就退回待认领（秒）。要大于执行体 timeout
+    #: 的上界 1800s，否则正常的长任务会被反复抢走重跑。
+    events_claim_timeout: float = 2400.0
+    #: 单次长轮询的上限（秒）。反代通常 60s 超时，留 5s 余量。
+    events_max_wait: float = 55.0
+    #: 同一事件最多被认领几次。超了判 failed —— 一条永远失败的事件若无限重投，
+    #: 会每 claim_timeout 秒推一张失败卡片，故障风暴时会把手机刷爆。
+    events_max_attempts: int = 3
+    #: 派生链的最大深度（跳数熔断，借自网络数据包 TTL）。
+    #: 规则派生事件 / 人工拍板派生活，都会让深度 +1。超了只记录不派发。
+    #: 8 层足够覆盖正常的多步流水线（诊断→批准→执行→核实），又不至于让
+    #: Agent 互相叫醒的环烧光额度。
+    events_max_hops: int = 8
+    #: 事件保留天数（只清已结束的，未结束的永远不清）。
+    events_retention_days: int = 90
+
     @property
     def resolved_burner_dir(self) -> Path:
         """消耗器的账本 + 日志目录（ZKAI_BURNER_DIR 覆盖，测试用 tmp_path 隔离）。"""

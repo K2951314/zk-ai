@@ -667,6 +667,7 @@ ZK-AI/
 │   ├── routing/          # aliases, capability, router, scheduler, strategy
 │   ├── services/         # health_service, model_service, request_service, usage_service,
 │   │                     # chatgpt_service（ChatGPT/Codex 客户端配置，见 §3.6.3）
+│   │                     # events/ 事件中台：规则匹配、语义去重、飞书推送、跳数熔断
 │   └── main.py           # create_app 工厂
 ├── config/               # *.example.yaml（可提交）+ *.yaml（本地，已忽略）
 │                         # 另有 providers.real.example.yaml / models.real.example.yaml
@@ -675,8 +676,9 @@ ZK-AI/
 ├── scripts/              # init_db, health_check, benchmark, mock_upstream, smoke_test,
 │                         # setup_zcode, port_guard, zkai_client, backfill_cost,
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
+│                         # event_watch.py（事件信号采集）+ agent_worker.py（事件中台接单程序）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 38 个测试模块，1047 个用例，全部 Mock
+├── tests/                # conftest + 42 个测试模块，1114 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -684,8 +686,8 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 104 个文件约 27,003 行，`tests/` 38 个测试模块 1047 个用例（约 18,651 行），
-`scripts/` 18 个文件约 4,896 行。**测试/产品代码 = 68%**。
+规模：`app/` 111 个文件约 29,163 行，`tests/` 42 个测试模块 1114 个用例（约 19,946 行），
+`scripts/` 20 个文件约 5,788 行。
 （这两个数字上一次更新是 2026-10-24 午，此前为同日早的 68/25,530/38/991——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
@@ -1369,7 +1371,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1047 个用例，全部通过，零网络、零真实配额。**
+**1114 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

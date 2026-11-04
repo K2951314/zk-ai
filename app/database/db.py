@@ -84,6 +84,11 @@ class Database:
             "cached_tokens",
             "ALTER TABLE usage_records ADD COLUMN cached_tokens INTEGER DEFAULT 0",
         ),
+        # 2026-11-04：事件派生深度（跳数熔断，见 EventRecord.hops）
+        ("events", "hops", "ALTER TABLE events ADD COLUMN hops INTEGER DEFAULT 0"),
+        ("events", "parent_id", "ALTER TABLE events ADD COLUMN parent_id INTEGER"),
+        # 2026-11-04：约时间复查（回执的 later）。NULL = 立即可认领
+        ("events", "not_before", "ALTER TABLE events ADD COLUMN not_before TIMESTAMP"),
     )
 
     async def init(self) -> None:

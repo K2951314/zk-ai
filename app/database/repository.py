@@ -12,6 +12,7 @@ from __future__ import annotations
 from app.database.repositories import (
     AgentRepository,
     ConfigRepository,
+    EventRepository,
     HealthRepository,
     RequestRepository,
     UsageRepository,
@@ -20,6 +21,7 @@ from app.database.repositories import (
 __all__ = [
     "AgentRepository",
     "ConfigRepository",
+    "EventRepository",
     "HealthRepository",
     "RequestRepository",
     "UsageRepository",

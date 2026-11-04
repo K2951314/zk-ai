@@ -1,0 +1,156 @@
+# 事件中台规则模板（可提交；本地现役配置是 config/events.yaml，gitignore）
+#
+# 这个文件决定「什么信号 -> 交给谁 -> 说什么」。改完不用重启：
+# 中台按 mtime 自动重读（下一次事件进来就生效）。
+#
+# 一条规则最少要写 name + to；其余都有默认值。
+# 匹配顺序 = 文件里的顺序，第一条命中即止 —— 别指望「最具体的优先」。
+#
+# 字段速查
+#   name          规则名。同时是事件表里的 rule 列，别随便改名（历史数据会对不上）
+#   when.source   来源 glob，如 zkai-gateway / github / server / "pr-*"
+#   when.types    事件类型 glob，如 health.quarantined / "pr.*"
+#   when.match    payload 字段的 glob 匹配（全部满足才命中）
+#   to            执行体角色（cli_tools.yaml 里的 role），**不是模型名**
+#   cwd           执行体的工作目录
+#   skill         要 Agent 参照的 skill 名（会拼进指令第一句）
+#   ask           给 Agent 的一句话指令
+#   group         去重分组，默认 = name
+#   dedupe_window 同组多少秒内只开一条任务（默认 1800）
+#   parallel      同组允许同时跑几条（默认 1；排队的不丢弃）
+#   tell          always=每条都推 / needed=只在需要拍板时推 / never=只落库
+#   max_turns     轮次上限，写进指令里提醒 Agent 别无限转
+#   budget_cny    该规则单次任务的成本上限（元），仅作提示与统计口径
+#   silent        静默时段，如 ["23:00-08:00"]，期间只落库不推送
+#
+# 三条约定（跟本项目其他配置一致）
+#   1. 密钥只进 .env：webhook 里写 ${FEISHU_WEBHOOK}，别把真 URL 写在这个文件
+#   2. 面向运营者的报错必须是中文（tests/test_console_zh.py 会扫）
+#   3. 改完跑一下 scripts/check_config.py，它会检查规则引用的角色是否存在
+#
+# ⚠ `to` 必须指向 **cli_tools.yaml 里真正可用** 的角色。2026-11-02 实测本机
+#   claude CLI 未安装（cli_tools.yaml 写着 enabled: true 但命令找不到），
+#   cli-claude 因此不可用，所以这里默认派给 cli-skill（codex，自带 ~/.codex/skills，
+#   正好适合「按 skill 处理」这类活）。装好 claude 后把 to 改回 cli-claude 即可。
+#   查当前可用角色：`python scripts/agent_worker.py --once` 启动日志会打印一行。
+
+enabled: true
+
+notify:
+  # 飞书群自定义机器人的 webhook。在群里「设置 -> 群机器人 -> 添加 -> 自定义机器人」
+  # 拿到的那个 https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+  webhook: ${FEISHU_WEBHOOK}
+  # 机器人开了「签名校验」才需要填；没开留空
+  secret: ${FEISHU_WEBHOOK_SECRET}
+  # feishu = 发交互卡片；json = 原样 POST 事件 JSON（接自建服务时用）
+  format: feishu
+  # 全局静默时段（规则里的 silent 会叠加）
+  silent: ["23:00-08:00"]
+  # 飞书是境内服务，默认直连不走系统代理
+  use_proxy: false
+
+defaults:
+  tell: needed
+  parallel: 1
+  dedupe_window: 1800
+
+rules:
+  # ---------------------------------------------------------------------------
+  # 1. 网关健康异常 —— 最该先跑通的一条
+  #
+  # 信号来自 scripts/event_watch.py：/health 里 quarantined_deployments 有变化、
+  # 健康检查转红、或 429 在窗口内突增。
+  #
+  # 为什么值得自动化：以前发现 429 全靠人工看日志 + 回忆「消耗器是不是在烧」。
+  # 这条会把「查 burner 状态 / 看 429 分布 / 给根因判断」固定下来。
+  # ---------------------------------------------------------------------------
+  - name: 网关健康异常
+    when:
+      source: zkai-gateway
+      types: [health.quarantined, health.degraded, rate_limit.burst]
+    to: cli-skill
+    cwd: "."
+    skill: zkai-ops
+    # 指令写成单行：`>-` 折行会在中文断句处留一个空格（"在烧 （systemctl"），
+    # 模型读起来别扭，人看着也脏
+    ask: "按 skill 里「隔离排查」一节处理：先确认积分消耗器是否在烧（systemctl is-active zkai-burner），再查 429 的分布与隔离原因，给出根因判断。**只读诊断，不要改任何配置、不要重启服务。**"
+    group: gateway-health
+    dedupe_window: 1800
+    parallel: 1
+    tell: needed
+    max_turns: 12
+    budget_cny: 2.0
+
+  # ---------------------------------------------------------------------------
+  # 1b. 网关健康异常 —— 拍板之后真正去执行（闭环）
+  #
+  # 没有这一条，审批就是终点：你点了「批准」，系统只把「已批准」写进结论，
+  # 没有任何人去干活，而你以为活干完了。（2026-11-03 补）
+  #
+  # 事件类型固定是 `<父事件类型>.decided`，payload 里带
+  # parent_id / approved / note / verdict，所以指令能直接引用你的决策原话。
+  #
+  # ⚠ 这条是**有写权限**的：它要按你的批准去动手。所以
+  #   - to 必须是能写文件的执行体（cli-claude 是 bypass 档）
+  #   - 只处理 approved=true；否决的分支不干活，只归档
+  #   - 凡是「删数据 / 停服 / 花钱 / 对外发消息」这类，仍然要在指令里
+  #     再确认一次，别让它把一次批准当成全权委托
+  # ---------------------------------------------------------------------------
+  - name: 网关健康异常-执行决策
+    when:
+      source: zkai-gateway
+      types: [health.quarantined.decided, health.degraded.decided, rate_limit.burst.decided]
+      match:
+        approved: "true"
+    to: cli-skill
+    cwd: "."
+    skill: zkai-ops
+    ask: "上一条诊断结论已经由运营者批准，按 payload 里的 note 与 verdict 执行。只做被明确批准的那一件事；如果批准的内容涉及删除、停服、对外发消息或花钱，先只输出「将要做什么」并停下，等二次确认。做完报告实际改了什么。"
+    group: gateway-health-exec
+    dedupe_window: 600
+    parallel: 1
+    tell: always
+    max_turns: 15
+    budget_cny: 3.0
+
+  # ---------------------------------------------------------------------------
+  # 2. 配置漂移
+  #
+  # 信号：/health 的 config_watch.last_error 非空（外部改动 reload 失败）、
+  # stale_config_files() 非空（内存与磁盘不一致）、或 check_config.py 报错。
+  #
+  # 为什么值得自动化：这个项目被「外部改配置被长命进程静默回滚」坑过至少两次，
+  # 每次都靠人偶然发现。让 Agent 出差异报告，比人肉比对快得多。
+  # ---------------------------------------------------------------------------
+  - name: 配置漂移
+    when:
+      source: zkai-gateway
+      types: [config.drift, config.invalid]
+    to: cli-skill
+    cwd: "."
+    skill: zkai-ops
+    ask: "列出内存配置与磁盘配置的差异（哪个文件、哪个字段、值分别是什么），判断是「外部改的还没生效」还是「控制台写回把外部改动冲掉了」。给结论和修复步骤。**不要直接改文件**，等人确认。"
+    group: config-drift
+    dedupe_window: 3600
+    parallel: 1
+    tell: needed
+    max_turns: 10
+
+  # ---------------------------------------------------------------------------
+  # 3. 服务器代码落后
+  #
+  # 信号来自 scripts/event_watch.py 的 git 检查（服务器 HEAD vs origin/main）。
+  # ---------------------------------------------------------------------------
+  - name: 服务器代码落后
+    when:
+      source: server
+      types: [git.behind]
+    to: cli-skill
+    cwd: "."
+    skill: zkai-sync
+    ask: "列出服务器落后了哪些提交、涉及哪些文件、有没有动到 config/ 或部署脚本，给出按 AGENTS.md 那节写的同步步骤。**不要执行 reset / restart**，等人确认。"
+    group: server-sync
+    dedupe_window: 3600
+    parallel: 1
+    tell: needed
+    max_turns: 10

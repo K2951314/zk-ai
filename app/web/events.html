@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>事件流 · ZK-AI</title>
+<script>
+// 嵌进控制台右侧内容区时（/ui/events?embed=1）藏掉自己的页头：
+// 控制台侧栏已经说明「你在哪」，页内再来一条标题栏就是重复。
+const EMBEDDED = location.search.indexOf("embed=1") >= 0;
+if (EMBEDDED) {
+  document.documentElement.className = "embed";
+}
+</script>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         font-size: 14px; line-height: 1.6; color: #2c2c2a; background: #f7f6f2; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 16px 20px;
+           background: #fff; border-bottom: 1px solid #e3e1da; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 500; }
+  header .sub { color: #888780; font-size: 12px; }
+  header a { margin-left: auto; color: #185fa5; text-decoration: none; font-size: 13px; }
+  main { padding: 16px 20px 40px; max-width: 1180px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .card { flex: 1 1 150px; background: #fff; border: 1px solid #e3e1da; border-radius: 12px;
+          padding: 12px 14px; }
+  .card .n { font-size: 22px; font-weight: 500; }
+  .card .k { font-size: 12px; color: #888780; }
+  .card.warn .n { color: #ba7517; }
+  .card.danger .n { color: #a32d2d; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  select, button { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 8px;
+                   border: 1px solid #d3d1c7; background: #fff; color: inherit; cursor: pointer; }
+  button.primary { background: #185fa5; border-color: #185fa5; color: #fff; }
+  button.danger { background: #a32d2d; border-color: #a32d2d; color: #fff; }
+  table { width: 100%; border-collapse: collapse; background: #fff;
+          border: 1px solid #e3e1da; border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #f1efe8; vertical-align: top; }
+  th { font-weight: 500; font-size: 12px; color: #5f5e5a; background: #fbfaf7; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #fbfaf7; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
+  .pill.received { background: #e6f1fb; color: #0c447c; }
+  .pill.running { background: #faeeda; color: #633806; }
+  .pill.waiting_decision { background: #faeeda; color: #854f0b; }
+  .pill.done { background: #e1f5ee; color: #085041; }
+  .pill.failed { background: #fcebeb; color: #791f1f; }
+  .pill.dropped { background: #f1efe8; color: #5f5e5a; }
+  .muted { color: #888780; font-size: 12px; }
+  .compose { background: #fff; border: 1px solid #e3e1da; border-radius: 12px;
+             padding: 14px 16px; margin-bottom: 14px; }
+  .compose label { display: block; font-size: 12px; color: #5f5e5a; margin-bottom: 10px; }
+  .compose .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .compose .row label { flex: 1 1 180px; margin-bottom: 10px; }
+  .compose input, .compose textarea {
+    display: block; width: 100%; margin-top: 3px; font: inherit; font-size: 13px;
+    padding: 6px 9px; border: 1px solid #d3d1c7; border-radius: 8px;
+    background: #fff; color: inherit; }
+  .compose textarea { resize: vertical; }
+  #detail { margin-top: 16px; background: #fff; border: 1px solid #e3e1da;
+            border-radius: 12px; padding: 14px 16px; display: none; }
+  #detail.on { display: block; }
+  #detail h2 { margin: 0 0 6px; font-size: 14px; font-weight: 500; }
+  #detail pre { white-space: pre-wrap; word-break: break-word; background: #fbfaf7;
+                border: 1px solid #f1efe8; border-radius: 8px; padding: 10px;
+                font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+                max-height: 360px; overflow: auto; }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  .empty { padding: 28px; text-align: center; color: #888780; background: #fff;
+           border: 1px dashed #d3d1c7; border-radius: 12px; }
+  html.embed header { display: none; }
+  html.embed main { padding: 14px 16px 28px; max-width: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>事件流</h1>
+  <span class="sub">信号进来 → 命中规则 → 派给执行体 → 结论留档</span>
+  <a href="/ui">返回控制台</a>
+</header>
+<main>
+  <div class="cards">
+    <div class="card"><div class="n" id="n-open">-</div><div class="k">待处理</div></div>
+    <div class="card warn"><div class="n" id="n-decision">-</div><div class="k">等你拍板</div></div>
+    <div class="card danger"><div class="n" id="n-failed">-</div><div class="k">执行失败</div></div>
+    <div class="card"><div class="n" id="n-today">-</div><div class="k">近 7 天总数</div></div>
+    <div class="card"><div class="n" id="n-cost">-</div><div class="k">近 7 天花费（元）</div></div>
+  </div>
+
+  <div class="toolbar">
+    <select id="f-state">
+      <option value="">全部状态</option>
+      <option value="received">待认领</option>
+      <option value="running">进行中</option>
+      <option value="waiting_decision">等你拍板</option>
+      <option value="done">已完成</option>
+      <option value="failed">失败</option>
+      <option value="dropped">无规则</option>
+    </select>
+    <button id="refresh">刷新</button>
+    <button id="open-compose">手动记一条</button>
+    <span class="muted" id="hint">点一行看详情</span>
+  </div>
+
+  <!-- 手动录入：微信里看到的询价、同事口头说的问题，都能直接记进来。
+       没有这个入口，非程序员就只能去命令行敲 curl —— 等于这套系统没有入口。 -->
+  <form id="compose" class="compose" style="display:none">
+    <div class="row">
+      <label>来源
+        <select id="c-source">
+          <option value="manual">手动（通用待办）</option>
+          <option value="customer">客户</option>
+          <option value="supplier">供应商</option>
+          <option value="internal">内部事务</option>
+        </select>
+      </label>
+      <label>类型
+        <input id="c-type" list="c-type-list" placeholder="如 inquiry.received" value="manual.note">
+        <datalist id="c-type-list">
+          <option value="inquiry.received"></option>
+          <option value="inquiry.overdue"></option>
+          <option value="quote.no_reply"></option>
+          <option value="customer.complaint"></option>
+          <option value="supplier.delay"></option>
+          <option value="manual.note"></option>
+        </datalist>
+      </label>
+      <label>对象
+        <input id="c-object" placeholder="如 客户名 / 报价单号 / 型号">
+      </label>
+    </div>
+    <label>一句话摘要
+      <input id="c-summary" required placeholder="如：张三询 40Cr 铣刀，批量 200 件，下周要">
+    </label>
+    <label>详情（可选，会原样交给 Agent）
+      <textarea id="c-detail" rows="3" placeholder="补充信息：材质、工序、机床、交期、上次成交价…"></textarea>
+    </label>
+    <div class="row">
+      <button class="primary" type="submit" id="c-submit">记一条</button>
+      <button type="button" id="c-cancel">取消</button>
+      <span class="muted" id="c-hint"></span>
+    </div>
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:56px">编号</th>
+        <th style="width:88px">状态</th>
+        <th style="width:120px">来源</th>
+        <th style="width:150px">类型</th>
+        <th>摘要</th>
+        <th style="width:130px">规则 / 执行体</th>
+        <th style="width:96px">收到时间</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" style="display:none">还没有事件。信号源接上以后这里会有内容。</div>
+
+  <div id="detail">
+    <h2 id="d-title">事件详情</h2>
+    <div class="muted" id="d-meta"></div>
+    <pre id="d-body"></pre>
+    <div class="row">
+      <button class="primary" id="d-approve">批准</button>
+      <button class="danger" id="d-reject">否决</button>
+      <button id="d-close">关闭</button>
+    </div>
+  </div>
+</main>
+
+<script>
+const TOKEN = localStorage.getItem("zkai_admin_token") || "";
+const STATE_ZH = {
+  received: "待认领", running: "进行中", waiting_decision: "等你拍板",
+  done: "已完成", failed: "失败", dropped: "无规则"
+};
+let current = null;
+
+function api(path, options) {
+  const opts = options || {};
+  opts.headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
+  return fetch(path, opts).then(function (r) {
+    if (!r.ok) { throw new Error("请求失败：HTTP " + r.status); }
+    return r.json();
+  });
+}
+
+function esc(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function shortTime(iso) {
+  if (!iso) { return "-"; }
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) { return "-"; }
+  const pad = function (n) { return String(n).padStart(2, "0"); };
+  return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+
+function render(events) {
+  const body = document.getElementById("rows");
+  body.innerHTML = events.map(function (e) {
+    return "<tr data-id=\"" + e.id + "\">" +
+      "<td>" + e.id + "</td>" +
+      "<td><span class=\"pill " + esc(e.state) + "\">" + esc(STATE_ZH[e.state] || e.state) + "</span></td>" +
+      "<td>" + esc(e.source) + "</td>" +
+      "<td>" + esc(e.type) + "</td>" +
+      "<td>" + esc(e.summary) + "</td>" +
+      "<td class=\"muted\">" + esc(e.rule || "无规则") + " / " + esc(e.role || "-") + "</td>" +
+      "<td class=\"muted\">" + shortTime(e.received_at) + "</td>" +
+      "</tr>";
+  }).join("");
+  document.getElementById("empty").style.display = events.length ? "none" : "block";
+  Array.prototype.forEach.call(body.querySelectorAll("tr"), function (tr) {
+    tr.addEventListener("click", function () { openDetail(Number(tr.dataset.id)); });
+  });
+}
+
+function openDetail(id) {
+  api("/zkadmin/events/" + id).then(function (data) {
+    current = data.event;
+    document.getElementById("detail").classList.add("on");
+    document.getElementById("d-title").textContent = "事件 #" + current.id + " · " + (current.summary || current.type);
+    document.getElementById("d-meta").textContent =
+      "状态：" + (STATE_ZH[current.state] || current.state) +
+      "　来源：" + current.source + " / " + current.type +
+      "　规则：" + (current.rule || "无规则") +
+      "　执行体：" + (current.role || "-") +
+      "　尝试次数：" + current.attempts;
+    const parts = [];
+    if (current.task) { parts.push("【派给执行体的指令】\n" + current.task); }
+    if (current.verdict) { parts.push("【结论】\n" + current.verdict); }
+    if (!parts.length) { parts.push("这条事件还没有结论。"); }
+    document.getElementById("d-body").textContent = parts.join("\n\n");
+    const show = current.state === "waiting_decision";
+    document.getElementById("d-approve").style.display = show ? "inline-block" : "none";
+    document.getElementById("d-reject").style.display = show ? "inline-block" : "none";
+  }).catch(function (err) {
+    document.getElementById("hint").textContent = err.message;
+  });
+}
+
+function decide(approved) {
+  if (!current) { return; }
+  api("/zkadmin/events/" + current.id + "/decision", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: approved, note: "" })
+  }).then(function () {
+    document.getElementById("detail").classList.remove("on");
+    load();
+  }).catch(function (err) {
+    document.getElementById("hint").textContent = err.message;
+  });
+}
+
+function load() {
+  const state = document.getElementById("f-state").value;
+  const query = state ? "?state=" + encodeURIComponent(state) : "";
+  api("/zkadmin/events" + query).then(function (data) { render(data.events || []); })
+    .catch(function (err) { document.getElementById("hint").textContent = err.message; });
+  api("/zkadmin/events/stats?days=7").then(function (s) {
+    const byState = s.by_state || {};
+    document.getElementById("n-open").textContent = s.open || 0;
+    document.getElementById("n-decision").textContent = byState.waiting_decision || 0;
+    document.getElementById("n-failed").textContent = byState.failed || 0;
+    let total = 0;
+    Object.keys(byState).forEach(function (k) { total += byState[k]; });
+    document.getElementById("n-today").textContent = total;
+    let cost = 0;
+    (s.by_rule || []).forEach(function (r) { cost += r.cost_cny || 0; });
+    document.getElementById("n-cost").textContent = cost.toFixed(2);
+    if (s.warnings && s.warnings.length) {
+      document.getElementById("hint").textContent = s.warnings[0];
+    }
+  }).catch(function () {});
+}
+
+document.getElementById("refresh").addEventListener("click", load);
+document.getElementById("f-state").addEventListener("change", load);
+document.getElementById("open-compose").addEventListener("click", function () {
+  const form = document.getElementById("compose");
+  const showing = form.style.display !== "none";
+  form.style.display = showing ? "none" : "block";
+  if (!showing) { document.getElementById("c-summary").focus(); }
+});
+document.getElementById("c-cancel").addEventListener("click", function () {
+  document.getElementById("compose").style.display = "none";
+  document.getElementById("c-hint").textContent = "";
+});
+document.getElementById("compose").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  const hint = document.getElementById("c-hint");
+  const summary = document.getElementById("c-summary").value.trim();
+  const type = document.getElementById("c-type").value.trim();
+  if (!summary) { hint.textContent = "摘要不能为空"; return; }
+  if (!type) { hint.textContent = "类型不能为空"; return; }
+  const detail = document.getElementById("c-detail").value.trim();
+  const payload = detail ? { detail: detail } : {};
+  hint.textContent = "正在提交…";
+  api("/zkadmin/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: document.getElementById("c-source").value,
+      type: type,
+      object: document.getElementById("c-object").value.trim(),
+      summary: summary,
+      link: "",
+      payload: payload
+    })
+  }).then(function (data) {
+    const rule = data.rule ? ("命中规则「" + data.rule + "」") : "没有命中任何规则（已落库，等你去配规则）";
+    hint.textContent = "已记录：" + rule;
+    document.getElementById("c-summary").value = "";
+    document.getElementById("c-object").value = "";
+    document.getElementById("c-detail").value = "";
+    load();
+  }).catch(function (err) { hint.textContent = err.message; });
+});
+document.getElementById("d-approve").addEventListener("click", function () { decide(true); });
+document.getElementById("d-reject").addEventListener("click", function () { decide(false); });
+document.getElementById("d-close").addEventListener("click", function () {
+  document.getElementById("detail").classList.remove("on");
+});
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

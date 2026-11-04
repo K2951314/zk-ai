@@ -25,6 +25,7 @@ from app.api import (
     agent,
     burner_log,
     chat,
+    events,
     health,
     messages,
     models,
@@ -131,6 +132,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # /admin/agent/*: routes internally 404 when ZKAI_AGENT_ENABLED=false, and
     # require_admin already 404s when the admin surface is off.
     app.include_router(agent.router)
+    # /zkadmin/events/*: 事件中台。routes 内部按 ZKAI_EVENTS_ENABLED 自行 404。
+    app.include_router(events.router)
     # 消耗器日志 SSE 挂在 /admin/burner/log/* 上，必须与 admin 同一个开关：
     # 这个面关掉时它不该还能读到服务器上的日志文件。
     if settings.admin_enabled:
