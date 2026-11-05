@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -164,6 +165,7 @@ class AgentService:
         parent: AgentService | None = None,
         parent_session: str | None = None,
         depth: int = 1,
+        images: list[str] | None = None,
     ) -> dict[str, Any]:
         resolved_model = model or self.settings.agent_default_model
         ws = self._resolve_workspace(workspace)
@@ -172,7 +174,10 @@ class AgentService:
         await self.repo.create_session(
             session_id=session_id, title=title, model=resolved_model, workspace=str(ws)
         )
-        await self.repo.add_message(session_id, role="user", kind="task", content=task)
+        await self.repo.add_message(
+            session_id, role="user", kind="task", content=task,
+            data=_image_data(images),
+        )
         run = _Running(
             session_id=session_id,
             workspace=ws,
@@ -186,7 +191,9 @@ class AgentService:
         self._spawn(run, resume=False)
         return {"session": await self.repo.get_session(session_id), "messages": []}
 
-    async def followup(self, session_id: str, content: str) -> dict[str, Any] | None:
+    async def followup(
+        self, session_id: str, content: str, images: list[str] | None = None
+    ) -> dict[str, Any] | None:
         row = await self.repo.get_session(session_id)
         if row is None:
             return None
@@ -200,7 +207,10 @@ class AgentService:
         run = _Running(session_id=session_id, workspace=Path(row["workspace"]),
                        model=row["model"], cli_registry=load_cli_registry(self.settings))
         self._running[session_id] = run
-        await self.repo.add_message(session_id, role="user", kind="task", content=content)
+        await self.repo.add_message(
+            session_id, role="user", kind="task", content=content,
+            data=_image_data(images),
+        )
         await self.repo.update_status(session_id, "running", error=None)
         self._spawn(run, resume=True)
         return await self.session_detail(session_id)
@@ -1165,7 +1175,7 @@ class AgentService:
                 out.append(ChatMessage(role="tool", content=content or "",
                                        tool_call_id=str(data.get("tool_call_id") or "")))
             else:
-                out.append(ChatMessage(role="user", content=content or ""))
+                out.append(ChatMessage(role="user", content=_user_content(content, data)))
         return out
 
     def _resolve_workspace(self, workspace: str | None) -> Path:
@@ -1178,5 +1188,58 @@ class AgentService:
 
 #: 保活对 loop 任务的强引用（done callback 里自动清理）
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+#: 会话里允许贴的图片（data URL 或 https 直链）。
+#: 只要形状对就放行——真正的可达性由上游判定，前端不该替上游猜。
+_DATA_IMAGE = re.compile(r"^data:image/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=\s]+$")
+_MAX_IMAGES = 8
+#: 单张上限：跟 /v1 那条路的 10MB 字节闸对齐，别在这里比它更松
+_MAX_IMAGE_CHARS = 10 * 1024 * 1024
+
+
+def _normalise_images(images: list[str] | None) -> list[str]:
+    """校验并归一化前端送来的图片列表；坏图**拒绝并说明**，不静默丢弃。
+
+    为什么不静默丢弃（2026-11-05）：静默丢会让运营者以为图进去了，
+    而模型回答「我看不见图里的东西」——排障会绕到模型能力上去，
+    实际是接口层吃了。任务台是给人操作的，宁可直接报错。
+    """
+    if not images:
+        return []
+    cleaned: list[str] = []
+    for index, raw in enumerate(images, 1):
+        item = (raw or "").strip()
+        if not item:
+            continue
+        if not (_DATA_IMAGE.match(item) or item.startswith(("https://", "http://"))):
+            raise ZKAIError(f"第 {index} 张图片格式不支持（只收 PNG/JPEG/GIF/WebP 的 data URL 或 http 直链）",
+                            http_status=400)
+        if len(item) > _MAX_IMAGE_CHARS:
+            raise ZKAIError(f"第 {index} 张图片太大（上限 {_MAX_IMAGE_CHARS // 1024 // 1024} MB）",
+                            http_status=400)
+        cleaned.append(item)
+    if len(cleaned) > _MAX_IMAGES:
+        raise ZKAIError(f"一次最多 {_MAX_IMAGES} 张图片", http_status=400)
+    return cleaned
+
+
+def _image_data(images: list[str] | None) -> dict[str, Any] | None:
+    """落库用的 ``data`` 片段：没有图就返回 None（保持老行的形状不变）。"""
+    kept = _normalise_images(images)
+    return {"images": kept} if kept else None
+
+
+def _user_content(text: str | None, data: dict[str, Any] | None) -> str | list[dict[str, Any]]:
+    """把一条 user 消息还原成上游要的形状：带图就是 content parts，不带还是纯串。"""
+    images = (data or {}).get("images") or []
+    if not images:
+        return text or ""
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for url in images:
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
 
 __all__ = ["AgentService"]

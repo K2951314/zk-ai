@@ -151,6 +151,39 @@
   .linklike { background: none; border: 0; padding: 0; margin-top: 7px; cursor: pointer;
     font-size: 11.5px; color: var(--accent); text-decoration: underline; }
   .linklike:hover { color: var(--accent-strong, var(--accent)); }
+  /* ---------- Markdown 渲染（md() 的产物） ----------
+     white-space 必须归 normal：外层 .spawn-body 带 pre-wrap，不覆盖的话
+     块级元素之间会多出一堆空行。 */
+  .md { white-space: normal; word-break: break-word; line-height: 1.65; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 7px 0; }
+  .md h1, .md h2, .md h3, .md h4 { margin: 13px 0 7px; font-size: 13.5px; font-weight: 700; }
+  .md ul, .md ol { margin: 7px 0; padding-left: 21px; }
+  .md li { margin: 3px 0; }
+  .md code {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0 4px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px;
+  }
+  .md pre.md-code {
+    margin: 9px 0; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 11px; overflow-x: auto;
+    font-size: 12.5px; line-height: 1.55; white-space: pre; word-break: normal;
+  }
+  .md blockquote {
+    margin: 8px 0; padding: 3px 11px; border-left: 3px solid var(--border-strong);
+    color: var(--text-2);
+  }
+  /* 表格：宽了横向滚动，不要把卡片撑爆；表头不折行，数字列靠右读着顺 */
+  .md table {
+    display: block; width: 100%; overflow-x: auto; border-collapse: collapse;
+    margin: 9px 0; font-size: 12.5px;
+  }
+  .md th, .md td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; vertical-align: top; }
+  .md th { background: var(--panel-2); font-weight: 700; white-space: nowrap; }
+  .md tbody tr:nth-child(even) { background: var(--panel-2); }
+  .md a { color: var(--accent); }
+  .md hr { border: 0; border-top: 1px solid var(--border); margin: 11px 0; }
   .approval-actions { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
   .approval-actions .ok { color: var(--ok); border-color: var(--ok-border); }
   .approval-actions .ok:hover { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
@@ -194,6 +227,29 @@
     flex: 1; resize: vertical; min-height: 44px; max-height: 160px;
     font-family: inherit;
   }
+  /* ---- 图片：拖进来 / 粘贴 / 点按钮 ---- */
+  #composer.drop { outline: 2px dashed var(--accent, #185fa5); outline-offset: -4px; }
+  .attach-bar {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 6px 0 0; font-size: 12px; color: var(--muted);
+  }
+  .attach-bar button {
+    font-size: 12px; padding: 3px 9px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel-2, #fbfaf7); color: var(--text);
+  }
+  .thumbs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .thumb {
+    position: relative; width: 62px; height: 62px; border-radius: 8px;
+    border: 1px solid var(--border); overflow: hidden; background: var(--panel-2, #f1efe8);
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .x {
+    position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
+    border: 0; border-radius: 50%; background: rgba(0,0,0,.62); color: #fff;
+    font-size: 11px; line-height: 16px; cursor: pointer; padding: 0;
+  }
+  .thumb .x:hover { background: #a32d2d; }
   #empty { margin: auto; text-align: center; color: var(--muted); max-width: 560px; }
   #empty h2 { color: var(--text); font-size: 19px; margin-bottom: 10px; }
   #empty p { line-height: 1.9; }
@@ -241,7 +297,13 @@
     <div id="execBar" class="exec-bar" hidden></div>
     <form id="composer">
       <div id="execMenu" class="exec-menu" hidden></div>
-      <textarea id="taskInput" placeholder="描述任务，Enter 发送；@ 可点名执行体，一条消息可点名多个（按顺序串行跑）"></textarea>
+      <textarea id="taskInput" placeholder="描述任务，Enter 发送；@ 可点名执行体，一条消息可点名多个（按顺序串行跑）&#10;图片可以直接粘贴（Ctrl+V）或拖进来"></textarea>
+      <div class="attach-bar">
+        <button type="button" id="pickImage">🖼 加图片</button>
+        <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <span>也可以直接粘贴或拖进输入框</span>
+        <div class="thumbs" id="thumbs"></div>
+      </div>
       <button type="submit" class="primary" id="sendBtn">▶ 运行</button>
     </form>
   </section>
@@ -260,6 +322,110 @@ function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/* ================= 轻量 Markdown 渲染 =================
+   为什么需要：模型回的是 Markdown（表格 / 加粗 / 代码块），而原来只是
+   esc() 之后塞进 <div>。div 会折叠换行，于是
+   `| 角色 | 执行体 |` 那种表格就糊成一整段竖线，人根本读不了（2026-11-02 反馈）。
+
+   安全前提：**先 esc 再解析**。原文里的 < > & " 全部转义，只有本函数自己
+   产出的标签能生效，模型输出里夹带的 HTML 不会变成可执行结构。
+   支持最小可用集：围栏代码块、表格、标题、列表、引用、分隔线、段落，
+   行内：`代码`、**加粗**、*斜体*、~~删除线~~、[链接](url)。
+   不做嵌套列表 / 图片 / HTML 直通 —— 聊天窗口不需要，做了反而容易被模型输出带偏。 */
+
+function mdInline(s) {
+  // 行内代码先抽走：否则里面的 * 和 _ 会被当成强调语法
+  const codes = [];
+  let out = s.replace(/`([^`\n]+)`/g, (_, code) => {
+    codes.push(code);
+    return "\u0001" + (codes.length - 1) + "\u0001";
+  });
+  out = out
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return out.replace(/\u0001(\d+)\u0001/g, (_, i) => `<code>${codes[Number(i)]}</code>`);
+}
+
+function mdCells(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+}
+
+function mdTable(lines) {
+  const head = mdCells(lines[0]);
+  const align = mdCells(lines[1]).map(c =>
+    /^:-+:$/.test(c) ? "center" : /^-+:$/.test(c) ? "right" : /^:-+$/.test(c) ? "left" : "");
+  const cell = (tag, text, i) => {
+    const a = align[i] ? ` style="text-align:${align[i]}"` : "";
+    return `<${tag}${a}>${mdInline(esc(text))}</${tag}>`;
+  };
+  const th = head.map((c, i) => cell("th", c, i)).join("");
+  const rows = lines.slice(2)
+    .filter(l => l.trim())
+    .map(l => {
+      const cells = mdCells(l);
+      // 补齐/截断到表头列数：模型偶尔少写一格，缺的补空，多的丢掉
+      while (cells.length < head.length) cells.push("");
+      return `<tr>${cells.slice(0, head.length).map((c, i) => cell("td", c, i)).join("")}</tr>`;
+    }).join("");
+  return `<table><thead><tr>${th}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function md(src) {
+  const raw = String(src ?? "");
+  if (!raw.trim()) return "";
+  // 先把围栏代码块抽走：里面的 | 和 * 属于代码，不该被当表格/强调解析
+  const fences = [];
+  const body = raw.replace(/```[^\n`]*\n([\s\S]*?)```/g, (_, code) => {
+    fences.push(code.replace(/\n$/, ""));
+    return "\u0000" + (fences.length - 1) + "\u0000";
+  });
+  const out = [];
+  for (const block of body.split(/\n{2,}/)) {
+    const text = block.trim();
+    if (!text) continue;
+    const fence = text.match(/^\u0000(\d+)\u0000$/);
+    if (fence) {
+      out.push(`<pre class="md-code">${esc(fences[Number(fence[1])])}</pre>`);
+      continue;
+    }
+    const lines = text.split("\n");
+    // 表格：首行有竖线 + 次行是 |---|:--:| 这种分隔行
+    if (lines.length >= 2 && /^\s*\|.*\|\s*$/.test(lines[0]) && /^[\s:|-]+$/.test(lines[1])
+        && lines[1].includes("-") && lines[1].includes("|")) {
+      out.push(mdTable(lines));
+      continue;
+    }
+    const heading = text.match(/^(#{1,6})\s+([\s\S]*)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 4);
+      out.push(`<h${level}>${mdInline(esc(heading[2]))}</h${level}>`);
+      continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(lines[0])) {
+      const ordered = /^\s*\d+\./.test(lines[0]);
+      const items = lines
+        .filter(l => /^\s*([-*+]|\d+\.)\s+/.test(l))
+        .map(l => `<li>${mdInline(esc(l.replace(/^\s*([-*+]|\d+\.)\s+/, "")))}</li>`)
+        .join("");
+      out.push(ordered ? `<ol>${items}</ol>` : `<ul>${items}</ul>`);
+      continue;
+    }
+    if (/^\s*>/.test(lines[0])) {
+      out.push(`<blockquote>${mdInline(esc(lines.map(l => l.replace(/^\s*>\s?/, "")).join("\n")))}</blockquote>`);
+      continue;
+    }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(text)) {
+      out.push("<hr>");
+      continue;
+    }
+    out.push(`<p>${mdInline(esc(text)).replace(/\n/g, "<br>")}</p>`);
+  }
+  return out.join("");
 }
 
 async function api(path, opts = {}) {
@@ -294,6 +460,8 @@ const state = {
   segsOpen: true,      // 多段设置面板是否展开
   sig: "",             // 上次渲染的分段签名，避免打字时反复重绘抢焦点
   asked: new Set(),    // 已经问过真实模型清单的角色
+  //: 待发送的图片（data URL 数组）。跟输入框文本一起在提交时清空。
+  images: [],
 };
 
 function toast(msg) {
@@ -380,7 +548,7 @@ function appendMessageRow(m) {
       const who = (m.data || {}).executor
         ? `<div class="routing">⚡ 派给 ${esc(m.data.executor)}${m.data.model ? ` · ${esc(m.data.model)}` : ""}</div>`
         : "";
-      addRow(`<div class="card">${esc(m.content)}${who}</div>`, "user");
+      addRow(`<div class="card"><div class="md">${md(m.content)}</div>${who}</div>`, "user");
     }
     return;
   }
@@ -407,7 +575,7 @@ function appendMessageRow(m) {
     const row = addRow(`<div class="card" style="border-left:3px solid var(--accent)">
       <div class="who">🧩 派生子任务
         <span class="chip ${d.ok ? "done" : "failed"}">${d.ok ? "已完成" : "未完成"}</span></div>
-      <div class="spawn-body">${esc(m.content || "")}</div>${jump}</div>`);
+      <div class="spawn-body md">${md(m.content)}</div>${jump}</div>`);
     const btn = row.querySelector("[data-kid]");
     if (btn) btn.onclick = () => openSession(btn.dataset.kid);
     return;
@@ -431,7 +599,7 @@ function appendMessageRow(m) {
     ? `<details><summary>💭 思考过程</summary><pre>${esc(d.thinking)}</pre></details>` : "";
   const pending = d.tool_calls?.length && state.session?.status === "waiting_approval";
   addRow(`<div class="card"><div class="who">🤖 助手 <span class="muted small">#${m.seq}</span></div>
-    <div>${esc(m.content || "")}</div>${toolCallChips(d.tool_calls)}${thinking}${ex}${routing}</div>`);
+    <div class="md">${md(m.content)}</div>${toolCallChips(d.tool_calls)}${thinking}${ex}${routing}</div>`);
 }
 
 function renderApprovalCard(m) {
@@ -834,7 +1002,8 @@ $("composer").onsubmit = async (e) => {
   e.preventDefault();
   const input = $("taskInput");
   const text = input.value.trim();
-  if (!text) return;
+  // 只有图没有字也允许发 —— 「看看这块刀片崩在哪」经常配一张图
+  if (!text && !state.images.length) return;
   try {
     const segments = parseMentions(text);
     if (segments.length) {
@@ -865,6 +1034,8 @@ $("composer").onsubmit = async (e) => {
         method: "POST", body: JSON.stringify(payload),
       });
       input.value = "";
+      state.images = [];
+      renderThumbs();
       state.current = created.session.id;
       state.session = created.session;
       state.messages = created.messages || [];
@@ -881,9 +1052,15 @@ $("composer").onsubmit = async (e) => {
     if (!state.current) {
       const created = await api("/zkadmin/agent/sessions", {
         method: "POST",
-        body: JSON.stringify({ task: text, model: $("modelSel").value || null }),
+        body: JSON.stringify({
+          task: text,
+          model: $("modelSel").value || null,
+          images: state.images,
+        }),
       });
       input.value = "";
+      state.images = [];
+      renderThumbs();
       state.current = created.session.id;
       state.session = created.session;
       state.messages = [];
@@ -893,9 +1070,11 @@ $("composer").onsubmit = async (e) => {
       loadSessions();
     } else {
       await api(`/zkadmin/agent/sessions/${state.current}/messages`, {
-        method: "POST", body: JSON.stringify({ content: text }),
+        method: "POST", body: JSON.stringify({ content: text, images: state.images }),
       });
       input.value = "";
+      state.images = [];
+      renderThumbs();
       state.messages.push({ seq: 0, role: "user", kind: "task", content: text });
       appendMessageRow(state.messages[state.messages.length - 1]);
       addStepLine();
@@ -928,6 +1107,117 @@ $("taskInput").addEventListener("input", () => {
 $("taskInput").addEventListener("click", refreshMentionMenu);
 $("taskInput").addEventListener("keyup", refreshMentionMenu);
 
+/* ================= 图片附件 =================
+   三条入口都收成同一种形状：data URL 字符串数组（state.images）。
+   为什么是 data URL 而不是先传文件：/zkadmin 没有文件存储，
+   而 OpenAI 的 image_url part 本来就接受 data URL —— 少一个上传
+   状态机、少一类「传了但没引用」的孤儿文件 Sea。
+   限制与后端 _normalise_images 对齐：单张 10MB、一次最多 8 张。 */
+const IMG_MAX_CHARS = 10 * 1024 * 1024;
+const IMG_MAX = 8;
+
+function readImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+      reject(new Error(`「${file.name}」不是 PNG/JPEG/GIF/WebP，传不了`));
+      return;
+    }
+    if (file.size > IMG_MAX_CHARS) {
+      reject(new Error(`「${file.name}」超过 10MB，传不了`));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error(`「${file.name}」读不出来`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addImages(files) {
+  const list = Array.from(files || []).filter((f) => f && f.type.startsWith("image/"));
+  if (!list.length) return;
+  for (const file of list) {
+    if (state.images.length >= IMG_MAX) {
+      toast(`一次最多 ${IMG_MAX} 张图片`);
+      break;
+    }
+    try {
+      state.images.push(await readImage(file));
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+  renderThumbs();
+}
+
+
+function renderThumbs() {
+  const box = $("thumbs");
+  box.innerHTML = "";
+  state.images.forEach((src, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "thumb";
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = `图片 ${i + 1}`;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.textContent = "×";
+    x.title = "移除这张";
+    x.onclick = () => { state.images.splice(i, 1); renderThumbs(); };
+    wrap.appendChild(img);
+    wrap.appendChild(x);
+    box.appendChild(wrap);
+  });
+}
+
+
+$("pickImage").onclick = () => $("imageInput").click();
+$("imageInput").onchange = (e) => {
+  addImages(e.target.files);
+  e.target.value = "";
+};
+
+
+// 粘贴：从截图工具 / 浏览器复制来的图
+$("taskInput").addEventListener("paste", (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();
+    addImages(files);
+  }
+});
+
+
+// 拖拽：整个表单区域接收
+const composerEl = $("composer");
+composerEl.addEventListener("dragover", (e) => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
+    e.preventDefault();
+    composerEl.classList.add("drop");
+  }
+});
+composerEl.addEventListener("dragleave", () => composerEl.classList.remove("drop"));
+composerEl.addEventListener("drop", (e) => {
+  if (!e.dataTransfer) return;
+  const files = Array.from(e.dataTransfer.files || []);
+  if (files.some((f) => f.type.startsWith("image/"))) {
+    e.preventDefault();
+    composerEl.classList.remove("drop");
+    addImages(files);
+  }
+});
+
+
 $("newBtn").onclick = () => {
   state.current = null;
   state.session = null;
@@ -957,7 +1247,12 @@ $("stream").addEventListener("scroll", (e) => {
   state.autoScroll = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
 });
 
-loadSessions();
+loadSessions().then(() => {
+  // ?session=<id> 直达某个会话：事件中台「点开任务 → 跳到当时 Agent 干活的会话」
+  // 就靠这个。没有参数就停在空态，不擅自替用户打开某个历史会话。
+  const wanted = new URLSearchParams(location.search).get("session");
+  if (wanted) openSession(wanted);
+});
 loadModels();
 loadExecutors();
 setHeader();

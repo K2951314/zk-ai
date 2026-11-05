@@ -1014,3 +1014,85 @@ async def test_followup_delegation_appends_to_the_same_session(
     assert [m["content"] for m in results] == ["done:第一条", "done:第二条"]
     await harness.container.shutdown()
 
+
+
+# --------------------------------------------------------------------------- #
+# 图片输入（2026-11-05）
+# --------------------------------------------------------------------------- #
+#: 1x1 透明 PNG，够用来验证形状，不占体积
+_TINY_PNG = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+    "nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+)
+
+
+async def test_api_accepts_images_and_replays_them_as_content_parts(tmp_path):
+    """任务台带图：接口收下 → 落库 → _replay 还原成 image_url content part。
+
+    2026-11-05：控制台此前完全没有图片入口（全仓 grep type="file" 零命中），
+    而模型侧的多模态通路（image_url → 上游）早就存在。这条钉住「补齐的那一段」。
+    """
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("看到图了"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    app = create_app(harness.container.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/zkadmin/agent/sessions",
+            json={"task": "看看这张图", "images": [_TINY_PNG]},
+        )
+        assert r.status_code == 201, r.text
+        sid = r.json()["session"]["id"]
+        await wait_for_status(harness.container.agent_service, sid, {"done", "failed"})
+
+        detail = await harness.container.agent_service.repo.messages(sid)
+        task_row = next(m for m in detail if m["kind"] == "task")
+        assert task_row["data"]["images"] == [_TINY_PNG], "图片必须落进消息的 data"
+
+        # 还原成上游要的形状
+        replay = harness.container.agent_service._replay(detail)
+        user_msgs = [m for m in replay if m.role == "user"]
+        parts = user_msgs[0].content
+        assert isinstance(parts, list), "带图的消息必须还原成 content parts"
+        assert parts[0] == {"type": "text", "text": "看看这张图"}
+        assert parts[1]["type"] == "image_url"
+        assert parts[1]["image_url"]["url"] == _TINY_PNG
+    await harness.container.shutdown()
+
+
+async def test_a_bad_image_is_rejected_loudly_not_silently_dropped(tmp_path):
+    """坏图必须报错。静默丢弃会让人以为是模型看不见图，排障绕远路。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("ok"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    app = create_app(harness.container.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/zkadmin/agent/sessions",
+            json={"task": "x", "images": ["data:text/plain;base64,bm90IGFuIGltYWdl"]},
+        )
+        assert r.status_code == 400
+        assert "格式" in str(r.json())
+    await harness.container.shutdown()
+
+
+async def test_a_session_without_images_keeps_the_plain_string_shape(tmp_path):
+    """没图的老路径不能被改坏：content 仍是纯字符串，不是单元素 parts。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("ok"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    svc = harness.container.agent_service
+    created = await svc.start(task="没有图的任务")
+    sid = created["session"]["id"]
+    await wait_for_status(svc, sid, {"done", "failed"})
+    replay = svc._replay(await svc.repo.messages(sid))
+    user_msgs = [m for m in replay if m.role == "user"]
+    assert user_msgs[0].content == "没有图的任务"
+    await harness.container.shutdown()

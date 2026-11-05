@@ -678,7 +678,7 @@ ZK-AI/
 │                         # start_gateway.cmd, burn_sensenova.py + start_burner.cmd（积分消耗器，见使用手册）
 │                         # event_watch.py（事件信号采集）+ agent_worker.py（事件中台接单程序）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 42 个测试模块，1114 个用例，全部 Mock
+├── tests/                # conftest + 42 个测试模块，1117 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -686,7 +686,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 111 个文件约 29,163 行，`tests/` 42 个测试模块 1114 个用例（约 19,946 行），
+规模：`app/` 111 个文件约 29,238 行，`tests/` 42 个测试模块 1117 个用例（约 20,032 行），
 `scripts/` 20 个文件约 5,788 行。
 （这两个数字上一次更新是 2026-10-24 午，此前为同日早的 68/25,530/38/991——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
@@ -1371,7 +1371,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1114 个用例，全部通过，零网络、零真实配额。**
+**1117 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量
