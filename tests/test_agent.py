@@ -1096,3 +1096,87 @@ async def test_a_session_without_images_keeps_the_plain_string_shape(tmp_path):
     user_msgs = [m for m in replay if m.role == "user"]
     assert user_msgs[0].content == "没有图的任务"
     await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# 文件附件（2026-11-05）
+# --------------------------------------------------------------------------- #
+_B64_TEXT = "data:text/plain;base64," + "5L2g5aW977yM6L+Z5piv5LiA5Liq5paH5Lu2"
+
+
+async def test_a_file_is_stored_on_disk_and_its_path_reaches_the_task(tmp_path):
+    """文件落盘到 data/agent_uploads/<session>/，路径写进任务正文。
+
+    为什么不塞进 prompt：Agent 有读写工具，给它真实路径比给它全文有用得多。
+    """
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("读到了"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    app = create_app(harness.container.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/zkadmin/agent/sessions",
+            json={
+                "task": "看看这个报价单",
+                "files": [{"name": "报价单.txt", "data": _B64_TEXT}],
+            },
+        )
+        assert r.status_code == 201, r.text
+        sid = r.json()["session"]["id"]
+        await wait_for_status(harness.container.agent_service, sid, {"done", "failed"})
+
+        rows = await harness.container.agent_service.repo.messages(sid)
+        task_row = next(m for m in rows if m["kind"] == "task")
+        body = task_row["content"]
+        stored = task_row["data"]["files"]
+        assert len(stored) == 1
+        path = Path(stored[0]["path"])
+        assert path.is_file(), "文件必须真的落到磁盘上"  # noqa: ASYNC240 - 断言用途
+        assert "报价单.txt" in body and str(path) in body, "路径必须写进任务正文"
+        assert "5L2g5aW9" not in body, "正文里不该塞 base64"
+    await harness.container.shutdown()
+
+
+async def test_uploaded_files_do_not_land_in_the_agent_workspace(tmp_path):
+    """不能写进工作区 —— 那里是代码目录，混进用户文件会污染 git status。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("ok"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    svc = harness.container.agent_service
+    created = await svc.start(
+        task="x",
+        files=[{"name": "a.txt", "data": _B64_TEXT}],
+    )
+    sid = created["session"]["id"]
+    await wait_for_status(svc, sid, {"done", "failed"})
+    rows = await svc.repo.messages(sid)
+    path = Path(next(m for m in rows if m["kind"] == "task")["data"]["files"][0]["path"])
+    workspace = Path(created["session"]["workspace"]).resolve()  # noqa: ASYNC240 - 纯断言
+    assert workspace not in path.parents, "上传文件不该落在 Agent 工作区里"
+    await harness.container.shutdown()
+
+
+async def test_a_bad_file_name_cannot_escape_the_upload_dir(tmp_path):
+    """``../../etc/passwd`` 这种取名必须被削成文件名本体。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("ok"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    svc = harness.container.agent_service
+    created = await svc.start(
+        task="x",
+        files=[{"name": "../../evil.txt", "data": _B64_TEXT}],
+    )
+    sid = created["session"]["id"]
+    await wait_for_status(svc, sid, {"done", "failed"})
+    rows = await svc.repo.messages(sid)
+    stored = next(m for m in rows if m["kind"] == "task")["data"]["files"][0]
+    path = Path(stored["path"]).resolve()  # noqa: ASYNC240 - 纯断言
+    uploads = (svc.settings.resolved_data_dir / "agent_uploads").resolve()
+    assert uploads in path.parents, f"文件逃出了上传目录：{path}"
+    assert ".." not in path.parts
+    await harness.container.shutdown()

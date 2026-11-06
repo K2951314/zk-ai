@@ -46,6 +46,10 @@ class StartPayload(BaseModel):
     #: 图片（data URL 或 http 直链）。前端把截图/图纸转成 data URL 塞这里，
     #: 后端还原成 OpenAI 的 image_url content part —— 模型看到的是图不是文件名。
     images: list[str] = Field(default_factory=list)
+    #: 文件（[{"name": ..., "data": "data:...;base64,..."}]）。
+    #: 后端落到 data/agent_uploads/<session>/，再把**真实路径**写进任务正文，
+    #: 让 Agent 用自己的读写工具处理 —— 比把内容塞进 prompt 有用得多。
+    files: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FollowupPayload(BaseModel):
@@ -57,6 +61,7 @@ class FollowupPayload(BaseModel):
     context_window: int | None = Field(default=None, ge=0, le=2_000_000)
     #: 跟首轮一样的图片字段；只有走父模型（不带 executor_role）时才用得上
     images: list[str] = Field(default_factory=list)
+    files: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ApprovalPayload(BaseModel):
@@ -198,7 +203,8 @@ async def create_session(payload: StartPayload, agent: AgentDep,
                             f"未知的模型/别名：{model!r}")
     return await agent.start(task=payload.task, model=payload.model,
                              workspace=payload.workspace,
-                             images=payload.images or None)
+                             images=payload.images or None,
+                             files=payload.files or None)
 
 
 @router.get("/sessions/{session_id}")
@@ -224,7 +230,9 @@ async def followup(session_id: str, payload: FollowupPayload,
                 context_window=payload.context_window,
             )
         else:
-            detail = await agent.followup(session_id, payload.content, payload.images)
+            detail = await agent.followup(
+                session_id, payload.content, payload.images, payload.files
+            )
     except ZKAIError as exc:
         raise HTTPException(exc.http_status, exc.message) from exc
     if detail is None:

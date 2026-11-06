@@ -197,9 +197,11 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .step-line { color: var(--muted); font-size: 12px; text-align: center; }
 
+  /* 输入区改成纵向：输入框在上吃满宽度，工具栏在下。
+     原来是横向 flex（文本框 | 附件 | 按钮），一加附件按钮就把输入框挤窄了。 */
   form#composer {
     flex: none; border-top: 1px solid var(--border); background: var(--panel);
-    padding: 12px 22px; display: flex; gap: 10px; align-items: flex-end;
+    padding: 12px 22px; display: flex; flex-direction: column; gap: 8px;
     max-width: 924px; margin: 0 auto; width: 100%; position: relative;
   }
   .exec-menu {
@@ -224,32 +226,62 @@
     font-variant-numeric: tabular-nums;
   }
   #taskInput {
-    flex: 1; resize: vertical; min-height: 44px; max-height: 160px;
+    width: 100%; resize: vertical; min-height: 44px; max-height: 160px;
     font-family: inherit;
   }
   /* ---- 图片：拖进来 / 粘贴 / 点按钮 ---- */
   #composer.drop { outline: 2px dashed var(--accent, #185fa5); outline-offset: -4px; }
+  /* 工具栏：左附件、右发送 */
   .attach-bar {
-    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-    padding: 6px 0 0; font-size: 12px; color: var(--muted);
+    display: flex; gap: 8px; align-items: center;
+    font-size: 12px; color: var(--muted);
   }
+  .attach-bar .spacer { flex: 1 1 auto; }
   .attach-bar button {
-    font-size: 12px; padding: 3px 9px; cursor: pointer;
+    font-size: 12px; padding: 4px 10px; cursor: pointer;
     border: 1px solid var(--border); border-radius: 6px;
     background: var(--panel-2, #fbfaf7); color: var(--text);
+    white-space: nowrap;
   }
-  .thumbs { display: flex; gap: 8px; flex-wrap: wrap; }
-  .thumb {
+  .attach-bar button:hover { border-color: var(--accent, #185fa5); }
+  .attach-bar #sendBtn { font-size: 13px; padding: 6px 16px; }
+  /* 附件预览区：图片是缩略图，文件是带后缀的胶囊 */
+  .attachments {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  }
+  .attachments:empty { display: none; }
+  /* 图片：缩略图带移除角标 */
+  .att-thumb {
     position: relative; width: 62px; height: 62px; border-radius: 8px;
     border: 1px solid var(--border); overflow: hidden; background: var(--panel-2, #f1efe8);
   }
-  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .thumb .x {
+  .att-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .att-thumb .x {
     position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
     border: 0; border-radius: 50%; background: rgba(0,0,0,.62); color: #fff;
     font-size: 11px; line-height: 16px; cursor: pointer; padding: 0;
   }
-  .thumb .x:hover { background: #a32d2d; }
+  .att-thumb .x:hover { background: #a32d2d; }
+  /* 文件：后缀徽标 + 文件名，长名省略 */
+  .att-chip {
+    display: flex; align-items: center; gap: 7px; max-width: 240px;
+    padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel-2, #fbfaf7);
+  }
+  .att-chip .badge {
+    flex: none; font-size: 10px; font-weight: 600; letter-spacing: .4px;
+    padding: 2px 5px; border-radius: 4px; color: #fff; background: #185fa5;
+  }
+  .att-chip .name {
+    flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .att-chip .x {
+    flex: none; width: 16px; height: 16px; border: 0; border-radius: 50%;
+    background: transparent; color: var(--muted); font-size: 13px;
+    line-height: 1; cursor: pointer; padding: 0;
+  }
+  .att-chip .x:hover { color: #a32d2d; }
   #empty { margin: auto; text-align: center; color: var(--muted); max-width: 560px; }
   #empty h2 { color: var(--text); font-size: 19px; margin-bottom: 10px; }
   #empty p { line-height: 1.9; }
@@ -297,14 +329,16 @@
     <div id="execBar" class="exec-bar" hidden></div>
     <form id="composer">
       <div id="execMenu" class="exec-menu" hidden></div>
-      <textarea id="taskInput" placeholder="描述任务，Enter 发送；@ 可点名执行体，一条消息可点名多个（按顺序串行跑）&#10;图片可以直接粘贴（Ctrl+V）或拖进来"></textarea>
+      <textarea id="taskInput" placeholder="描述任务，Enter 发送；@ 可点名执行体，一条消息可点名多个（按顺序串行跑）&#10;图片和文件可以直接粘贴或拖进来"></textarea>
+      <div class="attachments" id="attachments"></div>
       <div class="attach-bar">
-        <button type="button" id="pickImage">🖼 加图片</button>
+        <button type="button" id="pickImage">图片</button>
+        <button type="button" id="pickFile">文件</button>
         <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-        <span>也可以直接粘贴或拖进输入框</span>
-        <div class="thumbs" id="thumbs"></div>
+        <input type="file" id="fileInput" multiple hidden>
+        <span class="spacer"></span>
+        <button type="submit" class="primary" id="sendBtn">▶ 运行</button>
       </div>
-      <button type="submit" class="primary" id="sendBtn">▶ 运行</button>
     </form>
   </section>
 </main>
@@ -462,6 +496,7 @@ const state = {
   asked: new Set(),    // 已经问过真实模型清单的角色
   //: 待发送的图片（data URL 数组）。跟输入框文本一起在提交时清空。
   images: [],
+  files: [],
 };
 
 function toast(msg) {
@@ -1003,7 +1038,7 @@ $("composer").onsubmit = async (e) => {
   const input = $("taskInput");
   const text = input.value.trim();
   // 只有图没有字也允许发 —— 「看看这块刀片崩在哪」经常配一张图
-  if (!text && !state.images.length) return;
+  if (!text && !state.images.length && !state.files.length) return;
   try {
     const segments = parseMentions(text);
     if (segments.length) {
@@ -1034,8 +1069,7 @@ $("composer").onsubmit = async (e) => {
         method: "POST", body: JSON.stringify(payload),
       });
       input.value = "";
-      state.images = [];
-      renderThumbs();
+      clearAttachments();
       state.current = created.session.id;
       state.session = created.session;
       state.messages = created.messages || [];
@@ -1056,11 +1090,11 @@ $("composer").onsubmit = async (e) => {
           task: text,
           model: $("modelSel").value || null,
           images: state.images,
+          files: state.files,
         }),
       });
       input.value = "";
-      state.images = [];
-      renderThumbs();
+      clearAttachments();
       state.current = created.session.id;
       state.session = created.session;
       state.messages = [];
@@ -1070,11 +1104,10 @@ $("composer").onsubmit = async (e) => {
       loadSessions();
     } else {
       await api(`/zkadmin/agent/sessions/${state.current}/messages`, {
-        method: "POST", body: JSON.stringify({ content: text, images: state.images }),
+        method: "POST", body: JSON.stringify({ content: text, images: state.images, files: state.files }),
       });
       input.value = "";
-      state.images = [];
-      renderThumbs();
+      clearAttachments();
       state.messages.push({ seq: 0, role: "user", kind: "task", content: text });
       appendMessageRow(state.messages[state.messages.length - 1]);
       addStepLine();
@@ -1107,98 +1140,148 @@ $("taskInput").addEventListener("input", () => {
 $("taskInput").addEventListener("click", refreshMentionMenu);
 $("taskInput").addEventListener("keyup", refreshMentionMenu);
 
-/* ================= 图片附件 =================
-   三条入口都收成同一种形状：data URL 字符串数组（state.images）。
-   为什么是 data URL 而不是先传文件：/zkadmin 没有文件存储，
-   而 OpenAI 的 image_url part 本来就接受 data URL —— 少一个上传
-   状态机、少一类「传了但没引用」的孤儿文件 Sea。
-   限制与后端 _normalise_images 对齐：单张 10MB、一次最多 8 张。 */
-const IMG_MAX_CHARS = 10 * 1024 * 1024;
-const IMG_MAX = 8;
+/* ================= 附件（图片 + 文件） =================
+   三条入口（点按钮 / 粘贴 / 拖拽）收成同一个形状：state.images 与 state.files。
+   图片走 data URL（OpenAI 的 image_url part 本来就接受），
+   文件走 name + data，后端落盘到 data/agent_uploads/ 并把真实路径写进任务正文。
+   为什么文件不进 prompt：Agent 有读写工具，给它路径比给它全文有用得多。
+   限制与后端 _normalise_images / _store_files 对齐：单个 10MB、一次最多 8 个。 */
+const ATT_MAX_CHARS = 10 * 1024 * 1024;
+const ATT_MAX = 8;
 
-function readImage(file) {
+function readAsDataURL(file) {
   return new Promise((resolve, reject) => {
-    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
-      reject(new Error(`「${file.name}」不是 PNG/JPEG/GIF/WebP，传不了`));
-      return;
-    }
-    if (file.size > IMG_MAX_CHARS) {
-      reject(new Error(`「${file.name}」超过 10MB，传不了`));
-      return;
-    }
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error(`「${file.name}」读不出来`));
+    reader.onerror = () => reject(new Error(file.name + " 读不出来"));
     reader.readAsDataURL(file);
   });
 }
 
-async function addImages(files) {
-  const list = Array.from(files || []).filter((f) => f && f.type.startsWith("image/"));
+function isImage(file) {
+  return /^image\/(png|jpeg|gif|webp)$/.test(file.type);
+}
+
+async function addAttachments(fileList) {
+  const list = Array.from(fileList || []);
   if (!list.length) return;
   for (const file of list) {
-    if (state.images.length >= IMG_MAX) {
-      toast(`一次最多 ${IMG_MAX} 张图片`);
+    if (state.images.length + state.files.length >= ATT_MAX) {
+      toast("一次最多 " + ATT_MAX + " 个附件");
       break;
     }
+    if (file.size > ATT_MAX_CHARS) {
+      toast(file.name + " 超过 10MB，传不了");
+      continue;
+    }
     try {
-      state.images.push(await readImage(file));
+      const data = await readAsDataURL(file);
+      if (isImage(file)) {
+        state.images.push(data);
+      } else {
+        state.files.push({ name: file.name, data: data, size: file.size });
+      }
     } catch (err) {
       toast(err.message);
     }
   }
-  renderThumbs();
+  renderAttachments();
 }
 
+function fileBadge(name) {
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "file";
+  const map = {
+    xlsx: "XLS", xls: "XLS", csv: "CSV", pdf: "PDF", docx: "DOC", doc: "DOC",
+    txt: "TXT", md: "MD", json: "JSON", zip: "ZIP", png: "PNG", jpg: "JPG",
+  };
+  return map[ext] || ext.slice(0, 4).toUpperCase();
+}
 
-function renderThumbs() {
-  const box = $("thumbs");
+function renderAttachments() {
+  const box = $("attachments");
   box.innerHTML = "";
   state.images.forEach((src, i) => {
     const wrap = document.createElement("div");
-    wrap.className = "thumb";
+    wrap.className = "att-thumb";
     const img = document.createElement("img");
     img.src = src;
-    img.alt = `图片 ${i + 1}`;
+    img.alt = "图片 " + (i + 1);
     const x = document.createElement("button");
     x.type = "button";
     x.className = "x";
     x.textContent = "×";
     x.title = "移除这张";
-    x.onclick = () => { state.images.splice(i, 1); renderThumbs(); };
+    x.onclick = () => { state.images.splice(i, 1); renderAttachments(); };
     wrap.appendChild(img);
     wrap.appendChild(x);
     box.appendChild(wrap);
   });
+  state.files.forEach((f, i) => {
+    const chip = document.createElement("div");
+    chip.className = "att-chip";
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = fileBadge(f.name);
+    const label = document.createElement("span");
+    label.className = "name";
+    label.textContent = f.name;
+    label.title = f.name;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.textContent = "×";
+    x.title = "移除这个";
+    x.onclick = () => { state.files.splice(i, 1); renderAttachments(); };
+    chip.appendChild(badge);
+    chip.appendChild(label);
+    chip.appendChild(x);
+    box.appendChild(chip);
+  });
 }
 
+function clearAttachments() {
+  state.images = [];
+  state.files = [];
+  renderAttachments();
+}
 
 $("pickImage").onclick = () => $("imageInput").click();
 $("imageInput").onchange = (e) => {
-  addImages(e.target.files);
+  addAttachments(e.target.files);
+  e.target.value = "";
+};
+
+$("pickFile").onclick = () => $("fileInput").click();
+$("fileInput").onchange = (e) => {
+  addAttachments(e.target.files);
   e.target.value = "";
 };
 
 
-// 粘贴：从截图工具 / 浏览器复制来的图
-$("taskInput").addEventListener("paste", (e) => {
+function clipboardFiles(e) {
+  const out = [];
   const items = e.clipboardData && e.clipboardData.items;
-  if (!items) return;
-  const files = [];
-  for (const item of items) {
-    if (item.kind === "file" && item.type.startsWith("image/")) {
-      const f = item.getAsFile();
-      if (f) files.push(f);
+  if (items) {
+    for (const item of items) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) out.push(f);
+      }
     }
   }
+  return out;
+}
+
+$("taskInput").addEventListener("paste", (e) => {
+  const files = clipboardFiles(e).filter(isImage);
   if (files.length) {
     e.preventDefault();
-    addImages(files);
+    addAttachments(files);
   }
 });
 
 
-// 拖拽：整个表单区域接收
 const composerEl = $("composer");
 composerEl.addEventListener("dragover", (e) => {
   if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
@@ -1210,10 +1293,10 @@ composerEl.addEventListener("dragleave", () => composerEl.classList.remove("drop
 composerEl.addEventListener("drop", (e) => {
   if (!e.dataTransfer) return;
   const files = Array.from(e.dataTransfer.files || []);
-  if (files.some((f) => f.type.startsWith("image/"))) {
+  if (files.length) {
     e.preventDefault();
     composerEl.classList.remove("drop");
-    addImages(files);
+    addAttachments(files);
   }
 });
 

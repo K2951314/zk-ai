@@ -20,6 +20,8 @@ except the loop of a session that was mid-flight (marked ``interrupted``).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import re
 import time
@@ -166,6 +168,7 @@ class AgentService:
         parent_session: str | None = None,
         depth: int = 1,
         images: list[str] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         resolved_model = model or self.settings.agent_default_model
         ws = self._resolve_workspace(workspace)
@@ -174,9 +177,14 @@ class AgentService:
         await self.repo.create_session(
             session_id=session_id, title=title, model=resolved_model, workspace=str(ws)
         )
+        # 文件先落盘，再把路径写进任务正文 —— Agent 拿路径就能自己读
+        stored = _store_files(files, data_dir=self.settings.resolved_data_dir,
+                              session_id=session_id)
+        if stored:
+            task = f"{task}{_describe_files(stored)}"
         await self.repo.add_message(
             session_id, role="user", kind="task", content=task,
-            data=_image_data(images),
+            data=_attachment_data(images, stored),
         )
         run = _Running(
             session_id=session_id,
@@ -192,7 +200,11 @@ class AgentService:
         return {"session": await self.repo.get_session(session_id), "messages": []}
 
     async def followup(
-        self, session_id: str, content: str, images: list[str] | None = None
+        self,
+        session_id: str,
+        content: str,
+        images: list[str] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         row = await self.repo.get_session(session_id)
         if row is None:
@@ -207,9 +219,13 @@ class AgentService:
         run = _Running(session_id=session_id, workspace=Path(row["workspace"]),
                        model=row["model"], cli_registry=load_cli_registry(self.settings))
         self._running[session_id] = run
+        stored = _store_files(files, data_dir=self.settings.resolved_data_dir,
+                              session_id=session_id)
+        if stored:
+            content = f"{content}{_describe_files(stored)}"
         await self.repo.add_message(
             session_id, role="user", kind="task", content=content,
-            data=_image_data(images),
+            data=_attachment_data(images, stored),
         )
         await self.repo.update_status(session_id, "running", error=None)
         self._spawn(run, resume=True)
@@ -1224,10 +1240,119 @@ def _normalise_images(images: list[str] | None) -> list[str]:
     return cleaned
 
 
-def _image_data(images: list[str] | None) -> dict[str, Any] | None:
-    """落库用的 ``data`` 片段：没有图就返回 None（保持老行的形状不变）。"""
-    kept = _normalise_images(images)
-    return {"images": kept} if kept else None
+def _attachment_data(
+    images: list[str] | None, files: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
+    """落库用的 ``data`` 片段：没有附件就返回 None（保持老行的形状不变）。
+
+    图片和文件分开存：图片要还原成 content parts 发上游，
+    文件是**落盘后的路径**，只作记录（正文里已经写了给 Agent 看的那份）。
+    """
+    kept_images = _normalise_images(images)
+    data: dict[str, Any] = {}
+    if kept_images:
+        data["images"] = kept_images
+    if files:
+        data["files"] = files
+    return data or None
+
+
+#: 上传文件的落盘目录（相对 data_dir）。**故意不写进 agent 工作区** ——
+#: 那里是代码目录，混进用户传的 xlsx/pdf 会让 git status 变脏、也会被
+#: Agent 的文件列表工具扫到。放 data/ 下既能被路径读到，又不污染工程。
+_UPLOAD_DIR_NAME = "agent_uploads"
+#: 单个文件上限。跟图片一致（10MB），理由也一样：/v1 那条路的字节闸就是这个数
+_MAX_FILE_BYTES = 10 * 1024 * 1024
+_MAX_FILES = 8
+
+#: 换行符常量。写成 ``"\n"`` 字面量在通过 heredoc 生成时会被吃掉反斜杠，
+#: 变成一个真实换行、把字符串字面量劈成两半（本项目已经栽过四次）。
+_NEWLINE = chr(10)
+
+
+def _uploads_dir(data_dir: Path) -> Path:
+    target = Path(data_dir) / _UPLOAD_DIR_NAME
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _safe_name(raw: str) -> str:
+    """只留文件名本体，去掉任何路径成分 —— 防 ``../../etc/passwd`` 这类取名。"""
+    name = Path(str(raw or "")).name
+    name = re.sub(r"[^\w.\-一-鿿]+", "_", name).strip("._")
+    return name or "file"
+
+
+def _store_files(
+    files: list[dict[str, Any]] | None, *, data_dir: Path, session_id: str
+) -> list[dict[str, Any]]:
+    """把前端送来的文件落到 ``data/agent_uploads/<session>/``，返回落盘清单。
+
+    为什么落盘而不是把内容塞进消息（2026-11-05）：Agent 有读写文件的工具，
+    给它一个**真实路径**比把二进制塞进 prompt 有用得多——它能自己决定
+    读哪一段、跑什么命令处理。所以这里只负责「文件在磁盘上、路径告诉它」，
+    不做任何内容解读。
+
+    形状约定（前端照此构造）::
+
+        {"name": "报价单.xlsx", "data": "data:application/...;base64,...."}
+
+    ``data`` 也接受已经落过盘的相对路径（``path``），便于将来复用。
+    """
+    if not files:
+        return []
+    if len(files) > _MAX_FILES:
+        raise ZKAIError(f"一次最多 {_MAX_FILES} 个文件", http_status=400)
+    target_dir = _uploads_dir(data_dir) / _safe_name(session_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stored: list[dict[str, Any]] = []
+    for index, item in enumerate(files, 1):
+        if not isinstance(item, dict):
+            raise ZKAIError(f"第 {index} 个文件描述不合法", http_status=400)
+        name = _safe_name(str(item.get("name") or f"file-{index}"))
+        raw = str(item.get("data") or "").strip()
+        if not raw:
+            raise ZKAIError(f"第 {index} 个文件（{name}）没有内容", http_status=400)
+        marker = ";base64,"
+        is_data_url = raw.startswith("data:") and marker in raw
+        # 裸 base64 也接受 —— 前端偶尔会省掉 mime 头
+        payload = raw.split(marker, 1)[1] if is_data_url else raw
+        try:
+            blob = base64.b64decode(payload, validate=False)
+        except (ValueError, binascii.Error) as exc:
+            raise ZKAIError(f"第 {index} 个文件（{name}）不是合法的 base64",
+                            http_status=400) from exc
+        if len(blob) > _MAX_FILE_BYTES:
+            raise ZKAIError(
+                f"第 {index} 个文件（{name}）超过 {_MAX_FILE_BYTES // 1024 // 1024}MB",
+                http_status=400,
+            )
+        # 同名文件不覆盖：加序号，避免第二次上传把第一次的抹掉
+        destination = target_dir / name
+        stem, suffix = destination.stem, destination.suffix
+        counter = 2
+        while destination.exists():
+            destination = target_dir / f"{stem}-{counter}{suffix}"
+            counter += 1
+        destination.write_bytes(blob)
+        stored.append({"name": name, "path": str(destination), "bytes": len(blob)})
+    return stored
+
+
+def _describe_files(files: list[dict[str, Any]] | None) -> str:
+    """把落盘清单拼成一段给 Agent 看的说明，追加在任务正文后面。
+
+    用**绝对路径**是有意的：Agent 的工作区可能不是 data/，
+    相对路径会指错地方；而它本来就有读任意路径的权限。
+    """
+    if not files:
+        return ""
+    lines = ["", "", "[附件] 以下文件已存到本机，可直接读取："]
+    for item in files:
+        size = int(item.get("bytes") or 0)
+        shown = f"{size / 1024:.0f} KB" if size >= 1024 else f"{size} B"
+        lines.append(f"- {item['path']}（{shown}，原名 {item['name']}）")
+    return _NEWLINE.join(lines)
 
 
 def _user_content(text: str | None, data: dict[str, Any] | None) -> str | list[dict[str, Any]]:
