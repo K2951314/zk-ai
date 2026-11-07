@@ -1,0 +1,26 @@
+[
+ {
+  "model": "deepseek-flash",
+  "size": 22000,
+  "depth": 0.5,
+  "ok": null,
+  "err": "exhausted retries"
+ },
+ {
+  "model": "deepseek-flash",
+  "size": 30000,
+  "depth": 0.5,
+  "ok": true,
+  "prompt_tokens": 21180,
+  "latency": 1.6185166835784912,
+  "tok_s": 38.30667958449454,
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "size": 30000,
+  "depth": 0.5,
+  "ok": null,
+  "err": "exhausted retries"
+ }
+]

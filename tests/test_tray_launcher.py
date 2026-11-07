@@ -359,6 +359,100 @@ def test_stop_start_requests_control_burner(tmp_path: Path, monkeypatch) -> None
     assert tray._child.starts >= 1
 
 
+def test_autostart_command_uses_gui_interpreter(monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    monkeypatch.setattr(tray_launcher, "_child_interpreter", lambda: (PYW, {}))
+    monkeypatch.setattr(tray_launcher, "_ROOT", Path(r"D:\zk ai"))
+    command = tray_launcher.autostart_command()
+    assert command[0] == str(PYW)
+    assert command[1].endswith("tray_launcher.py")
+    assert command[2] == "gateway"
+
+
+def test_quote_only_when_path_has_spaces() -> None:
+    from scripts import tray_launcher
+
+    assert tray_launcher._quote(r"C:\a\b") == r"C:\a\b"
+    assert tray_launcher._quote(r"C:\a b\c") == '"C:\\a b\\c"'
+
+
+def _env_with_token(name: str, default: str) -> str:
+    return {"ZKAI_ADMIN_TOKEN": "占位令牌", "ZKAI_PORT": "8317"}.get(name, default)
+
+
+class _FakeHttpResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> _FakeHttpResponse:
+        return self
+
+    def __exit__(self, *args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_pending_approvals_filters_waiting(monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    body = (
+        b'{"sessions":[{"id":"1","title":"\xe7\xad\x89\xe5\xae\xa1\xe6\x89\xb9",'
+        b'"status":"waiting_approval"},{"id":"2","title":"\xe8\xb7\x91\xe7\x9d\x80",'
+        b'"status":"running"}]}'
+    )
+    monkeypatch.setattr(tray_launcher, "_env_or_default", _env_with_token)
+    monkeypatch.setattr(
+        tray_launcher.urllib.request, "urlopen", lambda *a, **k: _FakeHttpResponse(body)
+    )
+    items = tray_launcher.pending_approvals()
+    assert [item["id"] for item in items] == ["1"]
+
+
+def test_pending_approvals_silent_on_error(monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    def boom(*args, **kwargs):
+        raise OSError("网关没开")
+
+    monkeypatch.setattr(tray_launcher, "_env_or_default", _env_with_token)
+    monkeypatch.setattr(tray_launcher.urllib.request, "urlopen", boom)
+    assert tray_launcher.pending_approvals() == []
+
+
+def test_pending_approvals_without_token(monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    monkeypatch.setattr(tray_launcher, "_env_or_default", lambda name, default: default)
+    assert tray_launcher.pending_approvals() == []
+
+
+def test_notify_only_new_approvals(monkeypatch) -> None:
+    from scripts import tray_launcher
+
+    launcher = _make("gateway")
+    calls: list[tuple[str, str]] = []
+
+    class _FakeIcon:
+        def notify(self, message: str, title: str) -> None:
+            calls.append((message, title))
+
+    launcher._icon = _FakeIcon()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        tray_launcher,
+        "pending_approvals",
+        lambda: [{"id": "1", "title": "等你拍板"}],
+    )
+    launcher._last_approval_poll = 0.0
+    launcher._poll_approvals()
+    launcher._last_approval_poll = 0.0
+    launcher._poll_approvals()
+    assert len(calls) == 1, "同一个待审批任务只应提醒一次"
+    assert calls[0][1] == "有任务等你拍板"
+
+
 def test_restart_request_is_ignored_in_gateway_mode(tmp_path: Path, monkeypatch) -> None:
     from scripts import tray_launcher
 

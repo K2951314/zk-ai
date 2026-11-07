@@ -36,6 +36,12 @@ class CliResult:
     failure: FailureKind | None = None
     elapsed: float = 0.0
     exit_code: int | None = None
+    #: 上游自报用量（拿不到就是 None，**不要用估算值冒充**）。
+    #: 这些字段是"这个执行体到底烧了多少"的唯一客观口径：网关侧有牌价，
+    #: CLI 侧没有价目表，只能靠调用后自报的成本累计出实测均价。
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
 
 
 #: 「未登录」特征：各工具报错文案不同，逐个收录实测形态
@@ -165,10 +171,21 @@ class CliAdapter:
             text = text[:MAX_OUTPUT] + f"\n…(输出已截断，共 {len(text)} 字符)"
         return text
 
+    def parse_usage(self, stdout: str, stderr: str) -> tuple[int | None, int | None, float | None]:
+        """从输出里抽 ``(输入 token, 输出 token, 自报成本 USD)``。
+
+        默认全 None：**拿不到就明确说拿不到**，不用字数估算冒充真实用量——
+        价格/额度判断一旦建立在估算上，就等于没有账本。子类按自己的
+        输出格式覆盖（目前只有 CodeBuddy 的 ``--output-format json`` 会给）。
+        """
+        return None, None, None
+
 
 def build_adapter(config: CliToolConfig) -> CliAdapter:
-    """按执行体名挑适配器；未专门实现的走通用封装。"""
-    from app.services.agent.cli.adapters import ADAPTERS, GenericAdapter
+    """按后端形态与执行体名挑适配器；未专门实现的走通用封装。"""
+    from app.services.agent.cli.adapters import ADAPTERS, GenericAdapter, McpAdapter
 
+    if config.backend == "mcp":
+        return McpAdapter(config)
     cls = ADAPTERS.get(config.name, GenericAdapter)
     return cls(config)

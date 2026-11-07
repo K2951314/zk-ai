@@ -97,6 +97,41 @@ models:
         context_window: 1000000
 
   # -------------------------------------------------------------------------
+  # SenseNova 6.8 Flash —— 商汤旗舰多模态智能体（1M）
+  #   官方文档：1M 上下文、max_tokens 默认 64K 上限 128K、
+  #   reasoning_effort = minimal/low/medium/high/xhigh/max（默认 high）。
+  #   ⚠ 商汤 /v1/models 目录报 context_length=262144，那是旧值——
+  #     2026-11-04 实测 1,047,678 prompt tokens 正常返回，别按目录配。
+  #   ⚠ 思考不可真正关闭：传 none/thinking.type=disabled 不报错，
+  #     但思考会泄进 content（开头是 Here's a thinking process: 一类独白）。
+  #   ⚠ 思考 token 与正文共享 max_tokens，预算给小了 = 只有思考没有正文。
+  # -------------------------------------------------------------------------
+  - id: sensenova-6.8-flash
+    display_name: 商汤 6.8 Flash
+    enabled: true
+    context_window: 1048576
+    capabilities:
+      coding: 8.0
+      reasoning: 8.0
+      tool_use: 8.0
+      vision: 9.0
+      long_context: 10.0
+      structured_output: 8.0
+      speed: 8.0
+      cost: 10.0
+    deployments:
+      - id: sen68-flash-sensenova
+        provider_id: sensenova
+        model: sensenova-6.8-flash
+        priority: 110
+        context_window: 1048576
+        max_output_tokens: 65536
+        reasoning_effort: high
+        reasoning_efforts: [minimal, low, medium, high, xhigh, max]
+        reasoning_effort_default: high
+    description: 商汤新一代多模态智能体：长程任务执行 + 长期记忆，1M 上下文
+
+  # -------------------------------------------------------------------------
   # SenseNova 6.8 Flash Lite —— 看图 / OCR / 图表解读（256K）
   # -------------------------------------------------------------------------
   - id: sensenova-6.8-flash-lite

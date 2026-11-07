@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务空间 · ZK-AI</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f5;
+    --border: #e3e8ee; --border-strong: #d3dae3;
+    --text: #1a2230; --text-2: #4a5666; --muted: #7a8798;
+    --accent: #2563eb; --accent-soft: #eff4ff;
+    --ok: #15803d; --ok-soft: #ecfdf3;
+    --warn: #b45309; --warn-soft: #fffbeb;
+    --err: #b91c1c; --err-soft: #fef2f2;
+    --radius: 10px; --radius-sm: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1218; --panel: #161b24; --panel-2: #1d232e;
+      --border: #2a323f; --border-strong: #3a4453;
+      --text: #e7edf4; --text-2: #b8c3d1; --muted: #8794a6;
+      --accent: #5b9cff; --accent-soft: rgba(91, 156, 255, .12);
+      --ok: #4ade80; --ok-soft: rgba(74, 222, 128, .10);
+      --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .10);
+      --err: #f87171; --err-soft: rgba(248, 113, 113, .10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+          "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header .logo {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center; font-size: 16px;
+  }
+  h1 { margin: 0; font-size: 15px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .spacer { flex: 1; }
+  .btn {
+    border: 1px solid var(--border-strong); background: var(--panel);
+    color: var(--text); border-radius: var(--radius-sm);
+    padding: 6px 12px; font: inherit; cursor: pointer; text-decoration: none;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+  .btn.danger { color: var(--err); border-color: var(--err); }
+  main { padding: 18px 20px 40px; max-width: 1000px; width: 100%; margin: 0 auto; }
+  .list { display: grid; gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px;
+  }
+  .row { display: flex; align-items: flex-start; gap: 12px; }
+  .grow { flex: 1; min-width: 0; }
+  .goal { font-size: 14px; font-weight: 600; word-break: break-all; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+  .pill {
+    flex: none; border-radius: 999px; padding: 2px 10px; font-size: 12px;
+    border: 1px solid transparent;
+  }
+  .pill.ok { color: var(--ok); background: var(--ok-soft); }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .detail {
+    margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border);
+    color: var(--text-2); font-size: 12px;
+  }
+  .detail ul { margin: 4px 0 10px; padding-left: 18px; }
+  .empty {
+    background: var(--panel); border: 1px dashed var(--border-strong);
+    border-radius: var(--radius); padding: 32px; text-align: center;
+    color: var(--muted);
+  }
+  .empty.error { color: var(--err); background: var(--err-soft); }
+  .usage {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px;
+  }
+  .usage h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+  .usage-row {
+    display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px;
+  }
+  .usage-row .ok { color: var(--ok); }
+  .usage-row .bad { color: var(--err); }
+  .muted { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">📁</div>
+  <div>
+    <h1>任务空间</h1>
+    <div class="sub">每个任务一个独立文件夹，AI 只在这里动手，主目录不会被改。</div>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn" onclick="loadList()">刷新</button>
+  <a class="btn" href="/ui/agent">返回任务台</a>
+</header>
+<main>
+  <section class="usage">
+    <h2>最近工具调用</h2>
+    <div id="usage"><div class="muted">正在读取…</div></div>
+  </section>
+  <div id="list" class="list"><div class="empty">正在读取…</div></div>
+</main>
+<script>
+const TOKEN = localStorage.getItem("zkai_admin_token") || "";
+const listEl = document.getElementById("list");
+
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+  });
+}
+
+function timeText(stamp) {
+  if (!stamp) return "—";
+  const date = new Date(Number(stamp) * 1000);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+async function api(path, options) {
+  const opts = options || {};
+  const headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
+  const res = await fetch(path, Object.assign({}, opts, { headers: headers }));
+  if (!res.ok) {
+    let detail = "";
+    try { detail = await res.text(); } catch (err) { detail = ""; }
+    throw new Error(detail || ("请求失败，状态码 " + res.status));
+  }
+  return res.json();
+}
+
+function card(item) {
+  const lease = item.lease || {};
+  const owner = lease.owner ? String(lease.owner) : "";
+  const badge = owner
+    ? '<span class="pill warn">占用中</span>'
+    : '<span class="pill ok">空闲</span>';
+  const releaseBtn = owner
+    ? '<button class="btn small danger" onclick="releaseSpace(\'' + item.task_id + '\')">释放占用</button>'
+    : "";
+  return '<article class="card">'
+    + '<div class="row"><div class="grow">'
+    + '<div class="goal">' + (esc(item.goal) || "（没有写目标）") + '</div>'
+    + '<div class="meta">编号 ' + esc(item.task_id)
+    + ' · 创建 ' + timeText(item.created_at)
+    + ' · 步骤 ' + esc(item.steps)
+    + ' · 产物 ' + esc(item.artifacts) + '</div>'
+    + '</div>' + badge + '</div>'
+    + '<div class="actions">'
+    + '<button class="btn small" onclick="showDetail(\'' + item.task_id + '\')">查看进度</button>'
+    + '<button class="btn small" onclick="openFolder(\'' + item.task_id + '\')">打开文件夹</button>'
+    + releaseBtn
+    + '</div>'
+    + '<div class="detail" id="detail-' + item.task_id + '" hidden></div>'
+    + '</article>';
+}
+
+async function showDetail(taskId) {
+  const box = document.getElementById("detail-" + taskId);
+  if (!box) return;
+  if (!box.hidden) { box.hidden = true; return; }
+  box.hidden = false;
+  box.textContent = "正在读取进度…";
+  try {
+    const data = await api("/zkadmin/agent/taskspaces/" + encodeURIComponent(taskId));
+    const space = data.taskspace || {};
+    const steps = Array.isArray(space.steps) ? space.steps : [];
+    const artifacts = Array.isArray(space.artifacts) ? space.artifacts : [];
+    const stepHtml = steps.length
+      ? steps.map(function (step) {
+          const line = [step.status, step.by, step.artifact || step.note]
+            .filter(Boolean).map(esc).join(" · ");
+          return "<li>" + line + "</li>";
+        }).join("")
+      : "<li>还没有步骤记录</li>";
+    const artifactHtml = artifacts.length
+      ? artifacts.map(function (item) { return "<li>" + esc(item) + "</li>"; }).join("")
+      : "<li>还没有产物</li>";
+    box.innerHTML = '<div><b>交接说明</b>：' + (esc(space.handoff_brief) || "（暂无）") + '</div>'
+      + '<div><b>步骤</b><ul>' + stepHtml + '</ul></div>'
+      + '<div><b>产物</b><ul>' + artifactHtml + '</ul></div>';
+  } catch (err) {
+    box.textContent = "读取失败：" + err.message;
+  }
+}
+
+async function openFolder(taskId) {
+  try {
+    await api("/zkadmin/agent/taskspaces/" + encodeURIComponent(taskId) + "/open", { method: "POST" });
+  } catch (err) {
+    alert("打开文件夹失败：" + err.message);
+  }
+}
+
+async function releaseSpace(taskId) {
+  if (!confirm("确定要释放这个任务的占用吗？只有确认执行体已经停了才需要这样做。")) return;
+  try {
+    const data = await api("/zkadmin/agent/taskspaces/" + encodeURIComponent(taskId) + "/release", { method: "POST" });
+    alert(data.released ? ("已释放，原占用者是 " + (data.owner || "未知")) : "这个任务本来就没有被占用。");
+    loadList();
+  } catch (err) {
+    alert("释放失败：" + err.message);
+  }
+}
+
+async function loadUsage() {
+  const box = document.getElementById("usage");
+  try {
+    const data = await api("/zkadmin/agent/mcp-usage?limit=8");
+    const rows = data.recent || [];
+    if (!rows.length) {
+      box.innerHTML = '<div class="muted">还没有调用记录。AI 用编辑器工具后这里会出现。</div>';
+      return;
+    }
+    box.innerHTML = rows.map(function (row) {
+      const mark = row.ok
+        ? '<span class="ok">成功</span>'
+        : '<span class="bad">失败</span>';
+      const cost = Number(row.elapsed || 0).toFixed(2) + " 秒";
+      return '<div class="usage-row">' + mark
+        + '<b>' + esc(row.tool) + '</b>'
+        + '<span class="muted">' + cost + ' · ' + timeText(row.ts) + '</span>'
+        + '</div>';
+    }).join("");
+  } catch (err) {
+    box.innerHTML = '<div class="muted">读取失败：' + esc(err.message) + '</div>';
+  }
+}
+
+async function loadList() {
+  loadUsage();
+  listEl.innerHTML = '<div class="empty">正在读取…</div>';
+  try {
+    const data = await api("/zkadmin/agent/taskspaces");
+    const items = data.taskspaces || [];
+    if (!items.length) {
+      listEl.innerHTML = '<div class="empty">还没有任务空间。让 AI 干一次活，它会自动创建。</div>';
+      return;
+    }
+    listEl.innerHTML = items.map(card).join("");
+  } catch (err) {
+    listEl.innerHTML = '<div class="empty error">读取失败：' + esc(err.message) + '</div>';
+  }
+}
+
+loadList();
+</script>
+</body>
+</html>

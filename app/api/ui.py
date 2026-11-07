@@ -20,6 +20,8 @@ _INDEX = _WEB / "index.html"
 _AGENT = _WEB / "agent.html"
 _REPORT = _WEB / "report.html"
 _EVENTS = _WEB / "events.html"
+_TASKSPACES = _WEB / "taskspaces.html"
+_MODELS = _WEB / "models.html"
 
 #: CSS/JS companions for ``index.html`` (split out so the browser can cache them
 #: independently and the HTML shell stays under 1k lines).
@@ -27,6 +29,11 @@ _STATIC_ASSETS: dict[str, tuple[str, str]] = {
     "console.css": ("text/css; charset=utf-8", "console.css"),
     "console.js": ("application/javascript; charset=utf-8", "console.js"),
 }
+
+#: 控制台是本地运维页，页面/脚本都很小但改动频繁。默认不带缓存头时浏览器会
+#: 自行启发式缓存，重启网关甚至重新登录后仍拿旧的 index.html / console.js，
+#: 表现为「刚加的入口和引导怎么都看不见」（2026-11-07 实测）。统一禁用缓存。
+_NO_STORE = {"Cache-Control": "no-store, max-age=0"}
 
 
 @router.get("/ui", include_in_schema=False, response_class=HTMLResponse)
@@ -39,7 +46,7 @@ async def console() -> HTMLResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "控制台页面文件缺失"}},
         ) from exc
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=_NO_STORE)
 
 
 # IMPORTANT: /ui/agent and /ui/report must be registered BEFORE /ui/{asset},
@@ -54,7 +61,7 @@ async def agent_console() -> HTMLResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "Agent 任务台页面文件缺失"}},
         ) from exc
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=_NO_STORE)
 
 
 @router.get("/ui/report", include_in_schema=False, response_class=HTMLResponse)
@@ -72,7 +79,7 @@ async def health_report() -> HTMLResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "体检页面文件缺失"}},
         ) from exc
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=_NO_STORE)
 
 
 @router.get("/ui/events", include_in_schema=False, response_class=HTMLResponse)
@@ -89,7 +96,40 @@ async def events_console() -> HTMLResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "事件流页面文件缺失"}},
         ) from exc
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=_NO_STORE)
+
+
+@router.get("/ui/taskspaces", include_in_schema=False, response_class=HTMLResponse)
+async def taskspace_console() -> HTMLResponse:
+    """任务空间页面：每个任务一个文件夹，看得见进度、能打开目录。
+
+    与其它页面一样只发静态外壳；任务数据走 ``/zkadmin/agent/taskspaces``，
+    仍由 ``require_admin`` 保护。
+    """
+    try:
+        html = _TASKSPACES.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - file ships with the package
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": {"message": "任务空间页面文件缺失"}},
+        ) from exc
+    return HTMLResponse(html, headers=_NO_STORE)
+
+
+@router.get("/ui/models", include_in_schema=False, response_class=HTMLResponse)
+async def models_console() -> HTMLResponse:
+    """模型与价格页面：每个工具能调哪些模型、分别什么价（来源逐条标明）。
+
+    数据走 ``/zkadmin/agent/model-inventory``，仍由 ``require_admin`` 保护。
+    """
+    try:
+        html = _MODELS.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - file ships with the package
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": {"message": "模型与价格页面文件缺失"}},
+        ) from exc
+    return HTMLResponse(html, headers=_NO_STORE)
 
 
 @router.get("/ui/{asset}", include_in_schema=False)
@@ -107,7 +147,7 @@ async def console_asset(asset: str) -> PlainTextResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "控制台静态资源缺失"}},
         ) from exc
-    return PlainTextResponse(body, media_type=media_type)
+    return PlainTextResponse(body, media_type=media_type, headers=_NO_STORE)
 
 
 __all__ = ["router"]

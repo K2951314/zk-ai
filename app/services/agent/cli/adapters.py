@@ -33,9 +33,12 @@ class QwenAdapter(CliAdapter):
                 "--openai-base-url", cfg.base_url or _DEFAULT_GATEWAY_URL,
                 "--openai-api-key", cfg.api_key or _DEFAULT_GATEWAY_KEY,
             ]
+        # qwen 的 --approval-mode 只接受 plan/default，没有绕过档；
+        # 统一权限的 bypass 只能降级为 default（它自身没有更宽的档位）。
+        mode = "plan" if cfg.approval_mode == "plan" else "default"
         argv += [
             "-m", cfg.model,
-            "--approval-mode", cfg.approval_mode,
+            "--approval-mode", mode,
             task,
         ]
         return argv
@@ -81,7 +84,10 @@ class CodexAdapter(CliAdapter):
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
         argv = [cfg.command, "exec", "--skip-git-repo-check", "-m", cfg.model]
-        if cfg.approval_mode == "plan":
+        if cfg.approval_mode == "bypass":
+            # 统一权限：任务空间内放行，沙箱与审批一起关
+            argv.append("--dangerously-bypass-approvals-and-sandbox")
+        elif cfg.approval_mode == "plan":
             argv += ["-s", "read-only"]
         argv.append(task)
         return argv
@@ -101,7 +107,11 @@ class QoderAdapter(CliAdapter):
     DEVNULL，结果只能挂到超时（一次委派白等 300 秒，比失败更糟）。
     """
 
-    _PERMISSION: ClassVar[dict[str, str]] = {"plan": "dont_ask", "default": "default"}
+    _PERMISSION: ClassVar[dict[str, str]] = {
+        "plan": "dont_ask",
+        "default": "default",
+        "bypass": "bypass_permissions",
+    }
 
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
@@ -131,12 +141,20 @@ class CodeBuddyAdapter(CliAdapter):
     桌面端已登录也会报 Authentication required）。
     """
 
+    #: 统一权限的 bypass 映射到它自己的 bypassPermissions（词表大小写不同）
+    _PERMISSION: ClassVar[dict[str, str]] = {
+        "plan": "plan",
+        "default": "default",
+        "bypass": "bypassPermissions",
+    }
+
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
+        mode = self._PERMISSION.get(cfg.approval_mode, "default")
         argv = [
             cfg.command,
             "--model", cfg.model,
-            "--permission-mode", cfg.approval_mode,
+            "--permission-mode", mode,
             "--output-format", "json",
         ]
         if cfg.effort:
@@ -182,6 +200,27 @@ class CodeBuddyAdapter(CliAdapter):
         return body
 
 
+    def parse_usage(self, stdout: str, stderr: str) -> tuple[int | None, int | None, float | None]:
+        """把 result 事件里的 usage / total_cost_usd 抽成结构化字段。
+
+        这是「免费档到底烧了多少」的唯一客观口径：CLI 侧没有价目表，
+        只能靠每次调用自报的成本累计出实测均价。
+        """
+        payload = _codebuddy_result_event((stdout or "").strip())
+        if payload is None:
+            return None, None, None
+        tokens_in = tokens_out = None
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            raw_in, raw_out = usage.get("input_tokens"), usage.get("output_tokens")
+            if isinstance(raw_in, int):
+                tokens_in = raw_in
+            if isinstance(raw_out, int):
+                tokens_out = raw_out
+        cost = payload.get("total_cost_usd")
+        cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+        return tokens_in, tokens_out, cost_usd
+
     def fatal_output(self, stdout: str, stderr: str) -> FailureKind | None:
         """未登录时 codebuddy 退出码 0、只吐一行纯文本（2.176.0 实测）。
 
@@ -211,13 +250,21 @@ class GeminiAdapter(CliAdapter):
     ``effort`` 与 ``context_window`` 对这条执行体无效。
     """
 
+    #: 统一权限的 bypass 映射到 Gemini 自己的 yolo 档（它没有名为 bypass 的档位）
+    _APPROVAL: ClassVar[dict[str, str]] = {
+        "plan": "plan",
+        "default": "default",
+        "bypass": "yolo",
+    }
+
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
+        mode = self._APPROVAL.get(cfg.approval_mode, "default")
         return [
             cfg.command,
             "-p", task,
             "-m", cfg.model,
-            "--approval-mode", cfg.approval_mode,
+            "--approval-mode", mode,
             "-o", "json",
         ]
 
@@ -300,6 +347,32 @@ def _sum_token_stats(stats: object) -> tuple[int | None, int | None]:
     if not seen:
         return None, None
     return total_in, total_out
+
+
+class McpAdapter(CliAdapter):
+    """MCP 执行体：不拉子进程，由 runner 直接发 HTTP JSON-RPC。
+
+    只负责审批预览；真正的调用在 ``runner._run_mcp`` 里，避免把
+    「起进程读 stdout」那套逻辑套到 MCP 上。
+    """
+
+    def build_command(self, task: str, cwd: str) -> list[str]:
+        raise NotImplementedError("MCP 执行体不走子进程")
+
+    def preview(self, task: str, cwd: str) -> str:
+        tier_zh = {"free": "免费", "cheap": "低价", "paid": "收费"}[self.config.cost_tier]
+        args = json.dumps(self.config.mcp_args, ensure_ascii=False)
+        if len(args) > 300:
+            args = args[:300] + "…"
+        return (
+            f"委派给 MCP 执行体 {self.config.name}\n"
+            f"服务：{self.config.mcp_url}\n"
+            f"工具：{self.config.mcp_tool}（{tier_zh}档）\n"
+            f"参数模板：{args}\n"
+            f"工作目录：{cwd}\n"
+            f"超时上限：{int(self.config.timeout)}s\n\n"
+            f"任务内容：\n{task}"
+        )
 
 
 class GenericAdapter(CliAdapter):

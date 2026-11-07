@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型与价格 · ZK-AI</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f5;
+    --border: #e3e8ee; --border-strong: #d3dae3;
+    --text: #1a2230; --text-2: #4a5666; --muted: #7a8798;
+    --accent: #2563eb; --accent-soft: #eff4ff;
+    --ok: #15803d; --ok-soft: #ecfdf3;
+    --warn: #b45309; --warn-soft: #fffbeb;
+    --err: #b91c1c; --err-soft: #fef2f2;
+    --radius: 10px; --radius-sm: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1218; --panel: #161b24; --panel-2: #1d232e;
+      --border: #2a323f; --border-strong: #3a4453;
+      --text: #e7edf4; --text-2: #b8c3d1; --muted: #8794a6;
+      --accent: #5b9cff; --accent-soft: rgba(91, 156, 255, .12);
+      --ok: #4ade80; --ok-soft: rgba(74, 222, 128, .10);
+      --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .10);
+      --err: #f87171; --err-soft: rgba(248, 113, 113, .10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+          "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header .logo {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center; font-size: 16px;
+  }
+  h1 { margin: 0; font-size: 15px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .spacer { flex: 1; }
+  .btn {
+    border: 1px solid var(--border-strong); background: var(--panel);
+    color: var(--text); border-radius: var(--radius-sm);
+    padding: 6px 12px; font: inherit; cursor: pointer; text-decoration: none;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  main { padding: 18px 20px 40px; max-width: 1100px; width: 100%; margin: 0 auto; }
+  .summary {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px;
+  }
+  .summary h2 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .summary .line { color: var(--text-2); font-size: 12px; }
+  .summary .line + .line { margin-top: 3px; }
+  section.group { margin-bottom: 22px; }
+  .group-head {
+    display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px;
+  }
+  .group-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
+  .group-head .desc { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border);
+    font-size: 12px; vertical-align: top; }
+  th { background: var(--panel-2); font-weight: 600; color: var(--text-2); }
+  tr:last-child td { border-bottom: none; }
+  td.name { font-weight: 600; word-break: break-all; }
+  td.name .sub { display: block; font-weight: 400; }
+  .pill {
+    display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 11px;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); background: var(--ok-soft); }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); }
+  .pill.err { color: var(--err); background: var(--err-soft); }
+  .pill.muted { color: var(--muted); background: var(--panel-2); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .empty {
+    background: var(--panel); border: 1px dashed var(--border-strong);
+    border-radius: var(--radius); padding: 32px; text-align: center;
+    color: var(--muted);
+  }
+  .empty.error { color: var(--err); background: var(--err-soft); }
+  details.raw { margin-top: 10px; }
+  details.raw pre { max-height: 320px; overflow: auto; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">💲</div>
+  <div>
+    <h1>模型与价格</h1>
+    <div class="sub">每个工具能调哪些模型、分别什么价；价格来源逐条标明，不估算。</div>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn" onclick="load()">刷新</button>
+  <a class="btn" href="/ui/agent">返回任务台</a>
+</header>
+<main>
+  <section class="summary">
+    <h2>总览</h2>
+    <div id="summary" class="line muted">正在读取…</div>
+  </section>
+  <div id="body"><div class="empty">正在读取…</div></div>
+</main>
+<script>
+const TOKEN = localStorage.getItem("zkai_admin_token") || "";
+
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+  });
+}
+
+async function api(path) {
+  const res = await fetch(path, { headers: { "X-Admin-Token": TOKEN } });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = await res.text(); } catch (err) { detail = ""; }
+    throw new Error(detail || ("请求失败，状态码 " + res.status));
+  }
+  return res.json();
+}
+
+// 价格来源的中文说法：来源不明就说来源不明，不含糊
+const SOURCE_LABEL = {
+  tariff: ["牌价", "ok"],
+  observed: ["实测", "warn"],
+  subscription: ["订阅内", "muted"],
+  unknown: ["未知", "muted"],
+};
+
+function sourcePill(source) {
+  const pair = SOURCE_LABEL[source] || SOURCE_LABEL.unknown;
+  return '<span class="pill ' + pair[1] + '">' + pair[0] + "</span>";
+}
+
+function money(value) {
+  if (value == null) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  if (num === 0) return "0（不额外计费）";
+  return "$" + num.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function priceCell(row) {
+  if (row.price_source === "tariff") {
+    const prices = Array.isArray(row.prices) ? row.prices : [];
+    if (!prices.length) return '<span class="muted">配置里没有部署</span>';
+    return prices.map(function (p) {
+      const flag = p.enabled === false ? ' <span class="pill muted">已停用</span>' : "";
+      return '<div>' + esc(p.provider || "未知供应商")
+        + "：入 " + money(p.input_per_mtok)
+        + " / 出 " + money(p.output_per_mtok)
+        + " <span class=\"muted\">每百万 token</span>" + flag + "</div>";
+    }).join("");
+  }
+  if (row.price_source === "observed") {
+    const seen = row.observed || {};
+    const avg = money(seen.avg_cost_usd);
+    return '<div>实测均价 ' + avg + " / 次</div>"
+      + '<div class="muted">共 ' + esc(seen.calls) + " 次调用，其中 "
+      + esc(seen.costed_calls) + " 次拿到自报成本</div>";
+  }
+  return '<span class="muted">' + esc(row.price_note || "没有价格数据") + "</span>";
+}
+
+function gatewayTable(rows) {
+  const body = rows.map(function (row) {
+    return "<tr>"
+      + '<td class="name">' + esc(row.display_name || row.id)
+      + '<span class="sub muted">' + esc(row.id) + "</span></td>"
+      + "<td>" + sourcePill(row.price_source) + "</td>"
+      + "<td>" + priceCell(row) + "</td>"
+      + "<td>" + (row.enabled ? '<span class="pill ok">启用</span>'
+                              : '<span class="pill muted">停用</span>') + "</td>"
+      + "</tr>";
+  }).join("");
+  return "<table><thead><tr><th>模型</th><th>价格来源</th><th>价格</th><th>状态</th></tr></thead>"
+    + "<tbody>" + body + "</tbody></table>";
+}
+
+function executorTable(rows) {
+  const body = rows.map(function (row) {
+    const models = Array.isArray(row.models) ? row.models : [];
+    const lines = models.length
+      ? models.map(function (model) {
+          return '<div style="margin-bottom:4px">'
+            + "<b>" + esc(model.id) + "</b> " + sourcePill(model.price_source)
+            + (model.free ? ' <span class="pill ok">免费</span>' : "")
+            + '<div class="muted">' + esc(model.price_note || "") + "</div></div>";
+        }).join("")
+      : '<span class="muted">这个工具没有可列出的模型</span>';
+    return "<tr>"
+      + '<td class="name">' + esc(row.tool)
+      + '<span class="sub muted">' + esc(row.role || "无角色") + "</span></td>"
+      + "<td>" + lines + "</td>"
+      + "<td>" + esc(row.cost_tier || "—") + "</td>"
+      + '<td><span class="pill ' + (row.models_source === "live" ? "ok" : "muted") + '">'
+      + (row.models_source === "live" ? "实时清单" : "配置快照") + "</span></td>"
+      + "</tr>";
+  }).join("");
+  return "<table><thead><tr><th>工具</th><th>模型与价格</th><th>档位</th><th>清单来源</th></tr></thead>"
+    + "<tbody>" + body + "</tbody></table>";
+}
+
+async function load() {
+  const box = document.getElementById("body");
+  const sumBox = document.getElementById("summary");
+  box.innerHTML = '<div class="empty">正在读取…</div>';
+  try {
+    // 先拿缓存版（秒开），再后台让各工具重新报一遍清单。
+    const data = await api("/zkadmin/agent/model-inventory");
+    render(data);
+    // 核实实时清单：起 CLI 要十几秒，不阻塞首屏，回来再刷一次。
+    api("/zkadmin/agent/model-inventory?refresh=true")
+      .then(function (fresh) {
+        if (fresh && fresh.summary) render(fresh);
+      })
+      .catch(function () { /* 核实失败就继续用缓存版，不打扰用户 */ });
+  } catch (err) {
+    box.innerHTML = '<div class="empty error">读取失败：' + esc(err.message) + "</div>";
+    sumBox.textContent = "读取失败";
+  }
+}
+
+function render(data) {
+  const box = document.getElementById("body");
+  const sumBox = document.getElementById("summary");
+  const s = data.summary || {};
+  sumBox.innerHTML =
+    "共 <b>" + esc(s.total_models) + "</b> 个模型：网关 "
+    + esc(s.gateway_models) + " 个、外部工具 " + esc(s.executor_models) + " 个；"
+    + "其中 <b>" + esc(s.priced_models) + "</b> 个有可核实的价格。"
+    + '<div class="muted" style="margin-top:6px">'
+    + (data.notes || []).map(esc).join("<br>") + "</div>";
+
+  const gateway = Array.isArray(data.gateway) ? data.gateway : [];
+  const executors = Array.isArray(data.executors) ? data.executors : [];
+  let html = "";
+  if (gateway.length) {
+    html += '<section class="group"><div class="group-head"><h3>网关模型</h3>'
+      + '<span class="desc">价格是配置里的真实牌价，美元 / 每百万 token</span></div>'
+      + gatewayTable(gateway) + "</section>";
+  }
+  if (executors.length) {
+    html += '<section class="group"><div class="group-head"><h3>外部工具</h3>'
+      + '<span class="desc">它们没有价目表：有实测的显示实测均价，没有的如实标未知</span></div>'
+      + executorTable(executors) + "</section>";
+  }
+  box.innerHTML = html || '<div class="empty">还没有任何模型配置。</div>';
+}
+
+load();
+</script>
+</body>
+</html>

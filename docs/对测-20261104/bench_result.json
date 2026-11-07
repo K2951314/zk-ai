@@ -1,0 +1,1619 @@
+[
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 27.94504189491272,
+  "ttft": 3.96333384513855,
+  "first_content": 27.83687925338745,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 1691,
+   "total_tokens": 1835,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1655
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 18.87855815887451,
+  "ttft": 2.9027364253997803,
+  "first_content": 18.802687406539917,
+  "usage": {
+   "prompt_tokens": 153,
+   "completion_tokens": 1110,
+   "total_tokens": 1263,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1089
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 82.414475440979,
+  "ttft": 3.7844784259796143,
+  "first_content": 82.00396633148193,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 5219,
+   "total_tokens": 5346,
+   "completion_tokens_details": {
+    "reasoning_tokens": 5040
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 48 汉字 / 无「我们」",
+  "latency": 50.337350368499756,
+  "ttft": 3.075632333755493,
+  "first_content": 50.15548324584961,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 3399,
+   "total_tokens": 3543,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3362
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 14，182 汉字，命中 TiAlN、低速、冷却、刚性、加工硬化、啄钻、排屑、涂层",
+  "latency": 40.68970203399658,
+  "ttft": 3.318988084793091,
+  "first_content": 40.10262084007263,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 2602,
+   "total_tokens": 2738,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2362
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 14.432613372802734,
+  "ttft": 2.9515388011932373,
+  "first_content": 14.330662250518799,
+  "usage": {
+   "prompt_tokens": 190,
+   "completion_tokens": 868,
+   "total_tokens": 1058,
+   "completion_tokens_details": {
+    "reasoning_tokens": 832
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 4.8885509967803955,
+  "ttft": 4.580934047698975,
+  "first_content": 4.815985918045044,
+  "usage": {
+   "prompt_tokens": 153,
+   "completion_tokens": 72,
+   "total_tokens": 225,
+   "completion_tokens_details": {
+    "reasoning_tokens": 51
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 25.446470499038696,
+  "ttft": 3.514075517654419,
+  "first_content": 24.671783924102783,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 1756,
+   "total_tokens": 1883,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1383
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 50 汉字 / 无「我们」",
+  "latency": 9.280932188034058,
+  "ttft": 4.122875213623047,
+  "first_content": 9.159226417541504,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 400,
+   "total_tokens": 544,
+   "completion_tokens_details": {
+    "reasoning_tokens": 356
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 10，182 汉字，命中 TiAlN、冷却、加工硬化、排屑、涂层、深孔、积屑瘤、进给",
+  "latency": 41.08335208892822,
+  "ttft": 4.668050765991211,
+  "first_content": 40.59736633300781,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 2883,
+   "total_tokens": 3019,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2682
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 10.566415071487427,
+  "ttft": 3.0046989917755127,
+  "first_content": 10.440469980239868,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 647,
+   "total_tokens": 791,
+   "completion_tokens_details": {
+    "reasoning_tokens": 611
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 16.41185736656189,
+  "ttft": 10.56603479385376,
+  "first_content": 16.311484336853027,
+  "usage": {
+   "prompt_tokens": 153,
+   "completion_tokens": 511,
+   "total_tokens": 664,
+   "completion_tokens_details": {
+    "reasoning_tokens": 490
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 5.510643005371094,
+  "ttft": 4.1598803997039795,
+  "first_content": 5.151315450668335,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 177,
+   "total_tokens": 304,
+   "completion_tokens_details": {
+    "reasoning_tokens": 74
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 48 汉字 / 无「我们」",
+  "latency": 46.783254623413086,
+  "ttft": 4.0082550048828125,
+  "first_content": 46.67778182029724,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 3865,
+   "total_tokens": 4009,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3827
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "low",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 14，183 汉字，命中 AlTiN、TiAlN、内冷、冷却、加工硬化、啄钻、排屑、涂层",
+  "latency": 43.27361297607422,
+  "ttft": 6.024415493011475,
+  "first_content": 42.860193967819214,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 3220,
+   "total_tokens": 3356,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3022
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 19.784976959228516,
+  "ttft": 3.10449481010437,
+  "first_content": 19.676589012145996,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 1202,
+   "total_tokens": 1346,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1166
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 2.733487367630005,
+  "ttft": 2.561168909072876,
+  "first_content": 2.6542394161224365,
+  "usage": {
+   "prompt_tokens": 153,
+   "completion_tokens": 28,
+   "total_tokens": 181,
+   "completion_tokens_details": {
+    "reasoning_tokens": 7
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 26.67039918899536,
+  "ttft": 3.3145925998687744,
+  "first_content": 26.13764500617981,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 1876,
+   "total_tokens": 2003,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1627
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 50 汉字 / 无「我们」",
+  "latency": 31.92849373817444,
+  "ttft": 6.783390760421753,
+  "first_content": 31.82679772377014,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 1984,
+   "total_tokens": 2128,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1943
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 13，210 汉字，命中 AlTiN、TiAlN、内冷、冷却、加工硬化、啄钻、排屑、涂层",
+  "latency": 46.662779092788696,
+  "ttft": 3.583021879196167,
+  "first_content": 46.19690465927124,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 3618,
+   "total_tokens": 3754,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3384
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 36.02572464942932,
+  "ttft": 4.234087705612183,
+  "first_content": 35.93035173416138,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 2207,
+   "total_tokens": 2351,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2171
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 8.787630796432495,
+  "ttft": 5.343195915222168,
+  "first_content": 8.707180976867676,
+  "usage": {
+   "prompt_tokens": 153,
+   "completion_tokens": 358,
+   "total_tokens": 511,
+   "completion_tokens_details": {
+    "reasoning_tokens": 337
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 8.345292091369629,
+  "ttft": 3.68662166595459,
+  "first_content": 7.99733567237854,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 393,
+   "total_tokens": 520,
+   "completion_tokens_details": {
+    "reasoning_tokens": 235
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 51 汉字 / 无「我们」",
+  "latency": 57.60033369064331,
+  "ttft": 6.096433401107788,
+  "first_content": 57.47940158843994,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 4395,
+   "total_tokens": 4539,
+   "completion_tokens_details": {
+    "reasoning_tokens": 4354
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 15，169 汉字，命中 TiAlN、内冷、冷却、加工硬化、啄钻、排屑、涂层、深孔",
+  "latency": 41.593944787979126,
+  "ttft": 5.93392014503479,
+  "first_content": 41.1721932888031,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 2709,
+   "total_tokens": 2845,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2509
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 39.322290897369385,
+  "ttft": 3.1331686973571777,
+  "first_content": 39.127537965774536,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 2641,
+   "total_tokens": 2785,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2605
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 14.634866952896118,
+  "ttft": 2.821718454360962,
+  "first_content": 14.560671329498291,
+  "usage": {
+   "prompt_tokens": 107,
+   "completion_tokens": 899,
+   "total_tokens": 1006,
+   "completion_tokens_details": {
+    "reasoning_tokens": 878
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 28.2690908908844,
+  "ttft": 6.150700569152832,
+  "first_content": 27.497684955596924,
+  "usage": {
+   "prompt_tokens": 173,
+   "completion_tokens": 1963,
+   "total_tokens": 2136,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1587
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 42 汉字 / 无「我们」",
+  "latency": 23.571674346923828,
+  "ttft": 4.400132894515991,
+  "first_content": 23.479557275772095,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 1584,
+   "total_tokens": 1728,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1550
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "high",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 14，177 汉字，命中 AlTiN、TiAlN、低速、内冷、冷却、加工硬化、排屑、涂层",
+  "latency": 53.693177461624146,
+  "ttft": 5.1867311000823975,
+  "first_content": 53.25098466873169,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 3451,
+   "total_tokens": 3587,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3237
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 30.026231050491333,
+  "ttft": 2.863328218460083,
+  "first_content": 29.917604446411133,
+  "usage": {
+   "prompt_tokens": 190,
+   "completion_tokens": 1928,
+   "total_tokens": 2118,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1892
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 60.0589542388916,
+  "ttft": 3.7676124572753906,
+  "first_content": 59.99478244781494,
+  "usage": {
+   "prompt_tokens": 107,
+   "completion_tokens": 3944,
+   "total_tokens": 4051,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3923
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 23.37069034576416,
+  "ttft": 4.9451515674591064,
+  "first_content": 22.631866693496704,
+  "usage": {
+   "prompt_tokens": 173,
+   "completion_tokens": 1626,
+   "total_tokens": 1799,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1257
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 51 汉字 / 无「我们」",
+  "latency": 54.19506096839905,
+  "ttft": 2.764660358428955,
+  "first_content": 54.07570838928223,
+  "usage": {
+   "prompt_tokens": 98,
+   "completion_tokens": 3844,
+   "total_tokens": 3942,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3805
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 14，191 汉字，命中 TiAlN、内冷、冷却、加工硬化、啄钻、排屑、涂层、深孔",
+  "latency": 48.39781165122986,
+  "ttft": 11.197660207748413,
+  "first_content": 47.97084045410156,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 2592,
+   "total_tokens": 2728,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2383
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 32.01084876060486,
+  "ttft": 3.1300129890441895,
+  "first_content": 31.911728858947754,
+  "usage": {
+   "prompt_tokens": 190,
+   "completion_tokens": 2052,
+   "total_tokens": 2242,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2016
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 18.57505750656128,
+  "ttft": 3.9123921394348145,
+  "first_content": 18.489527702331543,
+  "usage": {
+   "prompt_tokens": 107,
+   "completion_tokens": 1022,
+   "total_tokens": 1129,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1001
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 52.880523443222046,
+  "ttft": 7.8515753746032715,
+  "first_content": 52.1342408657074,
+  "usage": {
+   "prompt_tokens": 173,
+   "completion_tokens": 3713,
+   "total_tokens": 3886,
+   "completion_tokens_details": {
+    "reasoning_tokens": 3352
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 59 汉字 / 无「我们」",
+  "latency": 19.12079954147339,
+  "ttft": 3.495830535888672,
+  "first_content": 19.013378143310547,
+  "usage": {
+   "prompt_tokens": 144,
+   "completion_tokens": 1109,
+   "total_tokens": 1253,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1063
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 14，123 汉字，命中 AlTiN、TiAlN、低速、内冷、加工硬化、啄钻、外冷、排屑",
+  "latency": 33.424365520477295,
+  "ttft": 4.2250611782073975,
+  "first_content": 33.1134991645813,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 2074,
+   "total_tokens": 2210,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1912
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 16.86799144744873,
+  "ttft": 2.625861406326294,
+  "first_content": 16.77820658683777,
+  "usage": {
+   "prompt_tokens": 190,
+   "completion_tokens": 1041,
+   "total_tokens": 1231,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1005
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 9.161170959472656,
+  "ttft": 4.646125078201294,
+  "first_content": 9.083789110183716,
+  "usage": {
+   "prompt_tokens": 107,
+   "completion_tokens": 259,
+   "total_tokens": 366,
+   "completion_tokens_details": {
+    "reasoning_tokens": 238
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 5.5682268142700195,
+  "ttft": 4.130246162414551,
+  "first_content": 4.911916494369507,
+  "usage": {
+   "prompt_tokens": 173,
+   "completion_tokens": 171,
+   "total_tokens": 344,
+   "completion_tokens_details": {
+    "reasoning_tokens": 52
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 40 汉字 / 无「我们」",
+  "latency": 34.488194942474365,
+  "ttft": 3.03719162940979,
+  "first_content": 34.30933380126953,
+  "usage": {
+   "prompt_tokens": 98,
+   "completion_tokens": 2220,
+   "total_tokens": 2318,
+   "completion_tokens_details": {
+    "reasoning_tokens": 2187
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "effort": "max",
+  "task": "know",
+  "ok": false,
+  "note": "要点分 17 但超长 1867 汉字",
+  "latency": 100.7712607383728,
+  "ttft": 3.4869232177734375,
+  "first_content": null,
+  "usage": {
+   "prompt_tokens": 136,
+   "completion_tokens": 8192,
+   "total_tokens": 8328,
+   "completion_tokens_details": {
+    "reasoning_tokens": 8192
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "length"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 1.808225154876709,
+  "ttft": 0.7949643135070801,
+  "first_content": 1.710761547088623,
+  "usage": {
+   "prompt_tokens": 163,
+   "completion_tokens": 151,
+   "total_tokens": 314,
+   "completion_tokens_details": {
+    "reasoning_tokens": 120
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 2.9651782512664795,
+  "ttft": 0.7907135486602783,
+  "first_content": 1.9302079677581787,
+  "usage": {
+   "prompt_tokens": 148,
+   "completion_tokens": 364,
+   "total_tokens": 512,
+   "completion_tokens_details": {
+    "reasoning_tokens": 166
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 17，190 汉字，命中 AlTiN、内冷、冷却、刃口、加工硬化、啄钻、外冷、排屑",
+  "latency": 11.160519361495972,
+  "ttft": 1.7734887599945068,
+  "first_content": 8.5741605758667,
+  "usage": {
+   "prompt_tokens": 105,
+   "completion_tokens": 732,
+   "total_tokens": 837,
+   "completion_tokens_details": {
+    "reasoning_tokens": 511,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 1.3144843578338623,
+  "ttft": 0.8031225204467773,
+  "first_content": 1.2929301261901855,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 82,
+   "total_tokens": 209,
+   "completion_tokens_details": {
+    "reasoning_tokens": 64
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 42 汉字 / 无「我们」",
+  "latency": 3.3852338790893555,
+  "ttft": 0.8393869400024414,
+  "first_content": 3.2884180545806885,
+  "usage": {
+   "prompt_tokens": 114,
+   "completion_tokens": 376,
+   "total_tokens": 490,
+   "completion_tokens_details": {
+    "reasoning_tokens": 341
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 2.037689685821533,
+  "ttft": 0.9396345615386963,
+  "first_content": 1.9525351524353027,
+  "usage": {
+   "prompt_tokens": 163,
+   "completion_tokens": 128,
+   "total_tokens": 291,
+   "completion_tokens_details": {
+    "reasoning_tokens": 98
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 128
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 1.3430793285369873,
+  "ttft": 0.561469316482544,
+  "first_content": 1.2846908569335938,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 88,
+   "total_tokens": 215,
+   "completion_tokens_details": {
+    "reasoning_tokens": 66,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 2.7443931102752686,
+  "ttft": 0.470808744430542,
+  "first_content": 1.691904067993164,
+  "usage": {
+   "prompt_tokens": 148,
+   "completion_tokens": 400,
+   "total_tokens": 548,
+   "completion_tokens_details": {
+    "reasoning_tokens": 188,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "low",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 20，164 汉字，命中 M35、M42、PVD、TiAlN、冷却、刃口、加工硬化、含钴",
+  "latency": 28.870790004730225,
+  "ttft": 1.2202136516571045,
+  "first_content": 26.388413190841675,
+  "usage": {
+   "prompt_tokens": 105,
+   "completion_tokens": 2181,
+   "total_tokens": 2286,
+   "completion_tokens_details": {
+    "reasoning_tokens": 1920,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "high",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 2.1799585819244385,
+  "ttft": 0.7418010234832764,
+  "first_content": 2.0024831295013428,
+  "usage": {
+   "prompt_tokens": 163,
+   "completion_tokens": 194,
+   "total_tokens": 357,
+   "completion_tokens_details": {
+    "reasoning_tokens": 156
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 128
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "high",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 4.0467751026153564,
+  "ttft": 0.874821662902832,
+  "first_content": 3.058216094970703,
+  "usage": {
+   "prompt_tokens": 148,
+   "completion_tokens": 498,
+   "total_tokens": 646,
+   "completion_tokens_details": {
+    "reasoning_tokens": 272
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 128
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "high",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 40 汉字 / 无「我们」",
+  "latency": 6.752428293228149,
+  "ttft": 0.42493557929992676,
+  "first_content": 6.650927782058716,
+  "usage": {
+   "prompt_tokens": 114,
+   "completion_tokens": 791,
+   "total_tokens": 905,
+   "completion_tokens_details": {
+    "reasoning_tokens": 758,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "high",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 3.370211124420166,
+  "ttft": 0.9708077907562256,
+  "first_content": 2.4482693672180176,
+  "usage": {
+   "prompt_tokens": 148,
+   "completion_tokens": 408,
+   "total_tokens": 556,
+   "completion_tokens_details": {
+    "reasoning_tokens": 212
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 128
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "high",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 41 汉字 / 无「我们」",
+  "latency": 3.505189895629883,
+  "ttft": 1.0423266887664795,
+  "first_content": 3.344334602355957,
+  "usage": {
+   "prompt_tokens": 114,
+   "completion_tokens": 358,
+   "total_tokens": 472,
+   "completion_tokens_details": {
+    "reasoning_tokens": 326
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "high",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 41 汉字 / 无「我们」",
+  "latency": 5.325765371322632,
+  "ttft": 0.9482388496398926,
+  "first_content": 5.202654838562012,
+  "usage": {
+   "prompt_tokens": 114,
+   "completion_tokens": 502,
+   "total_tokens": 616,
+   "completion_tokens_details": {
+    "reasoning_tokens": 471
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 3.1486148834228516,
+  "ttft": 0.730189323425293,
+  "first_content": 3.015563488006592,
+  "usage": {
+   "prompt_tokens": 163,
+   "completion_tokens": 194,
+   "total_tokens": 357,
+   "completion_tokens_details": {
+    "reasoning_tokens": 163,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 2.2733020782470703,
+  "ttft": 1.1484777927398682,
+  "first_content": 2.2648439407348633,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 113,
+   "total_tokens": 240,
+   "completion_tokens_details": {
+    "reasoning_tokens": 95,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 3.925544500350952,
+  "ttft": 0.875889778137207,
+  "first_content": 3.083652973175049,
+  "usage": {
+   "prompt_tokens": 148,
+   "completion_tokens": 593,
+   "total_tokens": 741,
+   "completion_tokens_details": {
+    "reasoning_tokens": 379
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 45 汉字 / 无「我们」",
+  "latency": 6.492814779281616,
+  "ttft": 0.7296037673950195,
+  "first_content": 6.346740007400513,
+  "usage": {
+   "prompt_tokens": 114,
+   "completion_tokens": 760,
+   "total_tokens": 874,
+   "completion_tokens_details": {
+    "reasoning_tokens": 724
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "json",
+  "ok": true,
+  "note": "全字段正确",
+  "latency": 3.2314422130584717,
+  "ttft": 0.7259669303894043,
+  "first_content": 3.103571653366089,
+  "usage": {
+   "prompt_tokens": 163,
+   "completion_tokens": 234,
+   "total_tokens": 397,
+   "completion_tokens_details": {
+    "reasoning_tokens": 203,
+    "accepted_prediction_tokens": 0,
+    "rejected_prediction_tokens": 0,
+    "audio_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "audio_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 1.4415225982666016,
+  "ttft": 0.7322394847869873,
+  "first_content": 1.2839715480804443,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 100,
+   "total_tokens": 227,
+   "completion_tokens_details": {
+    "reasoning_tokens": 78
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "instr",
+  "ok": true,
+  "note": "3 句 / 46 汉字 / 无「我们」",
+  "latency": 7.6640284061431885,
+  "ttft": 0.730860710144043,
+  "first_content": 7.491297960281372,
+  "usage": {
+   "prompt_tokens": 114,
+   "completion_tokens": 691,
+   "total_tokens": 805,
+   "completion_tokens_details": {
+    "reasoning_tokens": 656
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "know",
+  "ok": true,
+  "note": "要点分 19，144 汉字，命中 M35、M42、TiAlN、内冷、冷却、刃口、刚性、加工硬化",
+  "latency": 59.52389669418335,
+  "ttft": 0.689305305480957,
+  "first_content": 58.056296586990356,
+  "usage": {
+   "prompt_tokens": 105,
+   "completion_tokens": 6070,
+   "total_tokens": 6175,
+   "completion_tokens_details": {
+    "reasoning_tokens": 5827
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "tool",
+  "ok": true,
+  "note": "find_customer({\"name\": \"宁波精工机械\"})",
+  "latency": 1.4246628284454346,
+  "ttft": 0.7580623626708984,
+  "first_content": 1.3305151462554932,
+  "usage": {
+   "prompt_tokens": 127,
+   "completion_tokens": 103,
+   "total_tokens": 230,
+   "completion_tokens_details": {
+    "reasoning_tokens": 85
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "finish": "stop"
+ },
+ {
+  "model": "deepseek-flash",
+  "effort": "max",
+  "task": "calc",
+  "ok": true,
+  "note": "三值全对",
+  "latency": 3.2753806114196777,
+  "ttft": 0.8244187831878662,
+  "first_content": 2.2911577224731445,
+  "usage": {
+   "prompt_tokens": 148,
+   "completion_tokens": 460,
+   "total_tokens": 608,
+   "completion_tokens_details": {
+    "reasoning_tokens": 239
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 128
+   }
+  },
+  "finish": "stop"
+ }
+]

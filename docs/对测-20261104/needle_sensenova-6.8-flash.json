@@ -1,0 +1,22 @@
+[
+ {
+  "model": "sensenova-6.8-flash",
+  "size": 400000,
+  "depth": 0.05,
+  "ok": true,
+  "prompt_tokens": 288598,
+  "latency": 150.05931067466736,
+  "tok_s": 1.139549417035059,
+  "finish": "stop"
+ },
+ {
+  "model": "sensenova-6.8-flash",
+  "size": 400000,
+  "depth": 0.95,
+  "ok": true,
+  "prompt_tokens": 288598,
+  "latency": 15.414117336273193,
+  "tok_s": 8.498702659524001,
+  "finish": "stop"
+ }
+]

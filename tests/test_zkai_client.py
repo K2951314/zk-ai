@@ -17,10 +17,14 @@ _spec.loader.exec_module(zkai_client)
 
 @pytest.fixture
 def stub_post(monkeypatch):
+    import threading
+
     calls: list[dict] = []
+    lock = threading.Lock()
 
     def fake_post(path: str, payload: dict, *, timeout: float) -> dict:
-        calls.append({"path": path, "payload": payload})
+        with lock:
+            calls.append({"path": path, "payload": payload})
         if payload.get("_fail"):
             raise zkai_client.GatewayError("HTTP 503: 全黑")
         return {

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from typing import Any
 
@@ -225,14 +226,71 @@ def _probe_verdict(info: Any) -> str:
     return "error"
 
 
+#: 手填 ID 的上限，故意对齐 ``VerifyModelsRequest.limit`` 的默认值：
+#: 手填的模型一定会逐个实测，超过后端一次能探的数量就会有几个永远停在「未验证」。
+_MANUAL_ID_CAP = 12
+#: 单个 ID 的长度上限。模型 ID 再长也就几十字符；不设上限时 12 个超长串能把
+#: GET 的 URL 顶到 8KB 以上，直接换来一个 414，而运营者只会看到「探测失败」。
+_MANUAL_ID_MAX_LEN = 200
+#: 手填原文的总长度上限，先于分割生效——避免拿 1MB 的 query 去跑正则。
+#: 取值 = 12 个 ID × 200 字符 + 11 个分隔符再留余量：**合法的前端输入永远
+#: 不该被截断**，否则最后几个 ID 会静默消失，运营者以为全验过了。
+_MANUAL_RAW_MAX_LEN = 2500
+#: 只按逗号/换行分项，**不按普通空格**：模型 ID 本身不含空格，而运营者从网页
+#: 复制「模型名 + 一段描述」时，按空格拆会把描述里的每个词都当成一个模型 ID，
+#: 十几个垃圾项瞬间吃满 12 个验证额度。每项内部再取第一个空白前的 token。
+_MANUAL_ID_SEP = re.compile(r"[,，\n\r\t]+")
+
+
+def _manual_model_ids(raw: str | None) -> list[str]:
+    """把运营者手填的上游模型 ID 拆开、去重、限量。
+
+    目录不等于「这个供应商所有能调的模型」：2026-11-07 实测 NVIDIA 网页模型库
+    有 kimi-k3.1-pro、``integrate.api.nvidia.com/v1/models`` 却没有。让市场只认
+    目录，等于把「目录里没有 ≠ 不能调」这条路堵死。
+    """
+    if not raw:
+        return []
+    text = raw[:_MANUAL_RAW_MAX_LEN]
+    parts = _MANUAL_ID_SEP.split(text)
+    if len(raw) > _MANUAL_RAW_MAX_LEN:
+        # 尾巴可能正好被截半，宁可少一项也不要拿残 ID 去实测。
+        parts = parts[:-1]
+    ordered: dict[str, None] = {}
+    for part in parts:
+        # 「moonshotai/kimi-k3.1-pro 3T-class open model」→ 取第一个 token。
+        tokens = part.strip().split()
+        if not tokens:
+            continue
+        mid = tokens[0]
+        if len(mid) > _MANUAL_ID_MAX_LEN or any(ord(ch) < 32 for ch in mid):
+            continue
+        if mid not in ordered:
+            ordered[mid] = None
+        if len(ordered) >= _MANUAL_ID_CAP:
+            break
+    return list(ordered)
+
+
 @router.get("/providers/{provider_id}/models", summary="列出供应商的上游模型")
-async def provider_models(provider_id: str, container: ContainerDep) -> dict[str, Any]:
+async def provider_models(
+    provider_id: str,
+    container: ContainerDep,
+    manual_models: str | None = Query(
+        default=None,
+        description="目录外手填的上游模型 ID，逗号/换行分隔；会一并补全并出现在市场里",
+    ),
+) -> dict[str, Any]:
     """Probe a provider's native model list and match each id against the curated presets.
 
     Feeds the model marketplace: the console can show "which models this provider
     actually has" with pre-filled context/capability/price, so adding a model is a
     pick-and-save instead of filling a form from scratch. Providers without a
     credential (moonshot with no key) return an empty list with an explanatory note.
+
+    ``manual_models`` carries ids the operator typed by hand because the upstream
+    catalogue lags behind the vendor's own model library. They go through the very
+    same preset/price/already-added pipeline instead of a second, thinner code path.
     """
     provider = container.config.providers.get(provider_id)
     if provider is None:
@@ -274,19 +332,42 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
                 ),
             }
         credential = usable
+    manual_ids = _manual_model_ids(manual_models)
     adapter = container.router.adapter(provider_id)
+    catalogue: dict[str, dict[str, Any]] = {}
+    probe_note: str | None = None
     try:
         catalogue = await adapter.model_catalogue(credential)
     except Exception as exc:
-        # A probe failure points at the upstream, not the gateway: surface it as
-        # a note in the same shape so the console keeps rendering one panel.
-        logger.info("model probe failed for %s: %s", provider_id, exc)
-        return {
-            "object": "list",
-            "provider_id": provider_id,
-            "data": [],
-            "note": f"探测失败：{exc}（上游/网络问题，不是网关坏了）",
-        }
+        # 目录拉不到，不代表手填的模型也不能试：verify 走的是另一条独立请求。
+        # 这恰恰是最需要手填的场景（NVIDIA 的目录本身就经常超时）。
+        if not manual_ids:
+            # A probe failure points at the upstream, not the gateway: surface it
+            # as a note in the same shape so the console keeps rendering one panel.
+            logger.info("model probe failed for %s: %s", provider_id, exc)
+            return {
+                "object": "list",
+                "provider_id": provider_id,
+                "data": [],
+                "note": f"探测失败：{exc}（上游/网络问题，不是网关坏了）",
+            }
+        probe_note = (
+            f"目录探测失败：{exc}（上游/网络问题）——下面只列你手填的模型，"
+            "仍会逐个实测能不能调"
+        )
+        logger.info(
+            "model probe failed for %s, keeping %d manual ids: %s",
+            provider_id, len(manual_ids), exc,
+        )
+    # 目录不等于「这个供应商所有能调的模型」：网页上新上的模型常常还没进
+    # /v1/models。手填的 ID 补进同一条流水线，照样拿预设/价格/已收录判定，
+    # 前端不需要为它们另造一套行结构；只在行上标 manual，让运营者看清来源。
+    catalogue_ids = set(catalogue)
+    for mid in manual_ids:
+        catalogue.setdefault(mid, {"id": mid})
+    # 手填的 ID 若本来就在目录里，不算「手填」，别重复也别打标。
+    manual_set = set(manual_ids) - catalogue_ids
+
     known_models = set(container.config.models)
     known_upstream = {
         deployment.model
@@ -304,7 +385,9 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         try:
             from app.models.catalogue_info import enrich_modelscope
 
-            official = await enrich_modelscope(sorted(catalogue))
+            # 只查目录里的 ID：手填 ID 多是大厂新模型，社区资料页本就没有，
+            # 为它们各发一次外网请求只会把整个市场的打开速度拖慢几十秒。
+            official = await enrich_modelscope(sorted(catalogue_ids))
         except Exception as exc:
             logger.info("catalogue enrich failed for %s: %s", provider_id, exc)
 
@@ -348,15 +431,36 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         else:
             price_source = None
 
+        # 上下文窗口：目录 vs 官方文档——**供应商的 /v1/models 不等于官方文档**。
+        # 2026-11-04 实测：商汤目录给 sensenova-6.8-flash 报 262144，官方文档写
+        # 「支持1 M 上下文窗口」，真请求塞 1,047,678 prompt tokens 照样 200。
+        # 旧规则「探测压过预设」于是把一个 1M 模型配成 256K——低估窗口本身不会
+        # 报错，它只是让长请求在网关这层被 context_fits 判死、静默降级到烂渠道。
+        # 新规则：两者都有时取**大**的（宁可上游 400 让运营者看见，也别在本地
+        # 悄悄掐掉），分歧另存 ``context_window_conflict`` 摊给运营者自己判。
+        doc_window = info.get("context_window") or preset.context_window
+        doc_source = "official" if info.get("context_window") else "preset"
+        context_conflict: dict[str, Any] | None = None
+        if facts.context_window is None:
+            context_window, context_source = doc_window, doc_source
+        elif facts.context_window >= doc_window:
+            context_window, context_source = facts.context_window, "provider"
+        else:
+            context_window, context_source = doc_window, doc_source
+        if facts.context_window is not None and doc_window and facts.context_window != doc_window:
+            context_conflict = {"provider": facts.context_window, "spec": doc_window}
+
         entry: dict[str, Any] = {
             "upstream_model": upstream,
+            # True = 上游目录里没有，是运营者手填后补进来的（前端标「手填」）。
+            "manual": upstream in manual_set,
             "suggested_model_id": _suggest_model_id(upstream),
             "already_added": preset.family in known_models
             or upstream in known_upstream,
             "preset": {
                 "family": preset.family,
                 "display_name": info.get("display_name") or preset.display_name,
-                "context_window": info.get("context_window") or preset.context_window,
+                "context_window": context_window,
                 "capabilities": capabilities,
                 "input_price": input_price,
                 "output_price": output_price,
@@ -394,12 +498,10 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
             "max_output_tokens_max": preset.max_output_tokens_max,
             # Higher-fidelity-vendor presets are only a guess for StepFun's own
             # models; anything else keeps the preset context window.
-            "context_window_source": (
-                "provider" if facts.context_window
-                else "official" if info.get("context_window")
-                else "preset"
-            ),
+            "context_window_source": context_source,
         }
+        if context_conflict:
+            entry["context_window_conflict"] = context_conflict
         if facts.known:
             entry["facts_note"] = facts.describe()
         # 官方规格：有核实值就展示（partial 也摊开），不再要求整条都是 official
@@ -407,7 +509,14 @@ async def provider_models(provider_id: str, container: ContainerDep) -> dict[str
         if official_rows:
             entry["official_facts"] = official_rows
         data.append(entry)
-    return {"object": "list", "provider_id": provider_id, "data": data}
+    payload: dict[str, Any] = {
+        "object": "list",
+        "provider_id": provider_id,
+        "data": data,
+    }
+    if probe_note:
+        payload["note"] = probe_note
+    return payload
 
 
 def _suggest_model_id(upstream: str) -> str:

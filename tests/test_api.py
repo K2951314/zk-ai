@@ -1985,6 +1985,25 @@ async def test_verify_honours_the_limit(api) -> None:
     assert r.json()["checked"] == 2
 
 
+async def test_verify_accepts_an_id_absent_from_the_catalogue(api) -> None:
+    """手填的模型不必先出现在 /v1/models 里就能实测——目录滞后是常态。
+
+    2026-11-07：NVIDIA 网页上了 kimi-k3.1-pro 而接口目录没有。实测通道若只认
+    目录里的 ID，「手填 + 验证」这个入口就是假的。
+    """
+    client, harness = api
+    harness.adapter.queue(Behavior(text="hi", prompt_tokens=3, completion_tokens=1))
+    r = await client.post(
+        "/zkadmin/providers/fake/models/verify",
+        json={"models": ["moonshotai/kimi-k3.1-pro"], "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    got = r.json()["results"][0]
+    assert got["upstream_model"] == "moonshotai/kimi-k3.1-pro"
+    assert got["ok"] is True
+
+
 async def test_cached_tokens_survive_the_whole_chain(fake_adapter) -> None:
     """上游报的缓存数要一路活到 DB——否则成本高估近一个数量级。
 

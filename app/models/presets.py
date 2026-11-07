@@ -115,6 +115,43 @@ class ModelPreset:
 _PRESETS: tuple[ModelPreset, ...] = (
     # --- 商汤 SenseNova（platform.sensenova.cn/docs，2026-10-23 核对）---------- #
     ModelPreset(
+        family="sensenova-6.8-flash",
+        display_name="商汤 6.8 Flash",
+        # platform.sensenova.cn/docs：messages「支持1 M 上下文窗口」；
+        # max_tokens 默认 64K、范围 [1,128K]。
+        # ⚠ 上游 /v1/models 目录自作主张报 context_length=262144 —— **是错的**，
+        # 2026-11-04 实测：一次请求塞进 1,047,678 prompt tokens 正常返回，
+        # 再多才 400。别信目录那个数（见 context_conflict 判别）。
+        context_window=1_048_576,
+        capabilities={
+            "coding": 8.0, "reasoning": 8.0, "tool_use": 8.0, "vision": 9.0,
+            "long_context": 10.0, "structured_output": 8.0, "speed": 8.0, "cost": 10.0,
+        },
+        input_price=0.0, output_price=0.0,
+        description="商汤新一代多模态智能体模型：长程任务执行 + 长期记忆，复杂交付档",
+        providers=("sensenova",),
+        provider="sensenova",
+        max_output_tokens=65_536,
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        # 官方文档：minimal/low/medium/high/xhigh/max，默认 high。
+        # **刻意不收 none**：6.8-flash 文档写「不支持关闭思考」，实测传 none 或
+        # thinking.type=disabled 时接口不报错，但思考泄进 content——回答开头是
+        # "Here's a thinking process: ..."/"We need to compute ..."，正文被埋在
+        # 后头且常带 标记残留。对客户端来说这是脏回答，不是"省了思考"。
+        reasoning_efforts=("minimal", "low", "medium", "high", "xhigh", "max"),
+        reasoning_effort_default="high",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 1M、max_tokens 默认 64K 上限 128K（官方文档；目录里的 262144 是旧值）",
+            "思考默认开启且不可真正关闭：传 none / thinking.type=disabled 不报错，"
+            "但思考会泄进 content，开头是 Here's a thinking process: 一类独白",
+            "思考 token 与正文共享 max_tokens——预算给小了会只有思考没有正文"
+            "（finish_reason=length、content 为空）",
+        ),
+    ),
+    ModelPreset(
         family="sensenova-6.8-flash-lite",
         display_name="商汤 6.8 Flash Lite",
         # List Models: context_length=262144, max_output_length=65536

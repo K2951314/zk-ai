@@ -12,6 +12,10 @@ config/providers.yaml
 config/models.yaml
 config/burner.yaml
 config/cli_tools.yaml
+config/model_catalog.yaml
+# 事件规则里带 webhook（用 ${FEISHU_WEBHOOK} 引用，但运营者可能手滑写死），
+# 与其它现役配置同样处理：模板可提交，现役不进仓库
+config/events.yaml
 config/*.local.yaml
 
 # --- runtime data -----------------------------------------------------------
@@ -74,6 +78,8 @@ config/*.bak*
 #   误提交（2026-09-29 发现）。两个都写上，避免再踩。
 .workbuddy/
 .workbuddy-ai/
+# 任务空间：每次派活自动生成的独立目录（含产物、日志、进度），不进仓库
+.taskspaces/
 # 诊断会话留下的临时调试脚本（自带 ruff/mypy 历史错误，去留未定，先排除出提交）
 scripts/probe_upstream_path.py
 

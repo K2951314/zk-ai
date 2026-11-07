@@ -23,9 +23,11 @@ logger = get_logger("services.agent.cli")
 #: 成本档位合法值：审批卡片上展示给操作者，也是日汇总告警的分组维度
 COST_TIERS = frozenset({"free", "cheap", "paid"})
 
-#: 后端形态：gateway = 指向本机 zkai 网关（OpenAI 兼容）；
-#: official = 走工具自家的登录态与额度
-_BACKENDS = frozenset({"gateway", "official"})
+#: 后端形态：
+#: - ``gateway``  指向本机 zkai 网关（OpenAI 兼容）
+#: - ``official`` 走工具自家的登录态与额度
+#: - ``mcp``      走本地 MCP 服务（HTTP JSON-RPC），不拉子进程
+_BACKENDS = frozenset({"gateway", "official", "mcp"})
 
 #: 外部 CLI 自带的审批级别：
 #: - ``plan``    只读分析（推荐的无头档）
@@ -75,6 +77,15 @@ class CliToolConfig:
     models: list[str] = field(default_factory=list)
     #: models 里哪些按免费档展示（只是标签，真正的计费以工具自报为准）
     free_models: list[str] = field(default_factory=list)
+    #: backend=mcp 时的服务地址，例如 ``http://127.0.0.1:39099/mcp``
+    mcp_url: str = ""
+    #: backend=mcp 时要调用的工具名，例如 ``get_pool_status``
+    mcp_tool: str = ""
+    #: backend=mcp 时传给工具的固定参数；字符串值里的 ``{task}`` 会被任务文本替换
+    mcp_args: dict[str, Any] = field(default_factory=dict)
+    #: backend=mcp 时允许经 ``mcp_call`` 调用的工具白名单（空 = 只能走单工具模式）。
+    #: 写类工具必须显式列在这里，等于一份人工审核过的权限清单。
+    mcp_tools: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -114,7 +125,8 @@ class CliRegistry:
             tool = self.tools[rc.tool]
             tier_zh = {"free": "免费", "cheap": "低价", "paid": "收费"}[tool.cost_tier]
             hint = f"{rc.hint}，" if rc.hint else ""
-            parts.append(f"{name}（{hint}执行体 {rc.tool}，模型 {tool.model}，{tier_zh}）")
+            target = tool.mcp_tool if tool.backend == "mcp" else tool.model
+            parts.append(f"{name}（{hint}执行体 {rc.tool}，{target}，{tier_zh}）")
         return "、".join(parts)
 
 
@@ -125,15 +137,6 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
         return None
     if not raw.get("enabled", False):
         return None  # 没启用不算错，静默跳过
-    command = str(raw.get("command") or "").strip()
-    if not command:
-        warnings.append(f"cli_tools: 工具 {name!r} 已启用但 command 为空，已忽略")
-        return None
-    if shutil.which(command) is None:
-        warnings.append(
-            f"cli_tools: 工具 {name!r} 已启用但找不到命令 {command!r}（未安装？），已忽略"
-        )
-        return None
     backend = str(raw.get("backend") or "official").strip()
     if backend not in _BACKENDS:
         warnings.append(
@@ -141,6 +144,17 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
             f"（可选 {sorted(_BACKENDS)}），已忽略"
         )
         return None
+    command = str(raw.get("command") or "").strip()
+    if backend != "mcp":
+        # MCP 走 HTTP，不拉子进程，因此不要求命令存在
+        if not command:
+            warnings.append(f"cli_tools: 工具 {name!r} 已启用但 command 为空，已忽略")
+            return None
+        if shutil.which(command) is None:
+            warnings.append(
+                f"cli_tools: 工具 {name!r} 已启用但找不到命令 {command!r}（未安装？），已忽略"
+            )
+            return None
     model = str(raw.get("model") or "").strip()
     # 空模型 = 用该 CLI 自己配置的模型（Claude Code 走 CC Switch 选定的那个，
     # 我们不该硬塞一个它认不出的名字）。其它工具有默认模型，通常都会填。
@@ -185,6 +199,26 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
+    mcp_url = str(raw.get("mcp_url") or "").strip()
+    mcp_tool = str(raw.get("mcp_tool") or "").strip()
+    raw_args = raw.get("mcp_args")
+    mcp_args: dict[str, Any] = {}
+    if isinstance(raw_args, dict):
+        mcp_args = dict(raw_args)
+    elif raw_args is not None:
+        warnings.append(f"cli_tools: 工具 {name!r} 的 mcp_args 不是映射，已忽略")
+    if backend == "mcp":
+        if not mcp_url or not mcp_tool:
+            warnings.append(
+                f"cli_tools: 工具 {name!r} 用 mcp 后端但缺 mcp_url 或 mcp_tool，已忽略"
+            )
+            return None
+        if not mcp_url.startswith(("http://", "https://")):
+            warnings.append(
+                f"cli_tools: 工具 {name!r} 的 mcp_url 必须是 http/https，已忽略"
+            )
+            return None
+
     return CliToolConfig(
         name=name,
         command=command,
@@ -199,6 +233,10 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
         context_window=context_window,
         models=_str_list("models"),
         free_models=_str_list("free_models"),
+        mcp_url=mcp_url,
+        mcp_tool=mcp_tool,
+        mcp_args=mcp_args,
+        mcp_tools=_str_list("mcp_tools"),
     )
 
 

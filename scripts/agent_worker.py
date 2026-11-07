@@ -32,6 +32,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings, load_app_config
+from app.services.agent import taskspace, usage_ledger
 from app.services.agent.cli.registry import load_cli_registry
 from app.services.agent.cli.runner import run_delegation
 
@@ -64,6 +65,7 @@ async def run_once(
     wait: float,
     workspace: Path,
     registry,
+    settings: Settings,
 ) -> bool:
     """取一单并跑完。返回 False 表示这次没接到活。"""
     response = await client.post(
@@ -107,7 +109,45 @@ async def run_once(
         await _complete(client, event_id, ok=False, verdict="", error="事件没有可执行的指令（task 为空）")
         return True
 
-    result = await run_delegation(tool, task=task, cwd=cwd)
+    # 事件派单也进任务空间：与直跑、模型派单共用同一套隔离与租约。
+    space: taskspace.TaskSpace | None = None
+    allow_bypass = False
+    owner = f"event-{event_id}"
+    if settings.agent_task_space and not str(event.get("cwd") or "").strip():
+        space = taskspace.create(workspace, session_id=owner, goal=task)
+        got, holder = taskspace.acquire(workspace, space.task_id, owner=owner)
+        if not got:
+            await _complete(
+                client,
+                event_id,
+                ok=False,
+                verdict="",
+                error=f"任务空间正被 {holder} 使用，本次没有执行",
+            )
+            return True
+        cwd = space.path
+        allow_bypass = settings.agent_permission_mode == "bypass"
+    try:
+        result = await run_delegation(
+            tool, task=task, cwd=cwd, allow_bypass=allow_bypass
+        )
+        # 事件派单也记账：否则「这个月烧了多少」会漏掉自动跑的那部分。
+        usage_ledger.record_delegation(
+            tool=tool.name,
+            model=tool.model,
+            role=str(event.get("role") or ""),
+            session_id=owner,
+            task_space=str(workspace),
+            ok=result.ok,
+            elapsed=result.elapsed,
+            tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out,
+            cost_usd=result.cost_usd,
+            error="" if result.ok else result.output[:200],
+        )
+    finally:
+        if space is not None:
+            taskspace.release(workspace, space.task_id, owner=owner)
     print(
         f"[{worker}] 事件 #{event_id} 完成：{'成功' if result.ok else '失败'} "
         f"（{result.elapsed:.1f}s）",
@@ -191,6 +231,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     wait=args.wait,
                     workspace=workspace,
                     registry=registry,
+                    settings=config.settings,
                 )
             except KeyboardInterrupt:
                 raise

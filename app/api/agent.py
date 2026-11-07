@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,8 +22,11 @@ from pydantic import BaseModel, Field
 from app.api.deps import ContainerDep, require_admin
 from app.core.container import Container
 from app.core.errors import ZKAIError
+from app.services.agent import model_inventory as model_inventory_service
+from app.services.agent import taskspace, usage_ledger
 from app.services.agent.cli import load_cli_registry
-from app.services.agent.cli.models import discover_models
+from app.services.agent.cli.models import cached_models, discover_models
+from app.services.agent.model_catalog import load_catalog as load_model_catalog
 from app.services.agent.service import AgentService
 
 router = APIRouter(prefix="/zkadmin/agent", tags=["agent"],
@@ -104,7 +112,11 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
     for role in registry.known_roles():
         rc = registry.roles[role]
         tool = registry.tools[rc.tool]
-        models = tool.models or ([tool.model] if tool.model else [])
+        # CLI 自己的清单最可信；但只读缓存，绝不在这里同步启动 node 进程。
+        # 缓存冷时先用配置快照，前端点开某个执行体再走 /executors/{role}/models 拉 live。
+        live = cached_models(tool.name, tool.command)
+        models = live or tool.models or ([tool.model] if tool.model else [])
+        free = set(tool.free_models)
         items.append({
             "role": role,
             "tool": tool.name,
@@ -115,12 +127,11 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
             "hint": rc.hint,
             # 只有这两家 CLI 有思考/上下文旋钮；gemini 0.61 没有暴露
             "knobs": ["effort", "context_window"] if tool.name in {"codebuddy", "qoder"} else [],
+            "models_source": "live" if live else "config",
             "models": [
                 {
                     "id": model_id,
-                    "free": model_id in tool.free_models
-                    if tool.free_models
-                    else tool.cost_tier == "free",
+                    "free": model_id in free if free else tool.cost_tier == "free",
                 }
                 for model_id in models
             ],
@@ -176,6 +187,127 @@ async def run_executor(payload: ExecutorRunPayload, agent: AgentDep) -> dict[str
         )
     except ZKAIError as exc:
         raise HTTPException(exc.http_status, exc.message) from exc
+
+
+@router.get("/taskspaces")
+async def list_taskspaces(container: ContainerDep) -> dict[str, Any]:
+    """列出任务空间摘要（只读，不读产物内容）。"""
+    return {
+        "taskspaces": taskspace.list_all(container.settings.agent_workspace)
+    }
+
+
+def _task_space_path(container: Container, task_id: str) -> Path:
+    """解析任务空间路径并做越界校验。"""
+    workspace = Path(container.settings.agent_workspace)
+    path = workspace / taskspace.DIRNAME / task_id
+    if not taskspace.is_inside(workspace, path) or not path.is_dir():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "任务空间不存在")
+    return path
+
+
+@router.get("/taskspaces/{task_id}")
+async def taskspace_detail(task_id: str, container: ContainerDep) -> dict[str, Any]:
+    """读一个任务空间的进度（步骤、产物、交接说明）。"""
+    workspace = Path(container.settings.agent_workspace)
+    data = taskspace.load(workspace, task_id)
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "任务空间不存在或进度文件损坏")
+    return {"taskspace": data}
+
+
+@router.post("/taskspaces/{task_id}/release")
+async def release_taskspace(task_id: str, container: ContainerDep) -> dict[str, Any]:
+    """人工释放占用（执行体崩了但租约还没到期时用）。"""
+    workspace = Path(container.settings.agent_workspace)
+    if taskspace.load(workspace, task_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "任务空间不存在")
+    holder = taskspace.force_release(workspace, task_id)
+    return {"released": bool(holder), "owner": holder}
+
+
+def _reveal_folder(path: Path) -> None:
+    """在系统文件管理器里打开目录（同步实现，调用方放线程里跑）。"""
+    if sys.platform == "win32":
+        os.startfile(path)  # noqa: S606 - 打开目录，不是执行外部程序
+        return
+    opener = shutil.which("open") or shutil.which("xdg-open")
+    if opener is None:
+        raise OSError("找不到可用的文件管理器命令")
+    subprocess.Popen([opener, str(path)])  # noqa: S603 - 绝对路径 + 已校验目录
+
+
+@router.post("/taskspaces/{task_id}/open")
+async def open_taskspace(task_id: str, container: ContainerDep) -> dict[str, Any]:
+    """在系统文件管理器里打开任务空间（仅限本机）。"""
+    path = _task_space_path(container, task_id)
+    try:
+        await asyncio.to_thread(_reveal_folder, path)
+    except OSError as exc:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, f"打开文件夹失败：{exc}"
+        ) from exc
+    return {"ok": True, "path": str(path)}
+
+
+@router.get("/mcp-usage")
+async def mcp_usage(limit: int = 50) -> dict[str, Any]:
+    """工具调用账本：最近记录 + 按工具聚合（只读文件，不碰数据库）。"""
+    return {
+        "recent": usage_ledger.recent(limit),
+        "summary": usage_ledger.summary(),
+    }
+
+
+@router.get("/model-catalog")
+async def model_catalog(container: ContainerDep) -> dict[str, Any]:
+    """重点模型画像：人工确认过的那几款 + 免费档，带证据等级。"""
+    entries, warnings = load_model_catalog(container.settings.resolved_config_dir)
+    return {
+        "models": [entry.as_dict() for entry in entries],
+        "warnings": warnings,
+    }
+
+
+@router.get("/model-inventory")
+async def model_inventory(
+    container: ContainerDep, refresh: bool = False
+) -> dict[str, Any]:
+    """**每个工具的全部模型 + 价格**（价格标明来源，不编造）。
+
+    三份数据：网关模型的牌价（配置里真实单价）、各执行体的模型清单
+    （live 发现优先，冷缓存回落配置快照）、账本里累计的实测成本。
+
+    ``refresh=true`` 时先让各 CLI 重新报一遍清单（约 20 秒，起 node 进程），
+    页面可以先用缓存渲染、再后台核实一次，避免打开就卡住。
+    """
+    if refresh:
+        registry = load_cli_registry(container.settings)
+        targets = {
+            (tool.name, tool.command)
+            for tool in registry.tools.values()
+            if tool.command and tool.backend != "mcp"
+        }
+        if targets:
+            # 并发跑，别一个个等；discover_models 自己会写 5 分钟缓存。
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(discover_models, name, command)
+                    for name, command in targets
+                ),
+                return_exceptions=True,
+            )
+    gateway_models = [
+        model
+        for model_id in container.config.public_model_ids()
+        if (model := container.model_service.describe(model_id))
+    ]
+    executors = (await list_executors(container))["executors"]
+    return model_inventory_service.build(
+        gateway_models=gateway_models,
+        executors=executors,
+        observed=usage_ledger.cost_by_model(),
+    )
 
 
 @router.get("/models")

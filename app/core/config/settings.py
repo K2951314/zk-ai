@@ -260,6 +260,14 @@ class Settings(BaseSettings):
     #: 例：{"vision": "zk-vision", "coder": "zk-auto"}
     agent_role_aliases: str = ""
 
+    # ---- 任务空间与统一权限（2026-11-07）-------------------------------- #
+    #: 任务空间：每次委派在 workspace 下开一个独立目录（``.taskspaces/<id>/``），
+    #: 执行体的 cwd 锁在里面，主工作区只读。关掉则沿用旧行为（cwd 由调用方给）。
+    agent_task_space: bool = True
+    #: 网关级权限档：``approval`` 保持两阶段审批；``bypass`` 在**任务空间内**
+    #: 自动放行（不弹审批卡）。任务空间外仍按执行体自己的配置走。
+    agent_permission_mode: str = "approval"
+
     # ---- 事件中台（自动化调度：/zkadmin/events + scripts/agent_worker.py）---- #
     #: 总闸。关掉后 /zkadmin/events/* 一律 404，worker 也拉不到活。
     events_enabled: bool = True

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.agent import usage_ledger
 from app.services.agent.cli.base import build_adapter
 from app.services.agent.cli.registry import CliRegistry
 from app.services.agent.cli.runner import run_delegation
@@ -85,8 +86,23 @@ def prepare(registry: CliRegistry, toolbox: ToolBox, args: dict[str, Any]) -> To
     )
 
 
-async def perform(registry: CliRegistry, toolbox: ToolBox, args: dict[str, Any]) -> ToolOutcome:
-    """批准后：真正拉起外部执行体跑任务，把结果（或分类后的失败）回填。"""
+async def perform(
+    registry: CliRegistry,
+    toolbox: ToolBox,
+    args: dict[str, Any],
+    *,
+    allow_bypass: bool = False,
+    session_id: str = "",
+    task_space: str = "",
+) -> ToolOutcome:
+    """批准后：真正拉起外部执行体跑任务，把结果（或分类后的失败）回填。
+
+    ``allow_bypass`` 由服务层按「cwd 是否在任务空间内」判定；这里只负责透传，
+    不自己判断——边界判断只应有一个来源。
+
+    ``session_id`` / ``task_space`` 只用于记账（谁在哪个任务里烧了多少）；
+    缺省空串表示调用方没传，账本照记但不带归属。
+    """
     role = str(args.get("role") or "").strip()
     task = str(args.get("task") or "").strip()
     config = registry.tool_for_role(role)
@@ -95,6 +111,23 @@ async def perform(registry: CliRegistry, toolbox: ToolBox, args: dict[str, Any])
     cwd = toolbox.resolve(str(args.get("cwd") or "."))
     if not cwd.is_dir():
         raise ToolError(f"工作目录不存在或不是目录：{args.get("cwd")!r}")
-    result = await run_delegation(config, task=task, cwd=cwd)
+    result = await run_delegation(
+        config, task=task, cwd=cwd, allow_bypass=allow_bypass
+    )
+    # 记账失败不影响主流程（usage_ledger 自己吞异常）。
+    # CLI 没有价目表，这条记录就是「实测价格」的唯一来源。
+    usage_ledger.record_delegation(
+        tool=config.name,
+        model=config.model,
+        role=role,
+        session_id=session_id,
+        task_space=task_space,
+        ok=result.ok,
+        elapsed=result.elapsed,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+        cost_usd=result.cost_usd,
+        error="" if result.ok else result.output[:200],
+    )
     suffix = f"\n（执行体 {config.name} 耗时 {result.elapsed:.1f}s）"
     return ToolOutcome(ok=result.ok, output=result.output + suffix)

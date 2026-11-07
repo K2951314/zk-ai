@@ -807,6 +807,58 @@ def test_market_add_model_saves_back_into_the_market() -> None:
     assert 'closeModal("#model-modal")' in body
 
 
+def test_marketplace_can_verify_manually_typed_upstream_ids() -> None:
+    """接口目录不等于全部能调的模型：市场必须留一个「手填 + 实测」的入口。
+
+    2026-11-07 实测：NVIDIA 网页上新上的 kimi-k3.1-pro 不在 /v1/models 里，
+    只认目录的市场永远探不到它。守卫钉住整条链路：输入框 → 探测时带
+    manual_models → 只对手填 ID 实测（不清掉已有结论）→ 行上标「手填」。
+    """
+    js = _script(_html("index.html"))
+    assert 'id="mk-extra"' in js, "要有手填上游模型 ID 的输入框"
+    assert 'id="mk-manual"' in js, "要有「验证手填」按钮"
+    for zh in ("目录里没有？填上游模型 ID", "验证手填", "实测不通的不让添加"):
+        assert zh in js, f"手填入口要有中文文案「{zh}」"
+    assert '?manual_models=${encodeURIComponent(manual.join(","))}' in js, (
+        "探测请求要带上手填的 ID，重探时才不会把手填的行弄丢"
+    )
+    assert "runVerify(manual, true, pid)" in js, "手填 ID 必须逐个实测且合并已有结论"
+    assert "x.manual" in js, "手填的行要在列表里标出来源"
+    assert 'value="${esc(marketManualDraft)}"' in js, (
+        "手填内容要活过「添加→保存→回市场」这一圈，否则刚加的模型会从列表里消失"
+    )
+    assert "noteHtml" in js, (
+        "目录探测失败但手填还在时，失败原因必须露出来，否则会以为供应商只有这一个模型"
+    )
+
+
+def test_marketplace_manual_cap_matches_the_backend_limit() -> None:
+    """前端的手填上限必须 <= 后端一次能实测的数量。
+
+    前后端各写一个 12 是重复的真相：后端 limit 调小、前端没跟，就会有模型
+    永远停在「未验证」；前端调大、后端没跟，多出来的几个直接没有结论。
+    """
+    from app.api.admin._common import VerifyModelsRequest
+    from app.api.admin.providers import _MANUAL_ID_CAP
+
+    js = _script(_html("index.html"))
+    found = re.search(r"const MANUAL_ID_CAP = (\d+);", js)
+    assert found, "前端没找到 MANUAL_ID_CAP"
+    assert int(found.group(1)) == _MANUAL_ID_CAP
+    assert VerifyModelsRequest.model_fields["limit"].default >= _MANUAL_ID_CAP
+
+
+def test_marketplace_warns_when_a_new_models_specs_are_guessed() -> None:
+    """手填的新模型没有预设，上下文/输出都是按名字猜的——表单必须说出来。
+
+    2026-11-04 的教训：猜 256K、官方 1M，一路配进配置，长请求在网关这层被
+    静默判死。手填场景几乎必然没有预设，这条提示不能省。
+    """
+    js = _script(_html("index.html"))
+    assert "spec_source: x.spec_source" in js, "规格来源要随市场行带进表单"
+    assert "规格未核实（按名字猜的）" in js
+
+
 def test_marketplace_verdict_labels_cover_the_backend_vocabulary() -> None:
     """后端可能返回的每种 verdict，前端都得有中文标签。
 

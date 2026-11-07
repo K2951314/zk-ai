@@ -293,12 +293,13 @@ async function api(path, opts = {}) {
 const LOADERS = {
   overview: loadOverview, pool: loadPool, requests: loadRequests,
   usage: loadUsage, models: loadModels, burner: loadBurner, report: loadReport,
-  events: loadEvents, agent: loadAgent,
+  events: loadEvents, agent: loadAgent, taskspaces: loadTaskspaces,
+  pricing: loadPricing,
 };
 //: 内嵌页视图：这两页是独立应用（事件流 / Agent 任务台），用 iframe 装进右侧
 //: 内容区，而不是另开标签页——切走再切回来要保留现场（Agent 正在跑的会话
 //: 不能因为刷新一次就重建）。所以 frame 只建一次。
-const EMBED_VIEWS = new Set(["events", "agent"]);
+const EMBED_VIEWS = new Set(["events", "agent", "taskspaces", "pricing"]);
 const _frames = {};
 function embedFrame(id, src) {
   const host = $("#view-" + id);
@@ -307,7 +308,9 @@ function embedFrame(id, src) {
   if (built && host.contains(built)) return;   // 已经挂好，别重建
   const frame = document.createElement("iframe");
   frame.className = "view-frame";
-  frame.title = id === "agent" ? "Agent 任务台" : "事件流";
+  frame.title = id === "agent" ? "Agent 任务台"
+    : id === "taskspaces" ? "任务空间"
+    : id === "pricing" ? "模型与价格" : "事件流";
   frame.src = src;
   host.innerHTML = "";
   host.appendChild(frame);
@@ -317,6 +320,9 @@ function loadEvents() { embedFrame("events", "/ui/events?embed=1"); }
 //: Agent 页自带模型选择 / 新任务 / 停止这些必需控件，所以不隐藏它的顶栏，
 //: 直接整页嵌进来 —— 它是「右侧的一个应用」，不是控制台的一段内容。
 function loadAgent() { embedFrame("agent", "/ui/agent"); }
+function loadPricing() { embedFrame("pricing", "/ui/models"); }
+//: 任务空间也是独立应用（每个任务一个文件夹、可打开目录），同样用 iframe 装。
+function loadTaskspaces() { embedFrame("taskspaces", "/ui/taskspaces"); }
 function switchView(name) {
   if (state.view === "burner" && name !== "burner") blStop();
   if (state.view === "report" && name !== "report") reportStop();
@@ -1567,6 +1573,9 @@ function openModelModal(modelId, prefill) {
   const facts = prefill?.discovered || {};   // 供应商 API 实测（可能为空）
   const factsNote = prefill?.facts_note || [];
   const officialFacts = prefill?.official_facts || [];
+  // 没有官方预设、也没探测到规格时，表单里的上下文/输出全是按名字猜的。
+  // 手填的新模型几乎必然走到这里，必须在保存前把这件事说清楚。
+  const estimated = !modelId && m.spec_source === "estimated";
   // 能力评分不再让手选——路由分值来自预设/实测，保存时原样带回 m.capabilities
   const caps = normCaps(m.capabilities);
   let deps = (m.deployments || []).map(d => Object.assign({}, d));
@@ -1585,6 +1594,9 @@ function openModelModal(modelId, prefill) {
   modal.innerHTML = `<div class="card wide">
     <h3>${modelId ? "编辑模型" : (prefill ? "从模型市场新建模型" : "新建模型")}</h3>
     <div class="modal-sub">改完立即生效，并同步写回配置文件（重启后仍在）。规格数字以官方文档为准，能力评分不再手选。</div>
+    ${estimated ? `<div class="facts-card"><div class="f-title">⚠ 规格未核实（按名字猜的）</div>
+      <div class="small">这个模型没有官方预设：下面的上下文窗口和最大输出是<b>按名字估的</b>，
+      既不是实测也不是官方文档。保存前请先去官方文档核对——猜错会让长请求在网关这层被提前判死。</div></div>` : ""}
     ${factsPanel("📘 官方文档规格（表单已按这些值预填）", officialFacts)}
     ${factsPanel("📋 供应商实测能力（探测结果，压过预设）", factsNote)}
     <div class="formgrid">
@@ -1772,6 +1784,9 @@ async function deleteModel(modelId) {
 }
 
 /* ---------- 模型市场：从供应商导入 ---------- */
+// 手填的 ID 要活过「添加 → 保存 → 回市场」这一圈：弹窗会整个重建，输入框若
+// 清空，刚加的模型又不在目录里，列表里根本不会出现——运营者会以为没加成功。
+let marketManualDraft = "";
 async function openMarketModal(presetPid) {
   const modal = $("#market-modal");
   // 只列有可用凭据的供应商：list_models 靠 Key 才能列，没有的列了也是 401
@@ -1791,6 +1806,11 @@ async function openMarketModal(presetPid) {
       <span class="grow"></span>
       <button id="mk-close">关闭</button>
     </div>
+    <div class="row-flex" style="margin-bottom:6px">
+      <input id="mk-extra" style="flex:1" placeholder="目录里没有？填上游模型 ID，多个用逗号或换行分开" value="${esc(marketManualDraft)}">
+      <button id="mk-manual" title="把手填的模型加进列表，并只对它们各发一次真实请求">🔬 验证手填</button>
+    </div>
+    <div class="small muted" style="margin-bottom:10px">网页上新上的模型常常还没进接口目录；只填 ID（别带说明文字），填完照样实测，实测不通的不让添加。</div>
     <div id="mk-list" class="small muted">选供应商后点「探测」列出它能调的所有模型，已收录的会预填上下文/能力/价格。</div>
   </div>`;
   openModal("#market-modal");
@@ -1798,22 +1818,41 @@ async function openMarketModal(presetPid) {
   // upstream_model -> 验证结论。点「验证可调用」后填充，用来在表里标注。
   let verifyMap = {};
   let lastItems = [];
+  let lastPid = "";
+  let loading = false;
   // 目录不大就替运营者跑一遍验证。
   // 2026-09-29 的教训：探针能判「这个 ID 能不能调」，但运营者**不会主动点**，
   // 于是死 ID（deepseek-v4.1-flash 403）和能用的（deepseek-flash 200）在列表里
   // 长得一模一样，只能去翻官方公告才分得清。默认替他跑，而不是等他点。
   const AUTO_VERIFY_MAX = 20;
   const VERIFY_CAP = 40;
-  async function runVerify(models) {
-    const pid = $("#mk-provider").value;
+  // 后端 VerifyModelsRequest.limit 默认 12，手填的量必须与它对齐，
+  // 否则填多了会有几个永远停在「未验证」，运营者会以为没生效。
+  const MANUAL_ID_CAP = 12;
+  const MANUAL_ID_MAX_LEN = 200;
+  // 只按逗号/换行分项，不按普通空格：模型 ID 不含空格，而从网页复制
+  // 「模型名 + 一段描述」时，按空格拆会把描述里的每个词都当成一个模型 ID，
+  // 十几个垃圾项瞬间吃满 12 个验证额度。每项内部取第一个空白前的 token。
+  const manualIds = () => (($("#mk-extra") ? $("#mk-extra").value : "")
+    .split(/[,，\n\r\t]+/)
+    .map(s => s.trim().split(/\s+/)[0])
+    .filter(s => s && s.length <= MANUAL_ID_MAX_LEN)
+    .filter((s, i, arr) => arr.indexOf(s) === i)
+    .slice(0, MANUAL_ID_CAP));
+  // merge=true 用于「验证手填」：只补这几个 ID 的结论，不把之前对目录模型
+  // 实测过的结果清掉。
+  // pid 必须由调用方传进来：验证是串行的（12 个 × 最多 20 秒），期间运营者
+  // 完全可能切走供应商；此时再读下拉框的当前值，会把 A 的模型发到 B 去验。
+  async function runVerify(models, merge = false, pid = $("#mk-provider").value) {
     const btn = $("#mk-verify");
     btn.disabled = true; btn.textContent = `🔬 验证中（${models.length} 个，每个最多 20 秒）…`;
     try {
       const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models/verify`,
                           { method: "POST", json: { models, timeout_seconds: 20 } });
       if (r.error) { toast(r.error.message || "验证失败", "err"); return; }
-      verifyMap = {};
-      (r.results || []).forEach(x => { verifyMap[x.upstream_model] = x; });
+      const next = merge ? { ...verifyMap } : {};
+      (r.results || []).forEach(x => { next[x.upstream_model] = x; });
+      verifyMap = next;
       const dead = (r.checked || 0) - (r.usable || 0);
       toast(`验证完成：${r.usable}/${r.checked} 可调用` + (dead ? `，${dead} 个不可用` : ""),
             dead ? "err" : "ok");
@@ -1824,18 +1863,31 @@ async function openMarketModal(presetPid) {
   $("#mk-verify").onclick = () => {
     const models = lastItems.map(x => x.upstream_model).slice(0, VERIFY_CAP);
     if (!models.length) { toast("先点「探测可用模型」", "err"); return; }
-    runVerify(models);
+    runVerify(models, false, lastPid || $("#mk-provider").value);
   };
   $("#mk-load").onclick = async () => {
+    if (loading) return;
+    loading = true;
     const pid = $("#mk-provider").value;
+    marketManualDraft = $("#mk-extra") ? $("#mk-extra").value : "";
+    const manual = manualIds();
+    // 手填的 ID 一起交给后端补全（预设/价格/已收录判定走同一条流水线），
+    // 重探或换供应商时也不会把手填的行弄丢。
+    const url = `/admin/providers/${encodeURIComponent(pid)}/models`
+      + (manual.length ? `?manual_models=${encodeURIComponent(manual.join(","))}` : "");
     $("#mk-list").innerHTML = '<span class="muted">探测中…</span>';
     try {
-      const r = await api(`/admin/providers/${encodeURIComponent(pid)}/models`);
+      const r = await api(url);
       let items = r.data || [];
       if (!items.length) {
         $("#mk-list").innerHTML = `<span class="pill amber">${esc(r.note || "这个供应商没有可列的模型")}</span>`;
         return;
       }
+      // 目录失败但手填还在时，note 必须露出来——否则运营者只看到手填那一行，
+      // 会以为这个供应商只有这一个模型。
+      const noteHtml = r.note
+        ? `<div class="pill amber" style="display:block;margin-bottom:8px">${esc(r.note)}</div>`
+        : "";
       const VERDICT = {
         ok: ["healthy", "可调用"],
         hang: ["danger", "挂死"],
@@ -1856,7 +1908,7 @@ async function openMarketModal(presetPid) {
           <td class="acts">${x.already_added
             ? '<span class="pill gray">已收录</span>'
             : `<button class="mini primary" data-add-model="${idx}" ${v && !v.ok ? 'disabled title="实测不可调用，别加"' : ""}>＋ 添加</button>`}</td>
-          <td class="name"><b>${esc(x.suggested_model_id)}</b><span class="sub">${esc(x.upstream_model)}</span></td>
+          <td class="name"><b>${esc(x.suggested_model_id)}</b>${x.manual ? '<span class="chip" title="接口目录里没有，是手填后实测的">手填</span>' : ""}<span class="sub">${esc(x.upstream_model)}</span></td>
           <td class="small">${cell}</td>
           <td class="small">${fmtK(x.preset.context_window)}
             ${x.context_window_conflict
@@ -1876,6 +1928,7 @@ async function openMarketModal(presetPid) {
         </tr>`;
       }).join("");
       lastItems = items;
+      lastPid = pid;
       $("#mk-verify").disabled = false;
       window.__mkRerender = () => renderList($("#mk-q") ? $("#mk-q").value : "");
       const renderList = (q) => {
@@ -1897,6 +1950,9 @@ async function openMarketModal(presetPid) {
             description: p.description,
             enabled: true,
             context_window: p.context_window,
+            // 规格来源随行带进表单：estimated 时表单要明确提示「数字是猜的」。
+            // 手填的新模型尤其容易把 256K 的猜测当成事实直接保存。
+            spec_source: x.spec_source,
             capabilities: normCaps(p.capabilities),
             // 实测事实随表单一起带过去：表单据此决定哪些参数可调、哪些直接定值
             discovered: x.discovered,
@@ -1933,7 +1989,7 @@ async function openMarketModal(presetPid) {
           });
         });
       };
-      $("#mk-list").innerHTML = `
+      $("#mk-list").innerHTML = noteHtml + `
         <div class="row-flex" style="margin-bottom:8px">
           <input id="mk-q" size="22" placeholder="搜索模型名 / 说明…" style="flex:1">
           <span class="small muted" id="mk-count"></span>
@@ -1954,15 +2010,29 @@ async function openMarketModal(presetPid) {
       };
       $("#mk-q").oninput = updateCount;
       updateCount();
-      // 目录不大就自动验证一遍（理由见 AUTO_VERIFY_MAX 的注释）
-      if (items.length <= AUTO_VERIFY_MAX) {
-        runVerify(items.map(x => x.upstream_model).slice(0, VERIFY_CAP));
+      // 手填的 ID 一定逐个实测：目录里没有它们，更不能让运营者凭名字猜。
+      // 只探这几个，不把整个目录几十个都跑一遍（那是几分钟到几十分钟的等待）。
+      if (manual.length) {
+        runVerify(manual, true, pid);
+      } else if (items.length <= AUTO_VERIFY_MAX) {
+        // 目录不大就自动验证一遍（理由见 AUTO_VERIFY_MAX 的注释）
+        runVerify(items.map(x => x.upstream_model).slice(0, VERIFY_CAP), false, pid);
       } else {
         $("#mk-verify").title =
           `目录有 ${items.length} 个模型，超过自动验证上限 ${AUTO_VERIFY_MAX} 个`
           + `——用搜索框缩小范围后点「验证可调用」`;
       }
     } catch (err) { $("#mk-list").innerHTML = `<span class="pill red">${esc(err.message)}</span>`; }
+    finally { loading = false; }
+  };
+  $("#mk-manual").onclick = () => {
+    if (loading || $("#mk-verify").disabled) {
+      toast("正在探测或验证中，等它跑完再试", "err"); return;
+    }
+    if (!manualIds().length) {
+      toast("先填上要验证的上游模型 ID（只填 ID，别带说明文字）", "err"); return;
+    }
+    $("#mk-load").click();
   };
   // Handlers are wired before this trigger - clicking first would be a no-op.
   $("#mk-provider").onchange = () => $("#mk-load").click();

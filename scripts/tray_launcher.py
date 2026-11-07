@@ -24,12 +24,15 @@ The tray menu (right-click):
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import IO
 
@@ -106,6 +109,103 @@ START_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_start.re
 GATEWAY_RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "gateway_restart.request"
 _ALIVE_MARKER = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_alive"
 _HEARTBEAT_EVERY = 3.0
+
+
+#: 开机自启的注册表位置与值名（当前用户，不需要管理员权限）。
+_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_NAME = "ZKAI-Gateway"
+
+#: 待审批通知的轮询间隔（秒）。只在 gateway 模式跑。
+_APPROVAL_POLL = 10.0
+
+
+def _quote(part: str) -> str:
+    """路径含空格时加引号，否则原样返回。"""
+    return f'"{part}"' if " " in part else part
+
+
+def autostart_command() -> list[str]:
+    """开机自启要执行的命令行：GUI 解释器 + 托盘脚本 + gateway。"""
+    interpreter, _ = _child_interpreter()
+    return [str(interpreter), str(_ROOT / "scripts" / "tray_launcher.py"), "gateway"]
+
+
+def autostart_enabled() -> bool:
+    """当前用户是否已设置开机自启。非 Windows 一律 False。"""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, _AUTOSTART_NAME)
+            return bool(str(value).strip())
+    except OSError:
+        return False
+
+
+def install_autostart() -> bool:
+    """写入当前用户的 Run 键；失败返回 False（不抛异常，菜单里不炸）。"""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    command = " ".join(_quote(part) for part in autostart_command())
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY) as key:
+            winreg.SetValueEx(key, _AUTOSTART_NAME, 0, winreg.REG_SZ, command)
+    except OSError:
+        return False
+    return True
+
+
+def uninstall_autostart() -> bool:
+    """删除自启项；本来就没有也返回 False。"""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, _AUTOSTART_NAME)
+    except OSError:
+        return False
+    return True
+
+
+def pending_approvals(timeout: float = 3.0) -> list[dict[str, str]]:
+    """查网关里正在等审批的会话；任何失败都返回空（托盘不该因网络问题报错）。"""
+    token = _env_or_default("ZKAI_ADMIN_TOKEN", "")
+    if not token:
+        return []
+    port = _env_or_default("ZKAI_PORT", "8317")
+    url = f"http://127.0.0.1:{port}/zkadmin/agent/sessions"
+    if not url.startswith("http://"):
+        return []
+    try:
+        request = urllib.request.Request(url, headers={"X-Admin-Token": token})
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - 地址由本机常量拼成
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+    sessions = payload.get("sessions") if isinstance(payload, dict) else None
+    if not isinstance(sessions, list):
+        return []
+    waiting: list[dict[str, str]] = []
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "") != "waiting_approval":
+            continue
+        waiting.append(
+            {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or "未命名任务"),
+            }
+        )
+    return waiting
 
 
 def _icon_image(color: tuple[int, int, int, int], size: int) -> Image.Image:
@@ -283,6 +383,9 @@ class TrayLauncher:
         self._running = True
         self._color = _GREEN
         self._icon = self._build_icon()
+        #: 已提醒过的待审批会话；处理掉后自动移出，下次再出现还能提醒。
+        self._notified: set[str] = set()
+        self._last_approval_poll = 0.0
         self._heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
 
     # ------------------------------------------------------------------ #
@@ -315,6 +418,16 @@ class TrayLauncher:
             if self._mode == "gateway":
                 open_console(path="ui/agent", wait=5.0)
 
+        def show_taskspaces(icon, item) -> None:
+            if self._mode == "gateway":
+                open_console(path="ui/taskspaces", wait=5.0)
+
+        def toggle_autostart(icon, item) -> None:
+            if autostart_enabled():
+                uninstall_autostart()
+            else:
+                install_autostart()
+
         def view_log(icon, item) -> None:
             subprocess.Popen(  # noqa: S603 - notepad is a fixed Windows component
                 [r"C:\Windows\System32\notepad.exe", str(self._child.view_log)],
@@ -334,6 +447,13 @@ class TrayLauncher:
             Menu.SEPARATOR,
             MenuItem("打开控制台", show_console, visible=self._mode == "gateway"),
             MenuItem("打开 Agent", show_agent, visible=self._mode == "gateway"),
+            MenuItem("打开任务空间", show_taskspaces, visible=self._mode == "gateway"),
+            MenuItem(
+                "开机自启",
+                toggle_autostart,
+                checked=lambda item: autostart_enabled(),
+                visible=self._mode == "gateway",
+            ),
             MenuItem("查看日志", view_log),
             MenuItem("重启", restart),
             Menu.SEPARATOR,
@@ -418,6 +538,27 @@ class TrayLauncher:
         except OSError:
             pass
 
+    def _poll_approvals(self) -> None:
+        """有新任务在等审批时弹一条系统通知；同一条只提醒一次。"""
+        if self._mode != "gateway":
+            return
+        now = time.time()
+        if now - self._last_approval_poll < _APPROVAL_POLL:
+            return
+        self._last_approval_poll = now
+        waiting = pending_approvals()
+        current = {item["id"] for item in waiting}
+        # 已经处理掉的从记录里移出，下次再出现还能提醒
+        self._notified &= current
+        fresh = [item for item in waiting if item["id"] not in self._notified]
+        if not fresh:
+            return
+        for item in fresh:
+            self._notified.add(item["id"])
+        message = f"{len(fresh)} 个任务在等审批：{fresh[0]['title']}"
+        with contextlib.suppress(Exception):
+            self._icon.notify(message, "有任务等你拍板")
+
     def _heartbeat_loop(self) -> None:
         while self._running:
             time.sleep(_HEARTBEAT_EVERY)
@@ -433,6 +574,7 @@ class TrayLauncher:
                             )
                 else:
                     self._consume_gateway_restart()
+                    self._poll_approvals()
                 self._refresh()
             except Exception:
                 logger.exception("tray heartbeat failed for %s", self._mode)

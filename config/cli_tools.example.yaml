@@ -90,19 +90,47 @@ tools:
     enabled: false
     command: codebuddy
     backend: official            # 用自家订阅额度，不指向网关
-    model: deepseek-v4.1-flash   # 免费档；可选值以 `codebuddy --help` 为准
+    # 2026-11-06：改用 Hy4（运营者指定，当前免费）。准确 id 是 hy4-preview，
+    # 来自 GET /zkadmin/agent/executors/cli-grinder/models 的 live 清单（共 26 个）。
+    model: hy4-preview
     cost_tier: free
     timeout: 300
     approval_mode: plan          # 无头只允许只读分析；写操作必须人工开档
-    # 思考强度：minimal/low/medium/high/xhigh/max（默认档不是 max，要满档得显式写）
-    effort: ""
-    # 上下文：CodeBuddy 没有 --context-window，等价旋钮是自动压缩阈值 --autocompact
-    # （默认跟随模型窗口；写 1000000 表示到 1M 才压缩）
-    context_window: 0
-    # 控制台「执行体」面板的模型下拉；free_models 只是展示标签，
-    # 真正的计费以工具自报的 total_cost_usd 为准（会把 free_models 当"该标的"）
-    models: [deepseek-v4.1-flash, glm-5.3, glm-5.2, kimi-k3]
-    free_models: [deepseek-v4.1-flash]
+    # 思考强度：满档 max（minimal/low/medium/high/xhigh/max）
+    effort: max
+    # 上下文：--autocompact 上限 1M（100k~1M），到 1M 才压缩
+    context_window: 1000000
+    # 完整清单以 live 接口为准；下面是 2026-11-06 快照，方便控制台下拉直接看到全部模型
+    # free_models 只是展示标签，真实计费以工具自报的 total_cost_usd 为准
+    models: [hy4-preview, hy3, deepseek-v4.1-flash, deepseek-v4.1-flash-sg, glm-5.3, glm-5.3-flash, glm-5.2, kimi-k3, kimi-k3.1-pro, kimi-k3.1-pro-highspeed, minimax-m3.1-flash, gemini-3.8-flash, gpt-6-astra, gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, grok-4.7, default-model, fast-model, balanced-model, primary-model]
+    free_models: [hy4-preview, deepseek-v4.1-flash]
+
+  # -------------------------------------------------------------------------
+  # Editor SDK（本机 MCP 服务，免鉴权）—— 2026-11-07 实测
+  # 地址：http://127.0.0.1:39099/mcp（另一个实例在 39100；端口每次启动会变）
+  # 能力：231 个工具（SHEET 67 / DOC 57 / SLIDE 约 100 / 通用 7），中文工具名
+  # ⚠ 这是 MCP，不是子进程：backend: mcp，不要求 command，也不传 model
+  # ⚠ mcp_args 里的 {task} 会被任务文本替换；留空表示调用无参数工具
+  # -------------------------------------------------------------------------
+  editor-sdk:
+    enabled: false
+    command: ""
+    backend: mcp
+    mcp_url: http://127.0.0.1:39099/mcp
+    mcp_tool: get_pool_status
+    mcp_args: {}
+    # mcp_call 白名单：模型可以经通用入口直接调这些工具（写类必须人工列在这里）。
+    # 正确顺序（2026-11-07 实测全通）：
+    #   create_* → **必须再 open_file 一次**（编辑器才真正加载）→ 读写 → save_file → close_file
+    # ⚠ open_file 默认只是「开始加载」就返回，紧接着读会报 No workbook open；
+    #   mcp_call 会自动补 wait=true。
+    # ⚠ 有改动时先 save_file 再 close_file，否则改动会丢（实测不会报错，只会静默丢弃）。
+    mcp_tools: [get_pool_status, open_file, save_file, close_file, create_sheet, create_doc, create_slide, sheet_get_sheet_info, sheet_get_cell_data, sheet_set_range_value, doc_insert_markdown, doc_get_outline, slide_add_slide, slide_get_info]
+    cost_tier: free
+    timeout: 60
+    approval_mode: plan
+    models: []
+    free_models: []
 
   # -------------------------------------------------------------------------
   # Gemini CLI（@google/gemini-cli）—— 官方免费额度，免费档里最干净的一条
@@ -135,19 +163,22 @@ tools:
     enabled: false
     command: qodercli
     backend: official
-    model: DeepSeek-Flash        # 占位：登录后用 --list-models 的真实显示名替换
+    # 2026-11-07 实测：Qwen3.8-Flash 已从账号清单消失，live 只剩 `Sonus` 和一条
+    # 自定义 `ds (qoder-custom-…)`（后者是显示名、带省略号，不能直接当 --model 传）。
+    # 所以默认模型改为 Sonus；清单仍会漂移，**派单前以 live 接口为准**。
+    model: Sonus
     cost_tier: free
     timeout: 300
     approval_mode: plan
     # 思考强度映射到 --reasoning-effort（实测接受 max）
-    effort: ""
+    effort: max
     # 上下文窗口映射到 --context-window；**不填时 Qoder 自己按 128K 管理**
-    # ⚠ 这是"按多大窗口管理"，不会把模型窗口变大
-    context_window: 0
-    # 模型名用 `qoder --list-models` 的显示名
-    # 2026-10-26 实测：当前账号 --list-models 只有这两个；面板以 live 结果为准
-    models: [DeepSeek-Flash, Qwen3.8-Flash]
-    free_models: [DeepSeek-Flash]
+    # ⚠ 这是"按多大窗口管理"，不会把模型窗口变大；满档思考实测墙钟翻倍
+    context_window: 1000000
+    # 2026-11-07 实测 live：Sonus + 一条自定义 ds（带省略号，不能当参数传）。
+    # 面板以 live 结果为准；这行只是 CLI 启动失败时的回退快照。
+    models: [Sonus]
+    free_models: []
 
 # ---------------------------------------------------------------------------
 # 角色 -> 执行体映射（父 agent 派单时只看到角色名与能力描述）
@@ -172,3 +203,8 @@ roles:
   cli-skill:
     tool: codex                   # 需要本机 skill 的活（codex 自带 ~/.codex/skills）
     hint: 需要本机 skill 的任务（外部 CLI 执行）
+  cli-office:
+    tool: editor-sdk              # 本机 Office 编辑器（MCP，免鉴权）
+    # ⚠ 这个角色的固定动作只有「查编辑器池状态」；真正的建表/写文档/做 PPT
+    #   走 mcp_call（父模型自己调工具），不要靠 @ 这个角色去干活。
+    hint: 查编辑器池状态（改表格/文档请直接描述任务，Agent 会调工具）

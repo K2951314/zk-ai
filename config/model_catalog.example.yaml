@@ -1,0 +1,165 @@
+# 重点模型画像（可提交模板；现役配置是 config/model_catalog.yaml，gitignore）
+#
+# 只收录「最好的几款 + 免费的」，不求全量。全量清单由各执行体的 live 发现提供：
+#   GET /zkadmin/agent/executors/{角色}/models
+#
+# 字段：
+#   id         调用时真正要写的模型名（**大小写敏感**，按各工具自己的口径）
+#   name       给人看的中文名
+#   via        从哪调用：gateway / codebuddy / qoder / catpawai / workbuddy
+#   tier       free（免费额度）/ cheap（低价）/ paid（收费）
+#   context    上下文窗口（tokens；未知写 0，不要猜）
+#   strengths  适合什么活（中文短标签）
+#   verified   live=接口实测在列 / config=配置或日志确认 / unverified=待核实
+#   note       坑或限制（给人看的，别写成猜测）
+#
+# ⚠ 免费标记会过期：tier 只是选型参考，真实计费以工具自报的 total_cost_usd 为准。
+
+models:
+  # ---- 网关直连（统一走 ZK-AI 的别名与故障转移）-------------------------
+  - id: sensenova-6.8-flash
+    name: 商汤 6.8 Flash
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [通用, 中文, 速度]
+    verified: live
+    note: 网关默认链成员；积分按账号算，5 小时 / 每周两档窗口
+
+  - id: ds4.1
+    name: DeepSeek V4.1
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [代码, 长文, 推理]
+    verified: live
+    note: 别名链 ds4.1 → deepseek-flash；写代码优先
+
+  - id: deepseek-flash
+    name: DeepSeek Flash
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [通用, 代码, 速度]
+    verified: live
+    note: 别名 zk-auto 的首选；便宜、稳
+
+  - id: kimi-k3
+    name: Kimi K3
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [长上下文, 中文写作]
+    verified: live
+    note: 只有商汤一条在役部署，被限流时无处可退
+
+  - id: glm-5.3
+    name: GLM 5.3
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [中文, 通用]
+    verified: live
+    note: NVIDIA 那条不可用时只剩商汤；作为 GLM 档位的兜底
+
+  - id: sensenova-6.8-flash-lite
+    name: 商汤 6.8 Flash Lite
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [轻量, 批量]
+    verified: live
+    note: 专属池扣完会静默溢出到通用池，批量任务要盯预算
+
+  - id: step-5-preview
+    name: Step 5 预览
+    via: gateway
+    tier: free
+    context: 0
+    strengths: [通用]
+    verified: live
+    note: 预览版，稳定性未长期观察
+
+  # ---- CodeBuddy（订阅额度，CLI 可列全量 26 个）-------------------------
+  - id: hy4-preview
+    name: 腾讯 Hy4（预览版）
+    via: codebuddy
+    tier: free
+    context: 1000000
+    strengths: [通用, 中文, 长上下文]
+    verified: live
+    note: 运营者指定的主力；正式版只在桌面版可见，CLI 目前只暴露 preview
+
+  - id: kimi-k3.1-pro
+    name: Kimi K3.1 Pro
+    via: codebuddy
+    tier: cheap
+    context: 0
+    strengths: [长上下文, 推理]
+    verified: live
+    note: 另有 -highspeed 变体；是否免费以工具自报成本为准
+
+  - id: deepseek-v4.1-flash
+    name: DeepSeek V4.1 Flash
+    via: codebuddy
+    tier: free
+    context: 0
+    strengths: [批量改写, 结构化输出]
+    verified: live
+    note: 实测 total_cost_usd 为 0；框架税约 4.5 万 token/次
+
+  - id: glm-5.3-flash
+    name: GLM 5.3 Flash
+    via: codebuddy
+    tier: free
+    context: 0
+    strengths: [轻量, 批量]
+    verified: live
+    note: ZCode 里也提供同款免费档，两条路可互为备份
+
+  - id: minimax-m3.1-flash
+    name: MiniMax M3.1 Flash
+    via: codebuddy
+    tier: free
+    context: 0
+    strengths: [中文, 通用]
+    verified: live
+    note: 免费档，适合机械活
+
+  # ---- Qoder（账号相关，清单会变）--------------------------------------
+  - id: SonusX
+    name: Qoder SonusX
+    via: qoder
+    tier: free
+    context: 0
+    strengths: [代码]
+    verified: live
+    note: 当前账号 --list-models 只有它和一条自定义 ds；换账号可能变
+
+  - id: Qwen3.8-Flash
+    name: 通义 3.8 Flash
+    via: qoder
+    tier: free
+    context: 0
+    strengths: [中文, 通用]
+    verified: config
+    note: 曾在清单里，当前账号已不显示；调用前先用 --list-models 核实
+
+  # ---- CatPawAI / WorkBuddy（桌面端专属）-------------------------------
+  - id: glm-5.3-flashx
+    name: GLM 5.3 FlashX
+    via: catpawai
+    tier: free
+    context: 0
+    strengths: [轻量, 批量]
+    verified: config
+    note: 仅 CatPawAI 桌面端可见（日志确认）；命令行没有这个 id
+
+  - id: mimo-v2.6-pro
+    name: 小米 MiMo V2.6 Pro
+    via: workbuddy
+    tier: cheap
+    context: 0
+    strengths: [中文, 通用]
+    verified: unverified
+    note: 运营者称桌面版可用积分调用；CLI 与本地接口均未暴露，需在桌面版内确认

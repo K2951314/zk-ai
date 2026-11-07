@@ -89,6 +89,19 @@ def discover_models(tool: str, command: str) -> list[str]:
     return models
 
 
+def cached_models(tool: str, command: str) -> list[str]:
+    """只读缓存：命中且未过期才返回清单，**绝不触发子进程**。
+
+    ``/executors`` 这类高频列表接口用它来显示真实模型；缓存冷时返回空，
+    由调用方回落到配置快照（而不是让打开任务台的人等一次 20 秒的 CLI 启动）。
+    """
+    key = f"{tool}:{command}"
+    cached = _CACHE.get(key)
+    if cached and time.time() - cached[0] < _TTL:
+        return list(cached[1])
+    return []
+
+
 def clear_cache() -> None:
     """测试用：清掉进程级缓存。"""
     _CACHE.clear()

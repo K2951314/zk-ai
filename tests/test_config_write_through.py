@@ -395,6 +395,55 @@ async def test_market_marks_discovered_and_guessed_rows(write_api, monkeypatch) 
     assert "facts_note" not in guessed
 
 
+async def test_a_stale_provider_catalogue_never_shrinks_an_official_window(write_api) -> None:
+    """商汤目录报 262144，官方文档写 1M——**目录不等于官方文档**。
+
+    2026-11-04 实测：sensenova-6.8-flash 的 ``GET /v1/models`` 报
+    ``context_length: 262144``，官方文档写「支持1 M 上下文窗口」，真请求塞
+    1,047,678 prompt tokens 照样 200。旧规则「探测压过预设」于是把这个 1M
+    模型配成 256K——低估窗口不报错，只会让长请求在网关这层被判死、静默降级。
+    新规则：两者都有时取大的，并把分歧挂到 ``context_window_conflict`` 上。
+    """
+    client, harness, _ = write_api
+
+    class StaleAdapter(FakeAdapter):
+        async def model_catalogue(self, credential=None):
+            return {
+                # 官方 preset 是 1M（deepseek-flash），目录却说 256K
+                "deepseek-flash": {"id": "deepseek-flash", "context_length": 262144},
+            }
+
+    harness.container.router.register_adapter(
+        "fake", StaleAdapter(harness.container.config.providers["fake"]))
+
+    res = await client.get("/zkadmin/providers/fake/models", headers=ADMIN)
+    assert res.status_code == 200, res.text
+    row = {r["upstream_model"]: r for r in res.json()["data"]}["deepseek-flash"]
+    assert row["preset"]["context_window"] == 1_048_576, "目录的旧值不能把小窗口写进表单"
+    # source 仍报 preset（这个字段说的是「社区官方资料页」）；
+    # 「这份 preset 是不是核实过的官方规格」由 spec_source 单独表达
+    assert row["context_window_source"] == "preset"
+    assert row["spec_source"] == "official"
+    assert row["context_window_conflict"] == {"provider": 262144, "spec": 1_048_576}
+
+
+async def test_a_larger_provider_window_still_wins(write_api) -> None:
+    """反方向要让探测赢：供应商真的给了更大的窗口，就按它来。"""
+    client, harness, _ = write_api
+
+    class BiggerAdapter(FakeAdapter):
+        async def model_catalogue(self, credential=None):
+            return {"deepseek-flash": {"id": "deepseek-flash", "context_length": 2097152}}
+
+    harness.container.router.register_adapter(
+        "fake", BiggerAdapter(harness.container.config.providers["fake"]))
+    res = await client.get("/zkadmin/providers/fake/models", headers=ADMIN)
+    row = {r["upstream_model"]: r for r in res.json()["data"]}["deepseek-flash"]
+    assert row["preset"]["context_window"] == 2_097_152
+    assert row["context_window_source"] == "provider"
+    assert row["context_window_conflict"] == {"provider": 2_097_152, "spec": 1_048_576}
+
+
 async def test_market_falls_back_to_plain_id_list(write_api) -> None:
     """Adapters that only know ids (the default) still produce rows, all guessed."""
     client, _, _ = write_api
@@ -404,6 +453,136 @@ async def test_market_falls_back_to_plain_id_list(write_api) -> None:
     assert rows, "the default catalogue wraps list_models"
     assert all(row["discovered_known"] is False for row in rows)
     assert all(row["context_window_source"] == "preset" for row in rows)
+
+
+# --------------------------------------------------------------------------- #
+# 手填上游模型 ID：接口目录不等于「这个供应商全部能调的模型」
+# --------------------------------------------------------------------------- #
+async def test_market_accepts_manual_ids_outside_the_catalogue(write_api) -> None:
+    """2026-11-07 实测：NVIDIA 网页模型库有 kimi-k3.1-pro，接口目录 84 个里没有。
+
+    市场只认目录，就等于把「目录里没有 ≠ 不能调」这条路堵死。手填的 ID 必须
+    走同一条补全流水线（预设 / 牌价 / 已收录），并在行上标明来源。
+    """
+    client, harness, _ = write_api
+
+    class OneModelAdapter(FakeAdapter):
+        async def model_catalogue(self, credential=None):
+            return {"fake-model": {"id": "fake-model"}}
+
+    harness.container.router.register_adapter(
+        "fake", OneModelAdapter(harness.container.config.providers["fake"]))
+
+    res = await client.get(
+        "/zkadmin/providers/fake/models",
+        params={"manual_models": "fake-model, moonshotai/kimi-k3.1-pro"},
+        headers=ADMIN,
+    )
+    assert res.status_code == 200, res.text
+    rows = res.json()["data"]
+    assert {row["upstream_model"] for row in rows} == {
+        "fake-model", "moonshotai/kimi-k3.1-pro",
+    }
+    by_id = {row["upstream_model"]: row for row in rows}
+    # 本来就在目录里的 ID 不重复、也不标「手填」
+    assert by_id["fake-model"]["manual"] is False
+    manual = by_id["moonshotai/kimi-k3.1-pro"]
+    assert manual["manual"] is True
+    assert manual["suggested_model_id"] == "kimi-k3.1-pro"
+    assert manual["discovered_known"] is False, "手填的行没有上游实测事实"
+    assert manual["already_added"] is False
+
+
+async def test_manual_ids_are_deduplicated_and_capped(write_api) -> None:
+    """手填上限必须 <= 后端一次能实测的数量，否则会有几个永远停在「未验证」。"""
+    from app.api.admin._common import VerifyModelsRequest
+    from app.api.admin.providers import _MANUAL_ID_CAP
+
+    assert VerifyModelsRequest.model_fields["limit"].default >= _MANUAL_ID_CAP
+
+    client, _, _ = write_api
+    many = ",".join(f"vendor/model-{i}" for i in range(30))
+    res = await client.get(
+        "/zkadmin/providers/fake/models",
+        params={"manual_models": many + "，vendor/model-0, vendor/model-1"},
+        headers=ADMIN,
+    )
+    assert res.status_code == 200, res.text
+    manual = [row for row in res.json()["data"] if row["manual"]]
+    assert len(manual) == _MANUAL_ID_CAP, "手填 ID 要去重并限量"
+    assert len({row["upstream_model"] for row in manual}) == _MANUAL_ID_CAP
+
+
+async def test_market_without_manual_ids_still_marks_every_row(write_api) -> None:
+    """不带手填参数时行为不能变：每行照样有 manual 字段，且全是 False。"""
+    client, _, _ = write_api
+    res = await client.get("/zkadmin/providers/fake/models", headers=ADMIN)
+    assert res.status_code == 200
+    rows = res.json()["data"]
+    assert rows and all(row["manual"] is False for row in rows)
+
+
+async def test_manual_ids_survive_a_failed_catalogue_probe(write_api) -> None:
+    """目录探测失败时，手填的模型仍然要能列出来并实测。
+
+    这恰恰是最需要手填的场景：NVIDIA 的 ``/v1/models`` 本身就经常超时。
+    旧实现一见探测失败就早退，等于手填入口在最该用的时候失灵。
+    """
+    client, harness, _ = write_api
+
+    class BrokenAdapter(FakeAdapter):
+        async def model_catalogue(self, credential=None):
+            raise RuntimeError("upstream timeout")
+
+    harness.container.router.register_adapter(
+        "fake", BrokenAdapter(harness.container.config.providers["fake"]))
+
+    res = await client.get(
+        "/zkadmin/providers/fake/models",
+        params={"manual_models": "moonshotai/kimi-k3.1-pro"},
+        headers=ADMIN,
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [row["upstream_model"] for row in body["data"]] == [
+        "moonshotai/kimi-k3.1-pro",
+    ]
+    assert body["data"][0]["manual"] is True
+    assert "目录探测失败" in body["note"]
+
+
+async def test_manual_ids_take_the_first_token_of_a_pasted_line(write_api) -> None:
+    """从网页复制「模型名 + 描述」时，不能把描述里的每个词都当成模型 ID。
+
+    按空格拆会让十几个垃圾词吃满 12 个验证额度，真正的 ID 反而排不上。
+    """
+    client, _, _ = write_api
+    res = await client.get(
+        "/zkadmin/providers/fake/models",
+        params={
+            "manual_models": (
+                "moonshotai/kimi-k3.1-pro 3T-class open model\n"
+                "vendor/second-model"
+            ),
+        },
+        headers=ADMIN,
+    )
+    assert res.status_code == 200, res.text
+    manual = [row["upstream_model"] for row in res.json()["data"] if row["manual"]]
+    assert manual == ["moonshotai/kimi-k3.1-pro", "vendor/second-model"]
+
+
+async def test_an_overlong_manual_id_is_dropped_not_forwarded(write_api) -> None:
+    """超长 ID 不能进 URL：12 个 500 字符的串会把 GET 顶成 414。"""
+    client, _, _ = write_api
+    res = await client.get(
+        "/zkadmin/providers/fake/models",
+        params={"manual_models": "x" * 500 + ",good/model"},
+        headers=ADMIN,
+    )
+    assert res.status_code == 200, res.text
+    manual = [row["upstream_model"] for row in res.json()["data"] if row["manual"]]
+    assert manual == ["good/model"]
 
 
 async def test_a_stale_config_save_returns_409_not_500(write_api) -> None:

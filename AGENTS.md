@@ -3,13 +3,13 @@
 - 双击 `scripts\start_gateway.cmd`（默认端口 8317，可传参换端口）；手动等价命令：
   `.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8317`
 - 依赖用 uv 管理（`uv sync` 自动装 Python 3.12+）；**门禁/测试要
-  `uv sync --extra dev`**（pytest/ruff/mypy 是 optional extra，plain sync 不装）；
+  `uv sync --extra dev`**（pytest/ruff/mypy 是 optional extra）；
   首次先 `python scripts/init_db.py` 建表
 - 提交前门禁必须全绿：`ruff check` + `mypy` + `pytest`（README §20）
 
 ## 技术栈
 
-FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥ 3.12；uv。
+FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 
 ## 目录与约定
 
@@ -21,14 +21,14 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   行为变更两边同步
 - **`.cmd`/`.bat` 必须纯 ASCII + CRLF**：中文会让 cmd 字节错位误解析（生成乱码文件/跳行）；
   CRLF 由 `.gitattributes` 强制，ASCII 靠自觉；中文文案放对应 Python 脚本里
-- 文档入口：`使用手册.md`（面向使用，先看这个）→ `README.md`（全量参考）
+- 文档入口：`使用手册.md`（面向使用）→ `README.md`（全量参考）
 - `docs/` 放**一次性的排查/审查报告**（带日期的 `*.md`），不是常读文档——
   结论该沉淀的往上写进本文件或 `使用手册.md`，报告本身只作过程留档。
   另有三份**从本文件拆出的流程文档**（规则文件超 65,536 字节预算）：
   `docs/服务器同步.md`、`docs/部署与运维坑.md`、`docs/控制台前端约定.md`——
-  只做对应的事时才翻，规则正文仍以本文件为准。
-  第四份 `docs/消耗器内部机制.md`（2026-10-28 拆出）：消耗器已停用（见「当前状态」），
-  AIMD 饥饿救济 / 限流停靠 / 费率校准优先级这些实现细节不再需要每次会话都看。
+  只做对应的事时才翻，规则以本文件为准。
+  第四份 `docs/消耗器内部机制.md`：消耗器已停用（见「当前状态」），内部实现细节不再需要每次会话都看。
+  `docs/模型市场与预设.md`：加模型/动预设表时翻。
   另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
   （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
@@ -612,9 +612,6 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `.qoder/.models/*/catalog-*` 是加密文件（头 `QMC`），别去解它。面板下拉走
   live 发现（`source: live`），静态 `models` 只是未登录时的兜底。
 
-## 服务器化改造的坑
-
-（已拆到 `docs/部署与运维坑.md`，做这类事时才需要翻。）
 
 ## 事件中台（2026-11-02，自动化调度）
 
@@ -694,7 +691,7 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 
 ## 手机版控制台改造
 
-（已拆到 `docs/控制台前端约定.md`，做这类事时才需要翻。）
+（已拆到 `docs/控制台前端约定.md`，做这类事时才翻。）
 
 ## Agent 工作方式（2026-09-23，防半途而废）
 - **本机 shell 是 PowerShell，here-string 会把中文和转义写坏**：写含中文的临时脚本时
@@ -703,10 +700,8 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
 - **回复全程用中文**：文件路径、命令、字段名保留原文，但叙述不用英文；用户把「回复夹英文」
   列为明确不满，动手写每句话前先确认这一点
 - 临时脚本统一放 `exports/_*.py`，跑完即删；不要把审计脚本留在工作区
-
-## 加模型前先核对官方文档
-
-见 `docs/模型市场与预设.md`。
+- **并发测试夹具要加锁**（2026-11-04）：`ask_batch` 的 `stub_post` 是多线程共写的 list，
+  裸 `append` 撞出顺序错——单跑必绿、全量偶红，最能骗人的那种。已加 `threading.Lock`。
 
 ## 当前状态（持续整理：2026-10-07）
 
@@ -741,8 +736,4 @@ FastAPI + httpx + SQLAlchemy 2.x (async/sqlite) + pydantic-settings；Python ≥
   `6.7-flash-lite`、`u1.5-lite` 同样 404，而 `deepseek-flash` 返回 429（说明有效）。
   所以「把那 119 万专属池余额当执行体免费后端」这条路**走不通**，
   已实测否决。又一处「目录里有 ≠ 能调用」（同 §已知坑 的三反例表）。
-
-## 服务器怎么同步代码
-
-（已拆到 `docs/服务器同步.md`，做这类事时才需要翻。）
 

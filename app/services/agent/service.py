@@ -35,6 +35,7 @@ from app.core.errors import ZKAIError
 from app.core.logging import get_logger
 from app.database.repository import AgentRepository
 from app.models.request import ChatCompletionRequest, ChatMessage, ToolCall
+from app.services.agent import mcp_call, taskspace, usage_ledger
 from app.services.agent.cli import CliRegistry, load_cli_registry
 from app.services.agent.cli import delegate as cli_delegate
 from app.services.agent.cli.registry import EFFORT_LEVELS
@@ -369,6 +370,22 @@ class AgentService:
             "effort": config.effort,
             "context_window": config.context_window,
         }
+        # 直跑与模型派单共用同一套任务空间与租约：先占空间，再执行。
+        space, delegation_cwd, allow_bypass, space_error = self._enter_task_space(
+            run, goal=task
+        )
+        if space_error:
+            error = f"{space_error}，本次没有执行"
+            await self.repo.update_status(session_id, "failed", error=error)
+            self._emit(run, {
+                "type": "session_done",
+                "status": "failed",
+                "error": error,
+            })
+            outcome.update(status="failed", error=error)
+            run.done.put_nowait(outcome)
+            self._running.pop(session_id, None)
+            return
         try:
             await self.repo.update_status(session_id, "running")
             self._emit(run, {
@@ -378,7 +395,23 @@ class AgentService:
                 "resumed": False,
             })
             self._emit(run, {"type": "step_start", "step": 1, "model": config.model})
-            result = await run_delegation(config, task=task, cwd=run.workspace)
+            result = await run_delegation(
+                config, task=task, cwd=delegation_cwd, allow_bypass=allow_bypass
+            )
+            # 记账：CLI 没有价目表，这条记录是「实测价格」的唯一来源。
+            usage_ledger.record_delegation(
+                tool=config.name,
+                model=config.model,
+                role=config.name,
+                session_id=session_id,
+                task_space=str(run.workspace),
+                ok=result.ok,
+                elapsed=result.elapsed,
+                tokens_in=result.tokens_in,
+                tokens_out=result.tokens_out,
+                cost_usd=result.cost_usd,
+                error="" if result.ok else result.output[:200],
+            )
             status = "done" if result.ok else "failed"
             error = None if result.ok else result.output[:300]
             if run.cancelled:
@@ -420,6 +453,8 @@ class AgentService:
             self._emit(run, {"type": "session_done", "status": "failed", "error": message[:200]})
             outcome.update(status="failed", error=message)
         finally:
+            if space is not None:
+                taskspace.release(run.workspace, space.task_id, owner=session_id)
             run.done.put_nowait(outcome)
             self._running.pop(session_id, None)
 
@@ -504,6 +539,23 @@ class AgentService:
         session_id = run.session_id
         outcome: dict[str, Any] = {"session_id": session_id, "status": "failed", "error": None}
         status, error = "done", None
+        # 一批多段共享同一个任务空间：先让 A 查、再让 B 审，产物落在同一处。
+        goals = "；".join(task for _, task, _ in resolved)[:200]
+        space, batch_cwd, allow_bypass, space_error = self._enter_task_space(
+            run, goal=goals
+        )
+        if space_error:
+            error = f"{space_error}，本次没有执行"
+            await self.repo.update_status(session_id, "failed", error=error)
+            self._emit(run, {
+                "type": "session_done",
+                "status": "failed",
+                "error": error,
+            })
+            outcome.update(status="failed", error=error)
+            run.done.put_nowait(outcome)
+            self._running.pop(session_id, None)
+            return
         try:
             await self.repo.update_status(session_id, "running")
             self._emit(run, {
@@ -517,7 +569,23 @@ class AgentService:
                     status, error = "cancelled", "任务被取消"
                     break
                 self._emit(run, {"type": "step_start", "step": index, "model": config.model})
-                result = await run_delegation(config, task=task, cwd=run.workspace)
+                result = await run_delegation(
+                    config, task=task, cwd=batch_cwd, allow_bypass=allow_bypass
+                )
+                # 记账：批量里每一段单独记，才能看出「哪一段最贵」。
+                usage_ledger.record_delegation(
+                    tool=config.name,
+                    model=config.model,
+                    role=role,
+                    session_id=session_id,
+                    task_space=str(run.workspace),
+                    ok=result.ok,
+                    elapsed=result.elapsed,
+                    tokens_in=result.tokens_in,
+                    tokens_out=result.tokens_out,
+                    cost_usd=result.cost_usd,
+                    error="" if result.ok else result.output[:200],
+                )
                 payload = {
                     "role": role,
                     "tool": config.name,
@@ -567,6 +635,8 @@ class AgentService:
             self._emit(run, {"type": "session_done", "status": "failed", "error": message[:200]})
             outcome.update(status="failed", error=message)
         finally:
+            if space is not None:
+                taskspace.release(run.workspace, space.task_id, owner=session_id)
             run.done.put_nowait(outcome)
             self._running.pop(session_id, None)
 
@@ -722,6 +792,11 @@ class AgentService:
         # 且注册表为空时连 schema 都不发——模型根本不知道有这个东西。
         if run.parent is None and run.cli_registry.known_roles():
             schemas = [*schemas, cli_delegate.build_schema(run.cli_registry)]
+        # mcp_call 只在有 MCP 白名单时出现；子会话同样不给（与 delegate_cli 同理）。
+        if run.parent is None:
+            mcp_schema = mcp_call.build_schema(run.cli_registry)
+            if mcp_schema is not None:
+                schemas = [*schemas, mcp_schema]
         steps = 0
         in_tokens = 0
         out_tokens = 0
@@ -895,6 +970,8 @@ class AgentService:
                 return await self._spawn_child(run, args)
             if name == cli_delegate.TOOL_NAME:
                 return await self._delegate_cli(run, toolbox, args)
+            if name == mcp_call.TOOL_NAME:
+                return await self._mcp_call(run, toolbox, args)
             if name in SAFE_TOOLS:
                 return await toolbox.perform(name, args)
             if name not in DANGEROUS_TOOLS:
@@ -934,6 +1011,95 @@ class AgentService:
     # ------------------------------------------------------------------ #
     # 外部执行体委派（delegate_cli）
     # ------------------------------------------------------------------ #
+    async def _approve(
+        self,
+        run: _Running,
+        name: str,
+        args: dict[str, Any],
+        prepared: ToolOutcome,
+    ) -> ToolOutcome | None:
+        """两阶段审批；返回 None 表示已批准（或本会话已免打扰），可以继续执行。"""
+        if run.approvals.skipped(name):
+            return None
+        preview = str(
+            (prepared.display or {}).get("diff")
+            or (prepared.display or {}).get("command")
+            or ""
+        )
+        approval = run.approvals.register(name, args, preview, prepared.display)
+        await self.repo.update_status(run.session_id, "waiting_approval")
+        seq = await self.repo.add_message(
+            run.session_id,
+            role="assistant",
+            kind="approval",
+            content=preview or f"请求执行 {name}",
+            data={"approval_id": approval.id, "tool": name, "args": args},
+        )
+        self._emit(run, {
+            "type": "approval_request",
+            "seq": seq,
+            "approval_id": approval.id,
+            "tool": name,
+            "preview": preview,
+            "display": prepared.display,
+            "args": args,
+        })
+        await approval.event.wait()
+        await self.repo.update_status(run.session_id, "running")
+        if not approval.approved:
+            return ToolOutcome(
+                ok=False,
+                output="用户拒绝了此操作。请调整方案后重试，或直接给出结论。",
+            )
+        return None
+
+    async def _mcp_call(
+        self, run: _Running, toolbox: ToolBox, args: dict[str, Any]
+    ) -> ToolOutcome:
+        """mcp_call：直接调一个白名单里的 MCP 工具，走与委派相同的两阶段审批。"""
+        server = str(args.get("server") or "")
+        tool = str(args.get("tool") or "")
+        started = time.monotonic()
+        try:
+            prepared = mcp_call.prepare(run.cli_registry, toolbox, args)
+            rejected = await self._approve(run, mcp_call.TOOL_NAME, args, prepared)
+            if rejected is not None:
+                return rejected
+            outcome = await mcp_call.perform(run.cli_registry, toolbox, args)
+        except ToolError as exc:
+            outcome = ToolOutcome(ok=False, output=f"工具执行失败：{exc}")
+        # 记账失败不影响主流程（usage_ledger 自己吞异常）。
+        usage_ledger.record(
+            tool=tool or "未知",
+            server=server,
+            session_id=run.session_id,
+            task_space=str(run.workspace),
+            ok=outcome.ok,
+            elapsed=time.monotonic() - started,
+            error="" if outcome.ok else outcome.output[:200],
+        )
+        return outcome
+
+    def _enter_task_space(
+        self, run: _Running, *, goal: str
+    ) -> tuple[taskspace.TaskSpace | None, Path, bool, str]:
+        """建任务空间并抢租约，三条派单路径共用。
+
+        返回 ``(空间, 工作目录, 是否允许 bypass, 错误说明)``。错误非空时由调用方
+        把失败写回自己的界面（工具结果 / 会话状态 / 事件回执），因为三条路径
+        的失败呈现方式不同，不适合在这里统一。
+        """
+        if not self.settings.agent_task_space:
+            return None, run.workspace, False, ""
+        space = taskspace.create(run.workspace, session_id=run.session_id, goal=goal)
+        got, holder = taskspace.acquire(
+            run.workspace, space.task_id, owner=run.session_id
+        )
+        if not got:
+            return None, run.workspace, False, f"任务空间正被 {holder} 使用"
+        allow = self.settings.agent_permission_mode == "bypass"
+        return space, space.path, allow, ""
+
     async def _delegate_cli(
         self, run: _Running, toolbox: ToolBox, args: dict[str, Any]
     ) -> ToolOutcome:
@@ -944,37 +1110,48 @@ class AgentService:
                 "外部执行体功能未启用（config/cli_tools.yaml 未配置或无可用执行体）。"
             )
         session_id = run.session_id
-        if not run.approvals.skipped(cli_delegate.TOOL_NAME):
-            prepared = cli_delegate.prepare(run.cli_registry, toolbox, args)
-            preview = str((prepared.display or {}).get("command") or "")
-            approval = run.approvals.register(
-                cli_delegate.TOOL_NAME, args, preview, prepared.display
+        args = dict(args)
+        # 任务空间：没指定 cwd 时自动开一个独立目录，执行体在里面工作，
+        # 主工作区不被直接改写（产物落 outputs/，进度落 state.json）。
+        space: taskspace.TaskSpace | None = None
+        allow_bypass = False
+        if not str(args.get("cwd") or "").strip():
+            space, space_cwd, allow_bypass, space_error = self._enter_task_space(
+                run, goal=str(args.get("task") or "")
             )
-            await self.repo.update_status(session_id, "waiting_approval")
-            seq = await self.repo.add_message(
-                session_id,
-                role="assistant",
-                kind="approval",
-                content=preview or "请求执行 delegate_cli",
-                data={"approval_id": approval.id, "tool": cli_delegate.TOOL_NAME, "args": args},
-            )
-            self._emit(run, {
-                "type": "approval_request",
-                "seq": seq,
-                "approval_id": approval.id,
-                "tool": cli_delegate.TOOL_NAME,
-                "preview": preview,
-                "display": prepared.display,
-                "args": args,
-            })
-            await approval.event.wait()
-            await self.repo.update_status(session_id, "running")
-            if not approval.approved:
+            if space_error:
                 return ToolOutcome(
                     ok=False,
-                    output="用户拒绝了此操作。请调整方案后重试，或直接给出结论。",
+                    output=(
+                        f"{space_error}，为避免两边互相覆盖，本次没有派单。"
+                        "等它完成后再试，或者换一个任务重开一个空间。"
+                    ),
                 )
-        return await cli_delegate.perform(run.cli_registry, toolbox, args)
+            if space is not None:
+                args["cwd"] = space_cwd.relative_to(run.workspace).as_posix()
+        elif self.settings.agent_permission_mode == "bypass":
+            # 显式指定了目录：只有落在任务空间根内才放行，其余按原配置走。
+            try:
+                target = toolbox.resolve(str(args.get("cwd") or "."))
+            except ToolError:
+                target = run.workspace
+            allow_bypass = taskspace.is_inside(run.workspace, target)
+        try:
+            prepared = cli_delegate.prepare(run.cli_registry, toolbox, args)
+            rejected = await self._approve(run, cli_delegate.TOOL_NAME, args, prepared)
+            if rejected is not None:
+                return rejected
+            return await cli_delegate.perform(
+                run.cli_registry,
+                toolbox,
+                args,
+                allow_bypass=allow_bypass,
+                session_id=session_id,
+                task_space=str(run.workspace),
+            )
+        finally:
+            if space is not None:
+                taskspace.release(run.workspace, space.task_id, owner=session_id)
 
     # ------------------------------------------------------------------ #
     # 子任务派发
