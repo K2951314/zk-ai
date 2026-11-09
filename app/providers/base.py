@@ -846,6 +846,27 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
             if effort and "reasoning_effort" not in extra:
                 extra["reasoning_effort"] = effort
+        # 思考开关的另外两种写法（2026-11-09 第二轮实测）：ZCode 3.17.2 还会
+        # 同时发 ``thinking: {"type": "enabled"}``（Anthropic 风格）和
+        # ``enable_thinking: true``（国内上游风格）。两者都不属于 OpenAI
+        # chat wire；AMD 直接 400「"thinking" is not supported ... Use
+        # "reasoning_effort"」。这里把语义映射到唯一的扁平字段：
+        #   type=disabled / enable_thinking=false -> reasoning_effort="none"
+        #   enabled/true -> 不指定，让上游用默认档
+        # 客户端显式给了 reasoning_effort 时以它为准，两个开关只丢弃。
+        thinking = extra.pop("thinking", None)
+        enable_thinking = extra.pop("enable_thinking", None)
+        if "reasoning_effort" not in extra:
+            thinking_disabled = (
+                (
+                    isinstance(thinking, dict)
+                    and str(thinking.get("type") or "").strip().lower() == "disabled"
+                )
+                or thinking is False
+                or enable_thinking is False
+            )
+            if thinking_disabled:
+                extra["reasoning_effort"] = "none"
         if extra:
             unsupported.extend(extra.keys())
             for key, value in extra.items():

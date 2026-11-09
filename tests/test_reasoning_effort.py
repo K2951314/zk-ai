@@ -171,6 +171,39 @@ class TestReasoningWireNormalization:
         )
         assert payload["reasoning_effort"] == "low"
 
+    def test_thinking_and_enable_thinking_are_stripped(self) -> None:
+        """ZCode 3.17.2 的另外两个字段也不能透传（AMD 对 thinking 直接 400）。"""
+        request = _request(
+            reasoning_effort="max",
+            reasoning={"effort": "max"},
+            thinking={"type": "enabled"},
+            enable_thinking=True,
+        )
+        payload, _ = _adapter().build_payload(request, _deployment())
+        assert payload["reasoning_effort"] == "max"
+        assert "thinking" not in payload
+        assert "enable_thinking" not in payload
+        assert "reasoning" not in payload
+
+    def test_disabled_thinking_maps_to_none_and_beats_the_default(self) -> None:
+        """客户端明确关思考（thinking.type=disabled）优先于部署默认档。"""
+        request = _request(thinking={"type": "disabled"}, enable_thinking=False)
+        payload, _ = _adapter().build_payload(
+            request, _deployment(reasoning_effort="high")
+        )
+        assert payload["reasoning_effort"] == "none"
+        assert "thinking" not in payload
+        assert "enable_thinking" not in payload
+
+    def test_enabled_thinking_without_effort_uses_the_default(self) -> None:
+        request = _request(thinking={"type": "enabled"}, enable_thinking=True)
+        payload, _ = _adapter().build_payload(
+            request, _deployment(reasoning_effort="high")
+        )
+        assert payload["reasoning_effort"] == "high"
+        assert "thinking" not in payload
+        assert "enable_thinking" not in payload
+
     def test_responses_translation_does_not_reintroduce_the_object(self) -> None:
         from app.models.request import ResponsesRequest
 
