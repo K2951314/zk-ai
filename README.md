@@ -469,7 +469,10 @@ Codex 的 `reasoning.effort` / 裸参数 `reasoning_effort` 都不会被网关�
 `OpenAICompatibleAdapter.build_payload` 会在发往上游前统一收敛成扁平的
 `reasoning_effort`：显式档位优先，`thinking.type=disabled` / `enable_thinking=false`
 映射为 `none`，`thinking` / `enable_thinking` 两个字段本身不再透传——AMD 等
-OpenAI 兼容上游对它们直接 400。
+OpenAI 兼容上游对它们直接 400。档位值还会按部署声明的词表收敛
+（`minimal→low`、`medium/xhigh→high`、`ultra→max`，来自官方预设的别名表）；
+词表未知时原样透传，词表已知但值无法表达时省略该参数——宁可用上游默认档，
+也不让严格上游 400。
 目前只对 OpenAI 兼容链路注入。控制台部署卡片三态渲染：可调下拉 / 不支持（灰态）/
 档位未知（「从供应商获取」）。
 
@@ -686,7 +689,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 54 个测试模块，1296 个用例，全部 Mock
+├── tests/                # conftest + 54 个测试模块，1300 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -694,7 +697,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 117 个文件约 31,701 行，`tests/` 54 个测试模块 1296 个用例（约 22,711 行），
+规模：`app/` 117 个文件约 31,758 行，`tests/` 54 个测试模块 1300 个用例（约 22,766 行），
 `scripts/` 22 个文件约 6,502 行。
 （这两个数字上一次更新是 2026-11-08 晚（手机远控 M1，新增 `tests/test_ui_pages.py`），
 此前为 53/1283/22,557/117/31,656——**文档规模必须跟着代码走**，
@@ -1386,7 +1389,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1296 个用例，全部通过，零网络、零真实配额。**
+**1300 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

@@ -33,6 +33,7 @@ from app.core.errors import (
 from app.core.logging import get_logger
 from app.core.security import redact_mapping
 from app.models.credential import CredentialRuntime
+from app.models.presets import match_preset
 from app.models.provider import DeploymentConfig, ModelConfig, ProviderConfig, ProviderType
 from app.models.request import ChatCompletionRequest, ChatMessage
 from app.models.response import (
@@ -45,6 +46,49 @@ from app.models.response import (
 from app.retry.classifier import ErrorClassifier, ErrorInfo
 
 logger = get_logger("provider")
+
+
+#: 「关思考」的多种客户端写法：False / 0 / "false" / "off" / "disabled"。
+_OFF_VALUES = frozenset({"false", "0", "no", "off", "disabled", "none"})
+
+
+def _switch_is_off(value: Any) -> bool:
+    """True only for an explicit off-switch (missing/None is not "off")."""
+    if value is False:
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _OFF_VALUES
+    return False
+
+
+def _normalize_reasoning_effort(
+    value: Any, deployment: DeploymentConfig
+) -> str | None:
+    """Fold a client effort onto the deployment's declared vocabulary.
+
+    ``None`` means "cannot be expressed upstream — drop it": strict upstreams
+    answer 400 for an unknown level. 空/未知档位表不约束（原样返回）——现役很多
+    部署没填 ``reasoning_efforts``（可能是未探测，不一定是明确不支持），
+    一刀切删除会把客户端明确的思考强度吞掉。
+    """
+    if not isinstance(value, str):
+        return None
+    level = value.strip().lower()
+    if not level:
+        return None
+    levels = [
+        str(item).strip().lower() for item in (deployment.reasoning_efforts or [])
+    ]
+    if not levels:
+        return level
+    if level in levels:
+        return level
+    preset = match_preset(deployment.model, deployment.provider_id)
+    aliases = (preset.reasoning_effort_aliases if preset else {}) or {}
+    mapped = str(aliases.get(level) or "").strip().lower()
+    return mapped if mapped in levels else None
 
 
 def _wire_message(message: ChatMessage) -> dict[str, Any]:
@@ -858,15 +902,28 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         enable_thinking = extra.pop("enable_thinking", None)
         if "reasoning_effort" not in extra:
             thinking_disabled = (
-                (
-                    isinstance(thinking, dict)
-                    and str(thinking.get("type") or "").strip().lower() == "disabled"
-                )
-                or thinking is False
-                or enable_thinking is False
-            )
+                isinstance(thinking, dict)
+                and str(thinking.get("type") or "").strip().lower() == "disabled"
+            ) or _switch_is_off(thinking) or _switch_is_off(enable_thinking)
             if thinking_disabled:
                 extra["reasoning_effort"] = "none"
+        # 客户端档位落到部署词表：minimal / xhigh / ultra 这类别名按官方预设
+        # 收敛（预设里早就写了表，但之前零消费）；实在表达不了的档位宁可不发，
+        # 让严格上游 400 变成「用部署默认档」。
+        if "reasoning_effort" in extra:
+            normalized_effort = _normalize_reasoning_effort(
+                extra["reasoning_effort"], deployment
+            )
+            if normalized_effort is None:
+                logger.debug(
+                    "provider=%s model=%s 客户端档位 %r 不在部署词表，已省略",
+                    self.provider_id,
+                    deployment.model,
+                    extra.get("reasoning_effort"),
+                )
+                extra.pop("reasoning_effort", None)
+            else:
+                extra["reasoning_effort"] = normalized_effort
         if extra:
             unsupported.extend(extra.keys())
             for key, value in extra.items():

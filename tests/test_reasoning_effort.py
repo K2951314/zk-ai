@@ -151,7 +151,11 @@ class TestReasoningWireNormalization:
     def test_reasoning_object_alone_is_flattened(self) -> None:
         request = _request(reasoning={"effort": "max", "summary": "auto"})
         payload, _ = _adapter().build_payload(
-            request, _deployment(reasoning_effort="low")
+            request,
+            _deployment(
+                reasoning_effort="low",
+                reasoning_efforts=["low", "medium", "high", "max"],
+            ),
         )
         assert payload["reasoning_effort"] == "max"
         assert "reasoning" not in payload
@@ -179,7 +183,9 @@ class TestReasoningWireNormalization:
             thinking={"type": "enabled"},
             enable_thinking=True,
         )
-        payload, _ = _adapter().build_payload(request, _deployment())
+        payload, _ = _adapter().build_payload(
+            request, _deployment(reasoning_efforts=["low", "medium", "high", "max"])
+        )
         assert payload["reasoning_effort"] == "max"
         assert "thinking" not in payload
         assert "enable_thinking" not in payload
@@ -189,7 +195,11 @@ class TestReasoningWireNormalization:
         """客户端明确关思考（thinking.type=disabled）优先于部署默认档。"""
         request = _request(thinking={"type": "disabled"}, enable_thinking=False)
         payload, _ = _adapter().build_payload(
-            request, _deployment(reasoning_effort="high")
+            request,
+            _deployment(
+                reasoning_effort="high",
+                reasoning_efforts=["none", "low", "high"],
+            ),
         )
         assert payload["reasoning_effort"] == "none"
         assert "thinking" not in payload
@@ -201,6 +211,51 @@ class TestReasoningWireNormalization:
             request, _deployment(reasoning_effort="high")
         )
         assert payload["reasoning_effort"] == "high"
+        assert "thinking" not in payload
+        assert "enable_thinking" not in payload
+
+    def test_effort_aliases_fold_onto_the_deployment_vocabulary(self) -> None:
+        """预设别名表要真的生效：minimal→low、xhigh→high、ultra→max。"""
+        levels = ["none", "low", "high", "max"]
+        for given, expected in (
+            ("minimal", "low"),
+            ("medium", "high"),
+            ("xhigh", "high"),
+            ("ultra", "max"),
+            ("MAX", "max"),
+        ):
+            payload, _ = _adapter().build_payload(
+                _request(reasoning_effort=given),
+                _deployment(
+                    model="deepseek-flash",
+                    provider_id="sensenova",
+                    reasoning_efforts=levels,
+                ),
+            )
+            assert payload["reasoning_effort"] == expected, given
+
+    def test_unexpressible_effort_is_dropped_when_vocabulary_is_known(self) -> None:
+        """词表已知但客户端档位不在其中：不发，让上游用默认档（别 400）。"""
+        payload, _ = _adapter().build_payload(
+            _request(reasoning_effort="turbo"),
+            _deployment(reasoning_efforts=["low", "high", "max"]),
+        )
+        assert "reasoning_effort" not in payload
+
+    def test_unknown_vocabulary_keeps_the_client_value(self) -> None:
+        """档位表未知（None）时保持旧行为：原样透传，不擅自删。"""
+        payload, _ = _adapter().build_payload(
+            _request(reasoning_effort="turbo"),
+            _deployment(reasoning_efforts=None),
+        )
+        assert payload["reasoning_effort"] == "turbo"
+
+    def test_thinking_as_a_plain_string_still_turns_it_off(self) -> None:
+        payload, _ = _adapter().build_payload(
+            _request(thinking="disabled", enable_thinking=0),
+            _deployment(reasoning_efforts=["none", "low", "high"]),
+        )
+        assert payload["reasoning_effort"] == "none"
         assert "thinking" not in payload
         assert "enable_thinking" not in payload
 
