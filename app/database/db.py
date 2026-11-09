@@ -87,8 +87,16 @@ class Database:
         # 2026-11-04：事件派生深度（跳数熔断，见 EventRecord.hops）
         ("events", "hops", "ALTER TABLE events ADD COLUMN hops INTEGER DEFAULT 0"),
         ("events", "parent_id", "ALTER TABLE events ADD COLUMN parent_id INTEGER"),
-        # 2026-11-04：约时间复查（回执的 later）。NULL = 立即可认领
+        # 2026-11-04 的历史列：后来确认 ``later`` 走 event_laters 表，模型已不再
+        # 映射 not_before（2026-11-09 删死列）。条目保留只为老库幂等，新库多一个
+        # 空列无害；迁移历史不回头改，避免回滚时旧代码找不到列。
         ("events", "not_before", "ALTER TABLE events ADD COLUMN not_before TIMESTAMP"),
+        # 2026-11-07：任务台权限档（default / ask / full）
+        (
+            "agent_sessions",
+            "permission",
+            "ALTER TABLE agent_sessions ADD COLUMN permission VARCHAR(16) DEFAULT 'default'",
+        ),
     )
 
     async def init(self) -> None:

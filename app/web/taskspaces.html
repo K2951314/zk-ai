@@ -112,8 +112,8 @@
   </section>
   <div id="list" class="list"><div class="empty">正在读取…</div></div>
 </main>
+<script src="/ui/common.js"></script>
 <script>
-const TOKEN = localStorage.getItem("zkai_admin_token") || "";
 const listEl = document.getElementById("list");
 
 function esc(value) {
@@ -129,16 +129,16 @@ function timeText(stamp) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+/* 令牌与请求走共享外壳；401 弹登录框（手机直开 /ui/taskspaces 的兜底）。 */
 async function api(path, options) {
-  const opts = options || {};
-  const headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
-  const res = await fetch(path, Object.assign({}, opts, { headers: headers }));
-  if (!res.ok) {
-    let detail = "";
-    try { detail = await res.text(); } catch (err) { detail = ""; }
-    throw new Error(detail || ("请求失败，状态码 " + res.status));
+  try {
+    return await ZKUI.api(path, options);
+  } catch (err) {
+    if (err.isAuth) {
+      ZKUI.promptLogin("打开任务空间需要管理令牌（与网关 .env 里的 ZKAI_ADMIN_TOKEN 相同）");
+    }
+    throw err;
   }
-  return res.json();
 }
 
 function card(item) {
@@ -148,7 +148,7 @@ function card(item) {
     ? '<span class="pill warn">占用中</span>'
     : '<span class="pill ok">空闲</span>';
   const releaseBtn = owner
-    ? '<button class="btn small danger" onclick="releaseSpace(\'' + item.task_id + '\')">释放占用</button>'
+    ? '<button class="btn small danger" data-act="release" data-task="' + esc(item.task_id) + '">释放占用</button>'
     : "";
   return '<article class="card">'
     + '<div class="row"><div class="grow">'
@@ -159,16 +159,28 @@ function card(item) {
     + ' · 产物 ' + esc(item.artifacts) + '</div>'
     + '</div>' + badge + '</div>'
     + '<div class="actions">'
-    + '<button class="btn small" onclick="showDetail(\'' + item.task_id + '\')">查看进度</button>'
-    + '<button class="btn small" onclick="openFolder(\'' + item.task_id + '\')">打开文件夹</button>'
+    + '<button class="btn small" data-act="detail" data-task="' + esc(item.task_id) + '">查看进度</button>'
+    + '<button class="btn small" data-act="open" data-task="' + esc(item.task_id) + '">打开文件夹</button>'
     + releaseBtn
     + '</div>'
-    + '<div class="detail" id="detail-' + item.task_id + '" hidden></div>'
+    + '<div class="detail" id="detail-' + esc(item.task_id) + '" hidden></div>'
     + '</article>';
 }
 
+/* 动作按钮用事件委托 + data-task，不再把 task_id 拼进内联 onclick 字符串——
+   taskspace.py:133 有「回退到目录名」的路径，目录名带引号时内联拼接就是
+   HTML/JS 注入面（2026-11-08 审查 P2）。 */
+listEl.addEventListener("click", function (ev) {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const taskId = btn.dataset.task;
+  if (btn.dataset.act === "detail") { showDetail(taskId); }
+  else if (btn.dataset.act === "open") { openFolder(taskId); }
+  else if (btn.dataset.act === "release") { releaseSpace(taskId); }
+});
+
 async function showDetail(taskId) {
-  const box = document.getElementById("detail-" + taskId);
+  const box = document.getElementById("detail-" + esc(taskId));
   if (!box) return;
   if (!box.hidden) { box.hidden = true; return; }
   box.hidden = false;

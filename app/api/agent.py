@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import ContainerDep, require_admin
+from app.core.config import PROJECT_ROOT
 from app.core.container import Container
 from app.core.errors import ZKAIError
 from app.services.agent import model_inventory as model_inventory_service
@@ -33,6 +35,8 @@ router = APIRouter(prefix="/zkadmin/agent", tags=["agent"],
                    dependencies=[Depends(require_admin)])
 
 _SSE_HEARTBEAT = 15.0
+#: 工作区选择器一次最多返回的子目录数（超大目录只给前 N 个，避免前端卡住）。
+_MAX_DIR_ENTRIES = 500
 
 
 def get_agent(request: Request) -> AgentService:
@@ -47,10 +51,55 @@ def get_agent(request: Request) -> AgentService:
 AgentDep = Annotated[AgentService, Depends(get_agent)]
 
 
+def _list_drives() -> list[str]:
+    """Windows 盘符；非 Windows 返回空表（前端据此隐藏盘符行）。"""
+    if os.name != "nt":
+        return []
+    return [
+        f"{letter}:\\"
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        if Path(f"{letter}:\\").exists()
+    ]
+
+
+def _quick_dirs() -> list[dict[str, str]]:
+    """工作区选择器的常用位置：项目根、桌面、文档、下载（存在才给）。"""
+    home = Path.home()
+    items = (
+        ("当前项目", PROJECT_ROOT),
+        ("桌面", home / "Desktop"),
+        ("文档", home / "Documents"),
+        ("下载", home / "Downloads"),
+    )
+    return [{"name": name, "path": str(path)} for name, path in items if path.is_dir()]
+
+
+def _resolve_dir(raw: str | None) -> Path:
+    """把用户给的路径解析成真实目录（阻塞 IO，调用方放线程里跑）。"""
+    candidate = Path(raw).expanduser() if raw else Path.home()
+    return candidate.resolve(strict=True)
+
+
+def _scan_subdirs(current: Path) -> list[dict[str, str]]:
+    """只列子目录，不碰文件内容；权限不足的条目跳过而不是整页失败。"""
+    out: list[dict[str, str]] = []
+    with os.scandir(current) as entries:
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    out.append({"name": entry.name, "path": str(current / entry.name)})
+            except OSError:
+                continue
+    out.sort(key=lambda item: item["name"].lower())
+    return out[:_MAX_DIR_ENTRIES]
+
+
 class StartPayload(BaseModel):
     task: str = Field(min_length=1, max_length=20_000)
     model: str | None = Field(default=None, max_length=128)
     workspace: str | None = Field(default=None, max_length=500)
+    #: 权限档：default（界内写文件免批）/ ask（写与命令都批）/ full（都不批）
+    permission: str | None = Field(default=None, max_length=16)
     #: 图片（data URL 或 http 直链）。前端把截图/图纸转成 data URL 塞这里，
     #: 后端还原成 OpenAI 的 image_url content part —— 模型看到的是图不是文件名。
     images: list[str] = Field(default_factory=list)
@@ -75,6 +124,10 @@ class FollowupPayload(BaseModel):
 class ApprovalPayload(BaseModel):
     approved: bool
     remember: bool = False
+
+
+class PermissionPayload(BaseModel):
+    permission: str = Field(min_length=1, max_length=16)
 
 
 class ExecutorRunPayload(BaseModel):
@@ -206,9 +259,24 @@ def _task_space_path(container: Container, task_id: str) -> Path:
     return path
 
 
+#: 任务空间 id 的形状白名单。生成器产出的是 ``时间戳-短id-hex4``，全部落在
+#: ``[A-Za-z0-9_.-]`` 内；这里收紧到同款字符集并显式拒绝 ``..``，因为
+#: ``taskspace.load`` / ``force_release`` 内部是 ``root_for(workspace) / task_id``
+#: 直拼路径——detail / release 两个端点（2026-11-08 审查 P1）曾把 URL 段
+#: 原样递进去，``..%2F..%2F..`` 可以读任意 state.json、删任意 state.lock。
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
+
+
+def _safe_task_id(task_id: str) -> str:
+    if not _TASK_ID_RE.match(task_id) or ".." in task_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "任务空间不存在")
+    return task_id
+
+
 @router.get("/taskspaces/{task_id}")
 async def taskspace_detail(task_id: str, container: ContainerDep) -> dict[str, Any]:
     """读一个任务空间的进度（步骤、产物、交接说明）。"""
+    task_id = _safe_task_id(task_id)
     workspace = Path(container.settings.agent_workspace)
     data = taskspace.load(workspace, task_id)
     if data is None:
@@ -219,6 +287,7 @@ async def taskspace_detail(task_id: str, container: ContainerDep) -> dict[str, A
 @router.post("/taskspaces/{task_id}/release")
 async def release_taskspace(task_id: str, container: ContainerDep) -> dict[str, Any]:
     """人工释放占用（执行体崩了但租约还没到期时用）。"""
+    task_id = _safe_task_id(task_id)
     workspace = Path(container.settings.agent_workspace)
     if taskspace.load(workspace, task_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务空间不存在")
@@ -321,6 +390,34 @@ async def list_models(agent: AgentDep, container: ContainerDep) -> dict[str, Any
     }
 
 
+@router.get("/fs/list")
+async def list_dirs(path: str | None = None) -> dict[str, Any]:
+    """工作区选择器用的目录浏览：只列子目录，不读文件内容。"""
+    try:
+        current = await asyncio.to_thread(_resolve_dir, path)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"目录不存在或无法访问：{path or '用户主目录'}",
+        ) from exc
+    if not current.is_dir():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不是目录：{current}")
+    try:
+        dirs = await asyncio.to_thread(_scan_subdirs, current)
+    except OSError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"目录读取失败：{exc}"
+        ) from exc
+    parent = current.parent if current.parent != current else None
+    return {
+        "current": str(current),
+        "parent": str(parent) if parent is not None else None,
+        "dirs": dirs,
+        "drives": _list_drives(),
+        "quick": _quick_dirs(),
+    }
+
+
 @router.get("/sessions")
 async def list_sessions(agent: AgentDep) -> dict[str, Any]:
     return {"sessions": await agent.list_sessions()}
@@ -335,6 +432,7 @@ async def create_session(payload: StartPayload, agent: AgentDep,
                             f"未知的模型/别名：{model!r}")
     return await agent.start(task=payload.task, model=payload.model,
                              workspace=payload.workspace,
+                             permission=payload.permission,
                              images=payload.images or None,
                              files=payload.files or None)
 
@@ -370,6 +468,18 @@ async def followup(session_id: str, payload: FollowupPayload,
     if detail is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     return detail
+
+
+@router.post("/sessions/{session_id}/permission")
+async def set_permission(session_id: str, payload: PermissionPayload,
+                         agent: AgentDep) -> dict[str, Any]:
+    try:
+        row = await agent.set_permission(session_id, payload.permission)
+    except ZKAIError as exc:
+        raise HTTPException(exc.http_status, exc.message) from exc
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
+    return {"session": row}
 
 
 @router.post("/sessions/{session_id}/cancel")

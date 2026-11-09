@@ -110,23 +110,24 @@
   </section>
   <div id="body"><div class="empty">正在读取…</div></div>
 </main>
+<script src="/ui/common.js"></script>
 <script>
-const TOKEN = localStorage.getItem("zkai_admin_token") || "";
-
 function esc(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
   });
 }
 
-async function api(path) {
-  const res = await fetch(path, { headers: { "X-Admin-Token": TOKEN } });
-  if (!res.ok) {
-    let detail = "";
-    try { detail = await res.text(); } catch (err) { detail = ""; }
-    throw new Error(detail || ("请求失败，状态码 " + res.status));
+/* 令牌与请求走共享外壳；401 弹登录框（手机直开 /ui/models 的兜底）。 */
+async function api(path, options) {
+  try {
+    return await ZKUI.api(path, options);
+  } catch (err) {
+    if (err.isAuth) {
+      ZKUI.promptLogin("打开模型与价格页需要管理令牌（与网关 .env 里的 ZKAI_ADMIN_TOKEN 相同）");
+    }
+    throw err;
   }
-  return res.json();
 }
 
 // 价格来源的中文说法：来源不明就说来源不明，不含糊

@@ -112,14 +112,19 @@ def test_rotation_registry_and_defaults() -> None:
     assert isinstance(get_rotation("weighted"), WeightedRotation)
 
 
-def test_pick_marks_usage_and_in_flight() -> None:
+def test_pick_and_success_stamp_last_used_at() -> None:
+    """LRU 时间戳由 pick/report_success 落笔；in_flight 计数已移除。
+
+    2026-11-09 洁癖审查删掉了只有测试路径会写的 in_flight 与 release()，
+    生产路径的「最久未用优先」改由 report_success 更新时间戳驱动。
+    """
     pool, _ = build_pool()
     credential = pool.pick("p1")
     assert credential is not None
-    assert credential.in_flight == 1
     assert credential.last_used_at is not None
-    pool.release(credential.id)
-    assert credential.in_flight == 0
+    stamped_at_pick = credential.last_used_at
+    pool.report_success(credential.id, latency_ms=10.0)
+    assert credential.last_used_at >= stamped_at_pick
 
 
 def test_pick_respects_exclusions() -> None:

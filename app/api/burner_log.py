@@ -22,15 +22,23 @@ import asyncio
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from app.api.deps import ContainerDep
+from app.api.deps import ContainerDep, require_admin_query
 from app.core.logging import get_logger
 
 logger = get_logger("api.burner_log")
 
-router = APIRouter(prefix="/zkadmin/burner/log", tags=["burner"])
+# router 级鉴权（2026-11-08 审查 P0：这两个端点曾经完全无鉴权——当年为了让
+# EventSource 能连就把鉴权整个去掉了，结果服务器日志匿名可读、SSE 流成了
+# 现成的慢速 DoS 面）。SSE 端点走 require_admin_query：EventSource 发不了
+# header，前端用 ?token= 传；tail 走降级轮询时仍可用 X-Admin-Token header。
+router = APIRouter(
+    prefix="/zkadmin/burner/log",
+    tags=["burner"],
+    dependencies=[Depends(require_admin_query)],
+)
 
 #: 轮询间隔（秒）。日志是 append 写、每分钟一条汇总，1 秒的粒度既不会有
 #: 明显延迟，也不会把 CPU 烧在 stat 上。测试用 monkeypatch 调小它。

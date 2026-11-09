@@ -38,6 +38,7 @@ from app.core.config.loader import (
     get_app_config,
     load_app_config,
     reset_config_cache,
+    set_config_cache,
 )
 from app.core.config.settings import (
     PROJECT_ROOT,
@@ -64,5 +65,6 @@ __all__ = [
     "logger",
     "malformed_env_names",
     "reset_config_cache",
+    "set_config_cache",
     "shadowed_env_names",
 ]

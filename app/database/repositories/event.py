@@ -28,8 +28,11 @@ from app.database.repositories._common import (
     utcnow,
 )
 
-#: 未结束的状态 —— 只有这些会被 ``reclaim_stale`` 回收。
-OPEN_STATES: tuple[str, ...] = ("received", "running")
+#: 未结束的状态。``waiting_decision`` 也算「待办」：它欠的是人的拍板，
+#: 看板的 open 计数里不该假装没有这件事（2026-11-08 审查：原来 open 只数
+#: received+running，半夜被静默窗口吞掉的审批卡片在任何一个口径里都不存在）。
+#: 同时它让 ``purge_older_than`` 永远不清理待拍板的事件——等人拍完才轮得到归档。
+OPEN_STATES: tuple[str, ...] = ("received", "running", "waiting_decision")
 
 
 class EventRepository:
@@ -95,12 +98,9 @@ class EventRepository:
             result = await session.execute(
                 select(EventRecord)
                 .where(EventRecord.state == "received")
-                # 约了时间复查的（回执 later）还没到点，不许认领。
-                # 它一直躺在 queue 里，但不占进程、不花 Token ——
-                # 直到 not_before 到了才轮得到它。
-                .where(
-                    EventRecord.not_before.is_(None) | (EventRecord.not_before <= utcnow())
-                )
+                # 时间复查不在这里：回执的 later 走 event_laters 表（drain 端点
+                # 到点才转成标准事件）。events.not_before 曾是同一意图的半成品，
+                # 但零写入方，已在 2026-11-09 从模型删掉。
                 .where(
                     (EventRecord.group_name.is_(None)) | (running_in_group < EventRecord.parallel)
                 )
@@ -128,6 +128,7 @@ class EventRepository:
         cost_cny: float = 0.0,
         session_id: str | None = None,
         error: str | None = None,
+        payload_merge: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         async with self.db.session() as session:
             row = await session.get(EventRecord, event_id)
@@ -142,6 +143,14 @@ class EventRepository:
                 row.session_id = session_id
             if error:
                 row.verdict = f"{row.verdict or ''}\n\n【执行失败】{error}".strip()
+            if payload_merge:
+                # 回执里的 ask/notice 要跟着卡片走：verdict 在 complete() 里被
+                # 剥掉回执后才落库，不在这里合并进 payload，卡片就永远看不到
+                # 「要人拍板的问题原文」（2026-11-08 审查 P1：注释说随卡片展示，
+                # 实际从没到过卡片）。
+                payload = dict(row.payload or {})
+                payload.update(payload_merge)
+                row.payload = payload
             row.ended_at = utcnow()
             row.updated_at = utcnow()
             await session.commit()
@@ -154,6 +163,33 @@ class EventRepository:
                 return
             row.notified = True
             await session.commit()
+
+    async def list_unnotified(
+        self,
+        *,
+        states: tuple[str, ...],
+        within_days: int = 7,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """从未成功推送过（``notified=False``）且已结束的事件，按时间倒序。
+
+        补推扫描的数据源：静默窗口吞掉的审批卡片、webhook 宕机时的失败通知、
+        判死事件——它们都有同一个形状（终态 + 没人收到过通知）。
+        只看 ``within_days`` 内的：更老的欠账在第一次上线补推时不再追讨，
+        否则升级部署那一刻会一口气把陈年旧账全弹出来。
+        """
+        cutoff = utcnow() - dt.timedelta(days=within_days)
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(EventRecord)
+                .where(EventRecord.state.in_(states))
+                .where(EventRecord.notified.is_(False))
+                .where(EventRecord.ended_at.is_not(None))
+                .where(EventRecord.ended_at >= cutoff)
+                .order_by(EventRecord.ended_at.desc())
+                .limit(limit)
+            )
+            return [self._as_dict(row) for row in result.scalars()]
 
     async def set_state(self, event_id: int, state: str) -> None:
         async with self.db.session() as session:

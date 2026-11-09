@@ -141,3 +141,21 @@ providers:
     health_check_enabled: true
     # 本地服务无需密钥，留空数组即可
     credentials: []
+
+  # -------------------------------------------------------------------------
+  # WorkBuddy 积分代理（可选）—— 本机 wb-proxy 转发，OpenAI 兼容
+  #   协议与风险见 docs/反代战略评估-20261108.md §8。订阅复用属脆弱凭据：
+  #   只作 wb-* 模型点名调用，**不要串进任何别名链**；WorkBuddy 的 JWT
+  #   由 wb-proxy 自管（wb-token.json），这里只需要它的本机访问 Key。
+  # -------------------------------------------------------------------------
+  - id: workbuddy
+    type: openai_compatible
+    base_url: ${ZKAI_WBPROXY_BASE_URL:-http://127.0.0.1:8787/v1}
+    enabled: ${ZKAI_WBPROXY_ENABLED:-false}
+    # JWT 过期 = 401，交给上层冷却/隔离；不在连接层重试
+    timeout: 300
+    max_retries: 0
+    credentials:
+      - id: workbuddy-01
+        env_var: ZKAI_WBPROXY_KEY
+        priority: 100

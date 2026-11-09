@@ -316,6 +316,17 @@ def get_app_config(*, refresh: bool = False) -> AppConfig:
     return _cache
 
 
+def set_config_cache(config: AppConfig) -> None:
+    """Replace the cache with a config the caller just loaded.
+
+    ``Container.reload_config`` re-reads the YAML on every reload; without this,
+    ``get_app_config()`` keeps returning the startup snapshot forever
+    （2026-11-09 洁癖审查：缓存只在进程启动时写一次，reload 后拿到的是陈旧副本）。
+    """
+    global _cache
+    _cache = config
+
+
 def reset_config_cache() -> None:
     """Drop the cached configuration (used by tests and the reload endpoint)."""
     global _cache

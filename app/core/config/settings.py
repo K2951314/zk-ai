@@ -119,7 +119,6 @@ class Settings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = 8317
-    root_path: str = ""
     #: 公网入口（客户端真正用来调用的那个地址）。留空 = 本机部署，此时
     #: 控制台显示的 base_url 回落 http://<host>:<port>。
     #:
@@ -213,7 +212,6 @@ class Settings(BaseSettings):
     health_check_timeout: float = 20.0
 
     allow_inline_secrets: bool = True
-    alias_reload_token: str | None = None
 
     #: Strip ``reasoning_content``/``reasoning`` from responses whenever a real
     #: answer exists. Reasoning models (Kimi K3 等) often think in English even
@@ -237,9 +235,10 @@ class Settings(BaseSettings):
     #: Alias (or model id) the agent loop routes through. ``zk-auto`` keeps the
     #: traffic off the flash-lite dedicated points pool by design.
     agent_default_model: str = "zk-auto"
-    #: Hard cap of tool-loop steps per task (protects the points pools from a
-    #: runaway loop even if the model keeps asking for tools).
-    agent_max_steps: int = 40
+    #: Hard cap of tool-loop steps per task. ``0`` means unlimited (operator's
+    #: call, 2026-11-07): the remaining brakes are the concurrency limit, the
+    #: context compaction and the manual cancel button.
+    agent_max_steps: int = 0
     #: Sessions allowed to run their loop simultaneously (extra ones queue).
     agent_max_concurrent: int = 3
     #: Per-command timeout and output cap for ``run_command``.

@@ -311,7 +311,7 @@ class Container:
 
         # Re-apply quota rules that could not reach providers.yaml (file is
         # otherwise authoritative: models/aliases edits were written back to it).
-        from app.core.config import apply_db_overrides
+        from app.core.config import apply_db_overrides, set_config_cache
 
         apply_db_overrides(
             config,
@@ -319,6 +319,9 @@ class Container:
         )
 
         self.config = config
+        # 进程级配置缓存也必须换掉：reload 前 get_app_config() 返回启动快照，
+        # 之后再调用会一直拿到旧 AppConfig（2026-11-09 洁癖审查修正）。
+        set_config_cache(config)
         self.model_service.config = config
         self.health_service.config = config
         self.usage_service.config = config

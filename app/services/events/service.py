@@ -53,6 +53,13 @@ _CLAIM_POLL = 0.5
 #: 超时认领回收的检查间隔（秒）
 _RECLAIM_EVERY = 30.0
 
+#: 补推扫描的间隔（秒）。比 reclaim 稍疏：补推对象是终态事件，不抢时效。
+_PUSH_SWEEP_EVERY = 60.0
+#: 只补推最近这么多天里的欠账——升级部署那一刻不追讨陈年旧账。
+_PUSH_SWEEP_WINDOW_DAYS = 7
+#: 每轮最多补推几条（webhook 长期宕机恢复后不至于一口气弹几十张卡）。
+_PUSH_SWEEP_LIMIT = 20
+
 #: 已经走到头的事件状态：再交活只做幂等比对，不再覆盖。
 #: ``waiting_decision`` 也算终态 —— 它的结论就是「等你拍板」，不该被重交冲掉。
 _TERMINAL_STATES = frozenset({"done", "failed", "waiting_decision"})
@@ -76,6 +83,7 @@ class EventService:
         self.repository = repository
         self._loader = RuleLoader(config_dir)
         self._last_reclaim = 0.0
+        self._last_push_sweep = 0.0
 
     # ------------------------------------------------------------------ #
     # 规则
@@ -105,6 +113,9 @@ class EventService:
     # ------------------------------------------------------------------ #
     async def ingest(self, raw: dict[str, Any]) -> dict[str, Any]:
         """收一条事件。返回 ``{event, duplicate, matched, rule}``。"""
+        # 补推扫描搭车：worker 只在长轮询时驱动 claim tick，纯 API 部署
+        # （事件全靠 ingest 进来）也要有人扫待补推的欠账。
+        await self._maybe_push_pending()
         source = _require(raw, "source", 64)
         event_type = _require(raw, "type", 64)
         obj = str(raw.get("object") or "")[:200]
@@ -221,6 +232,7 @@ class EventService:
         deadline = time.monotonic() + max(0.0, wait_seconds)
         while True:
             await self._maybe_reclaim()
+            await self._maybe_push_pending()
             event = await self.repository.claim(worker=worker)
             if event is not None:
                 logger.info("事件 #%s 被 %s 认领（规则 %s）", event["id"], worker, event["rule"])
@@ -248,8 +260,57 @@ class EventService:
         if reclaimed:
             logger.warning("%d 条事件认领超时，已退回待认领", reclaimed)
         if dead:
-            # 判死要喊出来：这些是「试了 N 次都不行」的，运营者必须知道
+            # 判死要喊出来：这些是「试了 N 次都不行」的，运营者必须知道。
+            # 真正的喊话在补推扫描里做：判死即 failed + notified=False，
+            # 下一轮 _maybe_push_pending 会把它推到飞书——原来只 logger.error，
+            # 深夜判死的事第二天才被人偶然发现（2026-11-08 审查 P1）。
             logger.error("%d 条事件超过重试上限 %d 次，已判失败", dead, max_attempts)
+
+    # ------------------------------------------------------------------ #
+    # 补推：静默只延迟，不吞
+    # ------------------------------------------------------------------ #
+    async def _maybe_push_pending(self) -> None:
+        """把「该推但从没送达」的卡片补推出去。
+
+        覆盖三类欠账（2026-11-08 审查 P1）：静默窗口吞掉的 need_decision、
+        webhook 宕机时没送出的失败通知、判死事件（原来只有一行日志）。
+        共同形状 = 终态 + ``notified=False``。静默期间照样跳过（should_push
+        判），窗口一过扫描自然把它们送出去——**补推保证最终送达，静默
+        只决定几点送**。没有 worker 在拉时（深夜）不扫描：拍板类事件
+        都是 worker 交活产生的，worker 交完活的长轮询就是下一个 tick。
+        """
+        now = time.monotonic()
+        if now - self._last_push_sweep < _PUSH_SWEEP_EVERY:
+            return
+        self._last_push_sweep = now
+        config = self.notify_config()
+        if not config.enabled:
+            return
+        try:
+            pending = await self.repository.list_unnotified(
+                states=("waiting_decision", "failed"),
+                within_days=_PUSH_SWEEP_WINDOW_DAYS,
+                limit=_PUSH_SWEEP_LIMIT,
+            )
+        except Exception:  # pragma: no cover - 补推失败不能挡住认领
+            logger.exception("查询待补推事件失败")
+            return
+        for event in pending:
+            rule = self._rule_by_name(event.get("rule"))
+            tell = rule.tell if rule is not None else "always"
+            if tell == "needed":
+                # waiting_decision/failed 本来就在该推之列（complete() 对
+                # 失败强制 always、对拍板走 need_decision），needed 在这里
+                # 升级成 always；显式 never 尊重规则，维持不推。
+                tell = "always"
+            sent = await self._push(
+                event,
+                rule,
+                tell=tell,
+                need_decision=bool(event.get("need_decision")),
+            )
+            if sent:
+                logger.info("事件 #%s 补推成功（此前未送达）", event.get("id"))
 
     async def complete(
         self,
@@ -293,6 +354,16 @@ class EventService:
             )
             return current
         state = "waiting_decision" if (ok and need_decision) else ("done" if ok else "failed")
+        # 回执里「给人看」的部分（ask/notice/解析问题）要跟着卡片走：
+        # verdict 落库前已被剥掉回执块，不在这里存一份，卡片就只剩
+        # 「需要你拍板」四个字而没有问题原文（2026-11-08 审查 P1）。
+        receipt_view: dict[str, Any] | None = None
+        if receipt.ask or receipt.notice or receipt.problems:
+            receipt_view = {
+                "ask": receipt.ask,
+                "notice": receipt.notice,
+                "problems": receipt.problems,
+            }
         updated = await self.repository.finish(
             event_id,
             state=state,
@@ -302,6 +373,7 @@ class EventService:
             cost_cny=cost_cny,
             session_id=session_id,
             error=error,
+            payload_merge={"receipt": receipt_view} if receipt_view else None,
         )
         if updated is None:
             return None

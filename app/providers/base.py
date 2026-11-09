@@ -834,6 +834,18 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         payload.update(deployment.options)
 
         extra = request.extra_params()
+        # 推理等级只能有一种写法（2026-11-09 实测）：ZCode 3.17.2 会同时发
+        # ``reasoning_effort: "max"`` 和 Responses 风格的
+        # ``reasoning: {"effort": "max"}``；网关若原样透传，AMD 等严格上游
+        # 直接 400「Cannot specify both reasoning_effort and reasoning.effort」。
+        # Chat Completions 上游也不认 ``reasoning`` 对象，这里统一收敛成扁平
+        # 字段：显式扁平值优先，否则把对象里的 effort 翻过来；其余成员
+        # （如 summary）对 chat wire 无意义，丢弃。
+        if "reasoning" in extra:
+            reasoning = extra.pop("reasoning")
+            effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+            if effort and "reasoning_effort" not in extra:
+                extra["reasoning_effort"] = effort
         if extra:
             unsupported.extend(extra.keys())
             for key, value in extra.items():

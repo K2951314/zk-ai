@@ -133,6 +133,55 @@ class TestInjectionPriority:
         assert payload["reasoning_effort"] == "low"
 
 
+class TestReasoningWireNormalization:
+    """发给上游的 payload 只能有一种 effort 写法（2026-11-09 ZCode 400 回归）。
+
+    ZCode 3.17.2 的 openai-compatible 链路会同时发
+    ``reasoning_effort: "max"`` 和 ``reasoning: {"effort": "max"}``。
+    AMD 的 DeepSeek-V4.1-Flash 对此直接 400：
+    「Cannot specify both reasoning_effort and reasoning.effort」。
+    """
+
+    def test_both_forms_keep_the_flat_value(self) -> None:
+        request = _request(reasoning_effort="high", reasoning={"effort": "max"})
+        payload, _ = _adapter().build_payload(request, _deployment())
+        assert payload["reasoning_effort"] == "high"
+        assert "reasoning" not in payload
+
+    def test_reasoning_object_alone_is_flattened(self) -> None:
+        request = _request(reasoning={"effort": "max", "summary": "auto"})
+        payload, _ = _adapter().build_payload(
+            request, _deployment(reasoning_effort="low")
+        )
+        assert payload["reasoning_effort"] == "max"
+        assert "reasoning" not in payload
+
+    def test_object_without_effort_lets_the_default_apply(self) -> None:
+        request = _request(reasoning={"summary": "auto"})
+        payload, _ = _adapter().build_payload(
+            request, _deployment(reasoning_effort="high")
+        )
+        assert payload["reasoning_effort"] == "high"
+        assert "reasoning" not in payload
+
+    def test_deployment_options_still_win(self) -> None:
+        request = _request(reasoning={"effort": "max"})
+        payload, _ = _adapter().build_payload(
+            request, _deployment(options={"reasoning_effort": "low"})
+        )
+        assert payload["reasoning_effort"] == "low"
+
+    def test_responses_translation_does_not_reintroduce_the_object(self) -> None:
+        from app.models.request import ResponsesRequest
+
+        chat = ResponsesRequest(
+            model="step-5-preview", input="hi", reasoning={"effort": "low"}
+        ).to_chat_request()
+        payload, _ = _adapter().build_payload(chat, _deployment())
+        assert payload["reasoning_effort"] == "low"
+        assert "reasoning" not in payload
+
+
 class TestOfficialPresetEfforts:
     """官方文档词表必须落在预设里——商汤 /models 不回档位字段，只靠探测永远未知。"""
 

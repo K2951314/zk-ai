@@ -67,7 +67,6 @@ class CredentialRuntime:
     #: a 429 that arrives long after the previous one starts a fresh ladder.
     last_rate_limit_at: float | None = None
 
-    in_flight: int = 0
     latency_ema_ms: float = 0.0
 
     # ------------------------------------------------------------------ #

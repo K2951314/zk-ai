@@ -89,3 +89,26 @@ def test_as_dict_shape(tmp_path: Path) -> None:
     assert data["id"] == "x"
     assert data["strengths"] == []
     assert isinstance(data["context"], int)
+
+
+def test_describe_channels_separates_auto_from_manual() -> None:
+    """桌面端专属模型必须标成「只能人工」，不能混进可派单那组。"""
+    entries = [
+        model_catalog.ModelEntry(
+            id="glm-5.3-flashx", name="GLM 5.3 FlashX", via="catpawai",
+            tier="free", context=0, strengths=(), verified="config", note="",
+        ),
+        model_catalog.ModelEntry(
+            id="SonusX", name="Qoder SonusX", via="qoder",
+            tier="free", context=0, strengths=(), verified="live", note="",
+        ),
+    ]
+    text = model_catalog.describe_channels(entries, {"qoder"})
+    auto_line, manual_line = text.splitlines()
+    assert "SonusX" in auto_line and "可自动派单" in auto_line
+    assert "GLM 5.3 FlashX" in manual_line and "只能人工用" in manual_line
+    assert "catpawai" in manual_line
+
+
+def test_describe_channels_is_empty_without_catalog() -> None:
+    assert model_catalog.describe_channels([], {"qoder"}) == ""

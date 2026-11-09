@@ -80,7 +80,7 @@
 | **Key Pool** | 显式状态机 `HEALTHY / COOLDOWN / UNHEALTHY / DISABLED`，5 种轮换策略，`threading.RLock` 保证选择原子性。 |
 | **错误分类驱动** | 26 种错误原因 → `retryable / switch_credential / switch_provider / cooldown`。400/413 **绝不**轮换 Key；401 → UNHEALTHY；429 → 分钟限流指数冷却 / 额度耗尽长休；529 → deployment 冷却 + 故障转移。 |
 | **Web 控制台** | 浏览器打开 `http://127.0.0.1:8317/ui`：总览 / 凭据池（冷却倒计时+一键解禁）/ 请求日志筛选+attempt 明细 / 用量统计 / 路由预览。同源零外部依赖（CSS/JS 拆为 `/ui/console.*` 由网关提供），数据走鉴权的 `/admin/*`。 |
-| **ZK-Agent 任务台** | `http://127.0.0.1:8317/ui/agent`：浏览器里的批量任务跑批器——思考→调工具（读/搜/写文件、跑命令）循环，写与执行需批准，路径锁在工作区，步数/并发双熔断（见 §13.3）。 |
+| **ZK-Agent 任务台** | `http://127.0.0.1:8317/ui/agent`：浏览器里的批量任务跑批器——思考→调工具（读/搜/写文件、跑命令）循环，写与执行按权限档走（默认档界内写文件免批、命令仍批准），路径锁在工作区，并发熔断（见 §13.3）。 |
 | **有界重试** | 指数退避 + 抖动，`max_total_attempts` 是硬顶，结构上不可能死循环。 |
 | **可解释路由** | 8 个能力维度加权打分 + 硬门槛，每个响应都带 `zk_ai.routing_reason` 与逐维度得分。 |
 | **别名热更新** | `POST /admin/aliases` 运行时改线，客户端零感知。 |
@@ -464,6 +464,9 @@ models:
 与积分无关）：`reasoning_efforts` 存供应商公布的可选档位（探测证据，不猜），
 `reasoning_effort` 是网关默认下发值。优先级 **客户端 > 部署默认 > 不指定**——
 Codex 的 `reasoning.effort` / 裸参数 `reasoning_effort` 都不会被网关默认盖掉。
+客户端若同时给出两种 effort 写法（ZCode 3.17.2 实测），`OpenAICompatibleAdapter.build_payload`
+会在发往上游前收敛成扁平的 `reasoning_effort`（扁平值优先），避免 AMD 等上游
+返回 400「Cannot specify both reasoning_effort and reasoning.effort」。
 目前只对 OpenAI 兼容链路注入。控制台部署卡片三态渲染：可调下拉 / 不支持（灰态）/
 档位未知（「从供应商获取」）。
 
@@ -680,7 +683,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 51 个测试模块，1253 个用例，全部 Mock
+├── tests/                # conftest + 54 个测试模块，1293 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -688,10 +691,10 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 117 个文件约 31,141 行，`tests/` 51 个测试模块 1253 个用例（约 21,832 行），
+规模：`app/` 117 个文件约 31,669 行，`tests/` 54 个测试模块 1293 个用例（约 22,672 行），
 `scripts/` 22 个文件约 6,502 行。
-（这两个数字上一次更新是 2026-11-07 傍晚（新增模型与价格页面），此前为同日傍晚的
-51/1244/21,739/117/31,062——**文档规模必须跟着代码走**，
+（这两个数字上一次更新是 2026-11-08 晚（手机远控 M1，新增 `tests/test_ui_pages.py`），
+此前为 53/1283/22,557/117/31,656——**文档规模必须跟着代码走**，
 第三轮对抗式审查为此立了规矩：改动见 `docs/对抗式审查-20260929-第三轮.md`。）
 
 ---
@@ -847,6 +850,7 @@ models:
 | 商汤日日新 SenseNova | `https://token.sensenova.cn/v1` | `kimi-k3` / `deepseek-v4-flash` / `glm-5.2` / `sensenova-6.8-flash-lite`；另有 Anthropic 兼容端点 `POST /v1/messages` | 公测免费，积分制双周期，429 常见 |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | 必须带厂商前缀，如 `nvidia/llama-3.3-nemotron-super-49b-v1` | build.nvidia.com 免费 credit |
 | Moonshot / Kimi 官方 | `https://api.moonshot.cn/v1` | `kimi-k3`、`kimi-k2.7-code` | 按量付费 |
+| WorkBuddy（本机 wb-proxy） | `http://127.0.0.1:8787/v1` | `hy3`（模型名 `wb-hy3`）；**只作点名调用，不要串进别名链**；JWT 由 `exports/_wbproxy` 自管，属脆弱凭据 | 订阅复用（hy3 当前免费） |
 
 加自定义端点：把 `type` 设为 `openai_compatible`，或实现
 `app.providers.base.ProviderAdapter` 后用 `register_adapter(type, cls)` 注册。
@@ -1247,11 +1251,14 @@ agent 循环「LLM → 工具调用 → 回填结果 → 再 LLM」直到给出�
 - **进程内直调**：每步非流式调 `RequestService.chat`（带 tools），复用别名路由、
   凭据池、限额与用量统计；`session_id = agent-{sid}` 触发凭据亲和，长任务钉在同一把 Key
 - **工具两层**：`read_file / list_dir / search_files / grep` 只读直执行；
-  `write_file / run_command` 走两段式——`prepare` 渲染 diff/命令预览并执行黑名单校验，
-  用户在页面上批准后才 `perform`。所有路径 `resolve()` 后必须落在
-  `ZKAI_AGENT_WORKSPACE`（默认项目根）内，`..`/绝对路径/符号链接逃逸一律拒绝
-- **熔断**：单任务步数上限（`ZKAI_AGENT_MAX_STEPS=40`）、并发会话数
-  （`ZKAI_AGENT_MAX_CONCURRENT=3`，超出的排队）、上下文超限（
+  `write_file / run_command` 是否停下审批由会话的**权限档**决定——
+  `default`（界内写文件直接做、命令仍批准）/ `ask`（两者都批准）/ `full`（都不再批准）。
+  要审批时 `prepare` 渲染 diff/命令预览并校验黑名单，用户批准后才 `perform`。
+  **黑名单与越界检查在 `perform` 里还会再跑一次**，所以免审批路径同样拦得住。
+  所有路径 `resolve()` 后必须落在工作区（新建任务时选文件夹，默认
+  `ZKAI_AGENT_WORKSPACE`）内，`..`/绝对路径/符号链接逃逸一律拒绝
+- **熔断**：单任务步数默认**不设上限**（`ZKAI_AGENT_MAX_STEPS=0`，填正数恢复上限）、
+  并发会话数（`ZKAI_AGENT_MAX_CONCURRENT=3`，超出的排队）、上下文超限（
   `ZKAI_AGENT_CONTEXT_TOKEN_LIMIT`）触发临时摘要压缩
 - **持久化**：`agent_sessions` / `agent_messages` 两张表；transcript 行本身就是
   LLM 重放历史（user/assistant/tool 三种 role + kind 区分显示行），重启后可回看，
@@ -1263,10 +1270,12 @@ agent 循环「LLM → 工具调用 → 回填结果 → 再 LLM」直到给出�
 |---|---|---|
 | `GET` | `/ui/agent` | 任务台页面（页面壳公开，数据接口鉴权） |
 | `GET` | `/admin/agent/models` | 会话可选的模型/别名清单 |
+| `GET` | `/admin/agent/fs/list?path=` | 工作区选择器：列子目录 + 盘符 + 常用位置 |
 | `GET` | `/admin/agent/sessions` | 会话列表（惰性清理僵尸 running） |
-| `POST` | `/admin/agent/sessions` | 创建会话并启动循环 `{task, model?, workspace?}` |
+| `POST` | `/admin/agent/sessions` | 创建会话并启动循环 `{task, model?, workspace?, permission?}` |
 | `GET` | `/admin/agent/sessions/{id}` | 会话详情 + 全部 transcript 行 |
 | `POST` | `/admin/agent/sessions/{id}/messages` | 终态会话追加任务（重放历史续跑） |
+| `POST` | `/admin/agent/sessions/{id}/permission` | 改权限档 `{permission}`（运行中立即生效） |
 | `POST` | `/admin/agent/sessions/{id}/cancel` | 取消（挂起的审批一并拒绝） |
 | `DELETE` | `/admin/agent/sessions/{id}` | 删除会话（执行中 409） |
 | `POST` | `/admin/agent/sessions/{id}/approvals/{aid}` | 审批决定 `{approved, remember}` |
@@ -1374,7 +1383,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1253 个用例，全部通过，零网络、零真实配额。**
+**1293 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

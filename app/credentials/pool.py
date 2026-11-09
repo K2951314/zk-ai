@@ -348,22 +348,20 @@ class CredentialPool:
         *,
         exclude: Iterable[str] | None = None,
     ) -> CredentialRuntime | None:
-        """Select and *mark in use* the next credential (atomic)."""
+        """Select the next credential and stamp ``last_used_at`` (atomic).
+
+        只给测试与脚本用的便捷入口——**生产路径走 ``candidates()``**，
+        而真正的 LRU 戳记在 ``report_success`` 里（2026-11-09 洁癖审查：
+        以前 ``last_used_at`` 只在这里更新，而生产从不调 pick，
+        于是 rotation 的「最久未用优先」排序一直用着全 0 的时间戳 = 失效）。
+        """
         moment = time.time()
         excluded = set(exclude or ())
         with self._lock:
             for credential in self.candidates(provider_id, exclude=excluded):
                 credential.last_used_at = moment
-                credential.in_flight += 1
                 return credential
         return None
-
-    def release(self, credential_id: str) -> None:
-        """Mark a credential as no longer in flight."""
-        with self._lock:
-            credential = self._credentials.get(credential_id)
-            if credential and credential.in_flight > 0:
-                credential.in_flight -= 1
 
     # ------------------------------------------------------------------ #
     # Reporting
@@ -373,8 +371,12 @@ class CredentialPool:
             credential = self._credentials.get(credential_id)
             if credential is None:
                 return None
-            if credential.in_flight > 0:
-                credential.in_flight -= 1
+            # LRU 的真戳记点（2026-11-09 洁癖审查修正）：rotation 的
+            # `_priority_key` 按 last_used_at 升序排「最久未用优先」，
+            # 但生产路径从不调 pick()、这里以前也不写——排序键恒为 0，
+            # 等权 Key 实际退化成按 id 轮转。「刚用过的排到队尾」只有
+            # 在这里落笔才成立。
+            credential.last_used_at = time.time()
             return self.tracker.on_success(credential, latency_ms=latency_ms)
 
     def effective_throttle_scope(self, credential_id: str, kind: str) -> str:
@@ -405,8 +407,6 @@ class CredentialPool:
             credential = self._credentials.get(credential_id)
             if credential is None:
                 return None
-            if credential.in_flight > 0:
-                credential.in_flight -= 1
             transition = self.tracker.on_failure(credential, info)
             self._park_throttled_siblings(credential, info, transition)
             return transition

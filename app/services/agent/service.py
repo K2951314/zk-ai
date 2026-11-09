@@ -41,6 +41,7 @@ from app.services.agent.cli import delegate as cli_delegate
 from app.services.agent.cli.registry import EFFORT_LEVELS
 from app.services.agent.cli.runner import run_delegation
 from app.services.agent.confirm import SessionApprovals
+from app.services.agent.model_catalog import describe_channels, load_catalog
 from app.services.agent.prompts import build_system_prompt
 from app.services.agent.roles import describe_roles, resolve_alias
 from app.services.agent.tools import (
@@ -61,6 +62,9 @@ _ACTIVE_STATUSES = frozenset({"running", "waiting_approval"})
 #: followup 允许从哪些状态继续
 _RESUMABLE_STATUSES = frozenset({"done", "failed", "cancelled", "interrupted"})
 _COMPACT_TAIL = 10  # 压缩时保留最近的消息条数
+#: 任务台权限档。default = 界内写文件直接执行、命令仍需批准；
+#: ask = 写与命令都逐条批准；full = 两者都不再逐条批准（黑名单/越界仍硬拦）。
+PERMISSION_MODES = frozenset({"default", "ask", "full"})
 #: 回填给父模型的子任务结论上限（再长就是拿子会话的原文挤父的上下文）。
 _MAX_CHILD_SUMMARY = 4_000
 #: 等子任务时的轮询间隔：只用于「顺带看一眼是否卡在等审批」，完成信令本身
@@ -75,6 +79,8 @@ class _Running:
     session_id: str
     workspace: Path
     model: str
+    #: 权限档：default / ask / full（见 PERMISSION_MODES）
+    permission: str = "default"
     approvals: SessionApprovals = field(default_factory=SessionApprovals)
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
     cancelled: bool = False
@@ -165,6 +171,7 @@ class AgentService:
         task: str,
         model: str | None = None,
         workspace: str | None = None,
+        permission: str | None = None,
         parent: AgentService | None = None,
         parent_session: str | None = None,
         depth: int = 1,
@@ -172,11 +179,13 @@ class AgentService:
         files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         resolved_model = model or self.settings.agent_default_model
+        perm = self._resolve_permission(permission)
         ws = self._resolve_workspace(workspace)
         session_id = uuid.uuid4().hex
         title = task.strip().splitlines()[0][:80] if task.strip() else "(空任务)"
         await self.repo.create_session(
-            session_id=session_id, title=title, model=resolved_model, workspace=str(ws)
+            session_id=session_id, title=title, model=resolved_model,
+            workspace=str(ws), permission=perm,
         )
         # 文件先落盘，再把路径写进任务正文 —— Agent 拿路径就能自己读
         stored = _store_files(files, data_dir=self.settings.resolved_data_dir,
@@ -191,6 +200,7 @@ class AgentService:
             session_id=session_id,
             workspace=ws,
             model=resolved_model,
+            permission=perm,
             parent=parent,
             parent_session=parent_session,
             depth=depth,
@@ -218,7 +228,8 @@ class AgentService:
         if row["status"] not in _RESUMABLE_STATUSES:
             raise ZKAIError(f"会话状态 {row['status']} 不能继续", http_status=409)
         run = _Running(session_id=session_id, workspace=Path(row["workspace"]),
-                       model=row["model"], cli_registry=load_cli_registry(self.settings))
+                       model=row["model"], permission=row.get("permission") or "default",
+                       cli_registry=load_cli_registry(self.settings))
         self._running[session_id] = run
         stored = _store_files(files, data_dir=self.settings.resolved_data_dir,
                               session_id=session_id)
@@ -291,6 +302,7 @@ class AgentService:
             title=f"[{role}] {first_line}",
             model=f"cli:{config.name}",
             workspace=str(workspace_path),
+            permission="ask",
         )
         await self.repo.add_message(
             session_id,
@@ -303,6 +315,7 @@ class AgentService:
             session_id=session_id,
             workspace=workspace_path,
             model=f"cli:{config.name}",
+            permission="ask",
             cli_registry=registry,
         )
         self._running[session_id] = run
@@ -477,7 +490,6 @@ class AgentService:
             raise ZKAIError("一条消息最多指派 10 段任务", http_status=400)
 
         resolved: list[tuple[Any, str, str]] = []
-        registry = CliRegistry()
         for item in items:
             role = str(item.get("role") or "").strip()
             task = str(item.get("task") or "").strip()
@@ -509,6 +521,7 @@ class AgentService:
                 title=f"[{len(resolved)}段] {first}",
                 model=f"cli:{resolved[0][0].name}",
                 workspace=str(ws),
+                permission="ask",
             )
 
         for config, task, role in resolved:
@@ -523,6 +536,7 @@ class AgentService:
             session_id=session_id,
             workspace=ws,
             model=f"cli:{resolved[0][0].name}",
+            permission="ask",
             cli_registry=registry,
         )
         self._running[session_id] = run
@@ -658,6 +672,18 @@ class AgentService:
             raise ZKAIError("会话正在执行，先取消再删除", http_status=409)
         return await self.repo.delete_session(session_id)
 
+    async def set_permission(
+        self, session_id: str, permission: str
+    ) -> dict[str, Any] | None:
+        """改一个会话的权限档；正在跑的会话立刻生效（下一次工具调用起）。"""
+        perm = self._resolve_permission(permission)
+        if not await self.repo.update_permission(session_id, perm):
+            return None
+        run = self._running.get(session_id)
+        if run is not None:
+            run.permission = perm
+        return await self.repo.get_session(session_id)
+
     async def decide(
         self, session_id: str, approval_id: str, *, approved: bool, remember: bool
     ) -> dict[str, Any] | None:
@@ -774,11 +800,18 @@ class AgentService:
         self._emit(run, {"type": "session_started", "model": run.model,
                          "workspace": str(run.workspace), "resumed": resume})
 
+        # 模型画像里有「只能在桌面端用」的条目（CatPawAI / WorkBuddy），
+        # 它们不在执行体花名册里。不把这份清单注入提示词，模型就会回
+        # 「我这边没有这个模型」——2026-11-08 运营者踩过。
+        catalog, _catalog_warnings = load_catalog(s.resolved_config_dir)
+        channels = describe_channels(catalog, set(run.cli_registry.tools))
         system = ChatMessage(
             role="system",
             content=build_system_prompt(
                 str(run.workspace),
                 max_steps=s.agent_max_steps,
+                permission=run.permission,
+                model_channels=channels,
                 settings=s,
                 is_child=run.parent is not None,
             ),
@@ -807,7 +840,7 @@ class AgentService:
                                               input_tokens=in_tokens, output_tokens=out_tokens)
                 self._emit(run, {"type": "session_done", "status": "cancelled"})
                 return {"status": "cancelled", "error": "任务被取消"}
-            if steps >= s.agent_max_steps:
+            if s.agent_max_steps > 0 and steps >= s.agent_max_steps:
                 note = f"已达到单任务步数上限（{s.agent_max_steps} 步），任务停止。"
                 await self.repo.add_message(session_id, role="assistant", kind="note",
                                             content=note)
@@ -961,6 +994,17 @@ class AgentService:
         })
         return ChatMessage(role="tool", content=outcome.output, tool_call_id=call.id)
 
+    @staticmethod
+    def _needs_approval(run: _Running, tool: str) -> bool:
+        """按会话权限档判断这个危险工具要不要停下来问用户。
+
+        只决定「问不问」，不决定「能不能」：``ToolBox`` 的路径越界检查与
+        命令黑名单在 ``perform`` 里照跑，任何档位都绕不过去。
+        """
+        if run.approvals.skipped(tool) or run.permission == "full":
+            return False
+        return not (run.permission == "default" and tool == "write_file")
+
     async def _dispatch(
         self, run: _Running, toolbox: ToolBox, name: str, args: dict[str, Any]
     ) -> ToolOutcome:
@@ -976,7 +1020,7 @@ class AgentService:
                 return await toolbox.perform(name, args)
             if name not in DANGEROUS_TOOLS:
                 raise ToolError(f"未知工具 {name!r}，可用：{sorted(SAFE_TOOLS | DANGEROUS_TOOLS)}")
-            if not run.approvals.skipped(name):
+            if self._needs_approval(run, name):
                 prepared = toolbox.prepare(name, args)  # 黑名单在这里直接 ToolError
                 preview = str((prepared.display or {}).get("diff")
                               or (prepared.display or {}).get("command") or "")
@@ -1370,6 +1414,18 @@ class AgentService:
             else:
                 out.append(ChatMessage(role="user", content=_user_content(content, data)))
         return out
+
+    @staticmethod
+    def _resolve_permission(permission: str | None) -> str:
+        """校验权限档；空值走 default（界内写文件免批）。"""
+        perm = (permission or "default").strip().lower()
+        if perm not in PERMISSION_MODES:
+            raise ZKAIError(
+                f"未知的权限档 {permission!r}，可选："
+                "default（默认）/ ask（每次都问）/ full（完全访问）",
+                http_status=400,
+            )
+        return perm
 
     def _resolve_workspace(self, workspace: str | None) -> Path:
         raw = Path(workspace) if workspace else self.settings.resolved_workspace

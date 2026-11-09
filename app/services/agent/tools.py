@@ -479,16 +479,21 @@ class ToolBox:
     # ------------------------------------------------------------------ #
     # run_command
     # ------------------------------------------------------------------ #
-    def _prepare_command(self, args: dict[str, Any]) -> ToolOutcome:
-        command = str(args.get("command") or "").strip()
-        if not command:
-            raise ToolError("command 为空")
+    @staticmethod
+    def _check_blocklist(command: str) -> None:
+        """硬黑名单：无论走不走审批、哪一档权限，都必须先过这里。"""
         lowered = command.lower()
         for rx in _COMMAND_BLOCKLIST:
             if rx.search(lowered):
                 raise ToolError(
                     f"命令命中安全黑名单（{rx.pattern!r}），已被硬拦截，请换用更安全的方案"
                 )
+
+    def _prepare_command(self, args: dict[str, Any]) -> ToolOutcome:
+        command = str(args.get("command") or "").strip()
+        if not command:
+            raise ToolError("command 为空")
+        self._check_blocklist(command)
         return ToolOutcome(
             needs_approval=True,
             display={"kind": "run_command", "command": command,
@@ -499,6 +504,9 @@ class ToolBox:
         command = str(args.get("command") or "").strip()
         if not command:
             raise ToolError("command 为空")
+        # 免审批路径（本会话不再询问 / full 档）不会经过 _prepare_command，
+        # 黑名单必须在这里再拦一次，否则「硬黑名单」名不副实。
+        self._check_blocklist(command)
         asked = float(_as_int(args.get("timeout"), 0) or self.command_timeout)
         timeout = min(_MAX_COMMAND_TIMEOUT, max(1.0, asked))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

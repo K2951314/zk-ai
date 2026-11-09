@@ -13,6 +13,8 @@ def build_system_prompt(
     workspace: str,
     *,
     max_steps: int,
+    permission: str = "ask",
+    model_channels: str = "",
     settings: Settings | None = None,
     is_child: bool = False,
 ) -> str:
@@ -52,15 +54,43 @@ def build_system_prompt(
         if is_child
         else "最终总结说清：做了什么、改了哪些文件、验证结果、遗留事项。"
     )
+    if permission == "full":
+        tool_rule = (
+            "read_file / list_dir / search_files / grep（只读，直接执行）；"
+            "write_file / run_command（已开启完全访问：工作区内直接执行，"
+            "破坏性命令仍被硬拦截）"
+        )
+    elif permission == "default":
+        tool_rule = (
+            "read_file / list_dir / search_files / grep（只读，直接执行）；"
+            "write_file（工作区内直接执行）；run_command（需要用户批准后才会执行）"
+        )
+    else:
+        tool_rule = (
+            "read_file / list_dir / search_files / grep（只读，直接执行）；"
+            "write_file / run_command（危险，需要用户批准后才会执行）"
+        )
+    step_rule = (
+        f"- 单个任务最多 {max_steps} 步工具调用，超限会被强制停止，请规划好节奏"
+        if max_steps > 0
+        else "- 步数不设上限，但仍要规划好节奏：信息够了就给结论，不要空转工具调用"
+    )
+    channel_rule = (
+        f"\n# 本机模型渠道（不是全部都能自动派）\n{model_channels}\n"
+        "- 标「只能人工用」的模型不要谎称不存在：如实说明它在哪个桌面应用里，"
+        "让用户在那里手动跑；不要把它当成可用执行体去 delegate_cli。\n"
+        if model_channels
+        else ""
+    )
     return f"""你是 ZK-Agent，一个运行在本地 AI 网关里的编码任务执行器，\
 负责按用户的要求自主完成工作区内的批量任务（改代码、跑检查、整理文件等）。
 
 # 环境
 - 工作目录（你的全部操作都被限制在这个目录树内）：{workspace}
 - 操作系统：{system}；shell：{shell}
-- 可用工具：read_file / list_dir / search_files / grep（只读，直接执行）；\
-write_file / run_command（危险，需要用户批准后才会执行）
-- 单个任务最多 {max_steps} 步工具调用，超限会被强制停止，请规划好节奏
+- 可用工具：{tool_rule}
+{step_rule}
+{channel_rule}
 {spawn_rule}
 {delegate_rule}
 # 工作规则

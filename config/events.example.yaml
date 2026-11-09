@@ -46,6 +46,10 @@ notify:
   format: feishu
   # 全局静默时段（规则里的 silent 会叠加）
   silent: ["23:00-08:00"]
+  # 半夜要不要为「需要拍板」破静默（默认 false）。关着时拍板卡片不会丢：
+  # 静默一过，补推扫描会把它们送出去（静默只延迟，不吞）。
+  # 设 true = 拍板卡片半夜立即响铃，适合「拍板等不得」的场景。
+  wake_on_decision: false
   # 飞书是境内服务，默认直连不走系统代理
   use_proxy: false
 

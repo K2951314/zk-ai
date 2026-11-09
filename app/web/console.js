@@ -2458,7 +2458,12 @@ async function openChatGptModal() {
   $("#cg-btn-copyurl").onclick = () => cgCopy(cgPublicUrl(), "base_url 已复制");
   $("#cg-btn-copytoken").onclick = () => {
     const tok = cgTokenValue();
-    if (!tok) { toast("网关未设置 ZKAI_API_TOKEN（.env 里没有）", "err"); return; }
+    if (!tok) {
+      toast(cgState && cgState.gateway && cgState.gateway.api_token_hidden
+        ? "管理面未配置 ZKAI_ADMIN_TOKEN，推理令牌已隐藏——先设好管理令牌"
+        : "网关未设置 ZKAI_API_TOKEN（.env 里没有）", "err");
+      return;
+    }
     cgCopy(tok, "令牌值已复制");
   };
   $("#cg-btn-copysnip").onclick = () => cgCopy($("#cg-snippet").textContent, "配置片段已复制");
@@ -2497,9 +2502,14 @@ function cgFill(r) {
   // ---- 公网区 ----
   $("#cg-pub-base").value = cgPublicUrl();
   $("#cg-pub-token").value = `${cgTokenName()}="${cgTokenValueHint()}"`;
-  $("#cg-token-note").textContent = dep.api_token_set
-    ? "点「📋 复制令牌值」复制 ZKAI_API_TOKEN 的真值（网关 .env 里的），可直接粘贴给客户端。"
-    : "网关未设 ZKAI_API_TOKEN，当前不校验客户端令牌（仅适合回环监听）。";
+  // 2026-11-08 起未配管理令牌时后端 fail-closed：api_token 不再明文下发
+  // （管理面没上锁时它对所有人开放，等于把推理令牌挂门口）。
+  const gwHidden = !!(gw && gw.api_token_hidden);
+  $("#cg-token-note").textContent = gwHidden
+    ? "网关未配置 ZKAI_ADMIN_TOKEN（管理面无锁），ZKAI_API_TOKEN 已隐藏；在 .env 设好管理令牌并重启后可在此复制。"
+    : dep.api_token_set
+      ? "点「📋 复制令牌值」复制 ZKAI_API_TOKEN 的真值（网关 .env 里的），可直接粘贴给客户端。"
+      : "网关未设 ZKAI_API_TOKEN，当前不校验客户端令牌（仅适合回环监听）。";
 
   // ---- 本机区：远程部署时整块隐藏 ----
   const localZone = $("#cg-local-zone");
@@ -3022,7 +3032,10 @@ function blConnect() {
   if (typeof EventSource === "undefined") { blFallback(); return; }
   let es;
   try {
-    es = new EventSource("/zkadmin/burner/log/stream?lines=120&within_seconds=86400");
+    // 2026-11-08 起 /zkadmin/burner/log/* 挂了鉴权；EventSource 发不了自定义
+    // header，SSE 只能走 ?token=（网关自身访问日志只记 path，见 deps.py）。
+    const blTok = state.token ? `&token=${encodeURIComponent(state.token)}` : "";
+    es = new EventSource(`/zkadmin/burner/log/stream?lines=120&within_seconds=86400${blTok}`);
   } catch {
     blFallback();
     return;

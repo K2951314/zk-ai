@@ -294,6 +294,8 @@ class AgentSession(Base):
     #: alias or model id the loop routes through (default ``zk-auto``)
     model: Mapped[str] = mapped_column(String(128), default="zk-auto")
     workspace: Mapped[str] = mapped_column(String(500), default="")
+    #: 权限档：default（界内写文件免批）/ ask（写与命令都批）/ full（都不批）
+    permission: Mapped[str] = mapped_column(String(16), default="default")
     #: running | waiting_approval | done | failed | cancelled | interrupted
     status: Mapped[str] = mapped_column(String(16), default="running", index=True)
     steps: Mapped[int] = mapped_column(Integer, default=0)
@@ -429,9 +431,6 @@ class EventRecord(Base):
     hops: Mapped[int] = mapped_column(Integer, default=0)
     #: 父事件 id（派生它的那条）。排查链路用，也用于在卡片上显示来源。
     parent_id: Mapped[int | None] = mapped_column(Integer)
-    #: 最早可以认领的时刻（NULL = 立即）。回执里的 ``later`` 靠它实现「约个时间再醒」：
-    #: 事件照样入库，但认领要等到这个点之后 —— 等的时候不占进程、不花 Token。
-    not_before: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     received_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False, index=True
     )

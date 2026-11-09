@@ -137,8 +137,9 @@ class TestHealthDeployBlock:
             assert deploy["is_remote"] is True
             assert deploy["public_base_url"] == "https://120.53.28.29/zkai"
             assert deploy["client_base_url"] == "https://120.53.28.29/zkai/v1"
-            assert deploy["burner_log_path"].endswith("burn_sensenova.log")
-            assert deploy["burner_state_path"].endswith("burn_state.json")
+            # 2026-11-08 审查：绝对路径不再从无鉴权的 /health 带出
+            assert "burner_log_path" not in deploy
+            assert "burner_state_path" not in deploy
         finally:
             await harness.container.shutdown()
 
@@ -204,7 +205,7 @@ class TestBurnerDir:
     async def test_health_and_log_endpoints_agree_on_the_path(
         self, tmp_path: Path
     ) -> None:
-        """/health 报的路径必须就是 SSE 端点实际读的那个。"""
+        """消耗器日志端点读的就是配置指向的那个文件；/health 不再带出绝对路径。"""
         from httpx import ASGITransport, AsyncClient
 
         from app.main import create_app
@@ -232,7 +233,16 @@ class TestBurnerDir:
                 tail = await client.get(
                     "/zkadmin/burner/log/tail", headers={"X-Admin-Token": "t"}
                 )
-            assert health["burner_log_path"] == str(burner_dir / "burn_sensenova.log")
+            # 2026-11-08 审查：/health 是控制台有意不带令牌读的端点，绝对路径
+            # （文件系统布局）不再从它带出——需要路径真相走 /zkadmin/chatgpt。
+            for leaked in (
+                "burner_log_path",
+                "burner_state_path",
+                "config_dir",
+                "data_dir",
+                "listen",
+            ):
+                assert leaked not in health, f"/health.deploy 不该再暴露 {leaked}"
             assert tail.status_code == 200
             # 日志不在，端点要说明原因而不是假装成功
             assert "还没有日志" in tail.text

@@ -127,17 +127,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(messages.router)
     app.include_router(responses.router)
-    app.include_router(burner_log.router)
     app.include_router(ui.router)
-    # /admin/agent/*: routes internally 404 when ZKAI_AGENT_ENABLED=false, and
-    # require_admin already 404s when the admin surface is off.
-    app.include_router(agent.router)
-    # /zkadmin/events/*: 事件中台。routes 内部按 ZKAI_EVENTS_ENABLED 自行 404。
-    app.include_router(events.router)
-    # 消耗器日志 SSE 挂在 /admin/burner/log/* 上，必须与 admin 同一个开关：
-    # 这个面关掉时它不该还能读到服务器上的日志文件。
-    if settings.admin_enabled:
+    # admin 面挂载闸（2026-11-08 审查 P0）：显式声明的远程部署 + 未配令牌时，
+    # 管理面（含 /zkadmin/chatgpt 的明文令牌端点）会整体暴露给公网。这种配置
+    # 以前只打一条 warning 继续裸奔（fail-open）；现在直接拒绝挂载——控制台
+    # 404 是一眼能看懂的事故，令牌被扫走不是。
+    # 判据刻意用「显式声明」（exposure=server / 配了 public_base_url），不用
+    # is_remote_deploy：后者把默认的 host=0.0.0.0 也算远程，会把本地开发的
+    # 默认流（.env 还没填令牌）一起锁死。跳反代时 bind 回环但配了
+    # public_base_url 的形态同样命中——那正是公网可达的信号。
+    declared_remote = (
+        (settings.exposure or "").strip().lower() in {"server", "remote", "public"}
+        or bool((settings.public_base_url or "").strip())
+    )
+    admin_active = settings.admin_enabled and (
+        bool(settings.admin_token) or not declared_remote
+    )
+    if settings.admin_enabled and not admin_active:
+        logger.error(
+            "远程部署（配置了 public_base_url / exposure=server）但未设置 "
+            "ZKAI_ADMIN_TOKEN：admin 管理面与消耗器日志已拒绝挂载，控制台会 404。"
+            "要恢复：在 .env 里设置 ZKAI_ADMIN_TOKEN 后重启网关。"
+        )
+    # 以下四个 router 同属 admin 令牌域：/zkadmin/agent/*、/zkadmin/events/*
+    # 的 routes 内部还会按 ZKAI_AGENT_ENABLED / ZKAI_EVENTS_ENABLED 自行 404，
+    # 消耗器日志 SSE 的 router 自身挂了 require_admin_query——但「挂载与否」
+    # 的最终闸在这里，防的就是「依赖放行了但面不该存在」。
+    if admin_active:
+        app.include_router(agent.router)
+        app.include_router(events.router)
         app.include_router(admin.router)
+        app.include_router(burner_log.router)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict:

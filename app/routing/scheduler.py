@@ -726,7 +726,8 @@ class Scheduler:
                                 status="cancelled",
                             )
                         )
-                        self.pool.release(credential.id)
+                        # in_flight 计数已移除（2026-11-09）：客户端断连不需要
+                        # 「归还」凭据，也不能记 report_failure（不是上游的错）。
                         logger.info("attempt %d cancelled (client disconnect)", attempt_number)
                         raise
                     except Exception as exc:
@@ -956,7 +957,7 @@ class Scheduler:
                                 status="cancelled",
                             )
                         )
-                        self.pool.release(credential.id)
+                        # 同上：取消只记 attempt，不做凭据归还/失败上报。
                         await self._close(generator)
                         raise
                     except Exception as exc:

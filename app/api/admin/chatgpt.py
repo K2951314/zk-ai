@@ -146,7 +146,12 @@ async def get_chatgpt_config(container: ContainerDep) -> dict[str, Any]:
             "api_token_set": bool(gateway_token),
             # 「复制取值命令」要取的是 ZKAI_API_TOKEN 的真值，不是管理令牌——
             # 两者可能不同（ZKAI_ADMIN_TOKEN 可另设）。admin 已鉴权，可下发。
-            "api_token": gateway_token or "",
+            # 但「已鉴权」的前提是 admin 令牌真的存在：未配置 ZKAI_ADMIN_TOKEN
+            # 时 require_admin 对所有人放行（本地开发语义），这个端点就成了
+            # 无凭据可拿推理令牌的门（2026-11-08 审查 P0 的攻击链第二环）。
+            # fail-closed：管理面没有自己的锁时，金钥匙不给——前端据此提示。
+            "api_token": (gateway_token or "") if container.settings.admin_token else "",
+            "api_token_hidden": not bool(container.settings.admin_token),
         },
         # 部署形态：远程部署时写本机 config.toml 没有意义（那是服务器的文件
         # 系统，不是打开控制台那台电脑的），面板据此只渲染公网调用那段。

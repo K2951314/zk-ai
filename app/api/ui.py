@@ -25,9 +25,12 @@ _MODELS = _WEB / "models.html"
 
 #: CSS/JS companions for ``index.html`` (split out so the browser can cache them
 #: independently and the HTML shell stays under 1k lines).
+#: ``common.js`` 是独立页（agent/events/taskspaces/models）的共享外壳：
+#: 令牌管理 + 带 401 识别的 api + 登录兜底（2026-11-08 手机远控 M1）。
 _STATIC_ASSETS: dict[str, tuple[str, str]] = {
     "console.css": ("text/css; charset=utf-8", "console.css"),
     "console.js": ("application/javascript; charset=utf-8", "console.js"),
+    "common.js": ("application/javascript; charset=utf-8", "common.js"),
 }
 
 #: 控制台是本地运维页，页面/脚本都很小但改动频繁。默认不带缓存头时浏览器会

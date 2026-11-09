@@ -73,6 +73,24 @@ if (EMBEDDED) {
            border: 1px dashed #d3d1c7; border-radius: 12px; }
   html.embed header { display: none; }
   html.embed main { padding: 14px 16px 28px; max-width: none; }
+  /* 手机：七列表格在 390px 视口上是 640px 的横向灾难。
+     卡片化（thead 隐藏、td 用 data-label 报列名）与控制台同一套思路。 */
+  @media (max-width: 860px) {
+    main { padding: 12px 12px 32px; }
+    header { flex-wrap: wrap; row-gap: 2px; }
+    header h1 { white-space: nowrap; }
+    table { border: none; background: none; }
+    thead { display: none; }
+    tbody tr { display: block; background: #fff; border: 1px solid #e3e1da;
+               border-radius: 12px; margin-bottom: 10px; padding: 8px 0; }
+    tbody tr:hover { background: #fff; }
+    td { display: flex; gap: 8px; align-items: baseline;
+         border-bottom: none; padding: 3px 14px; word-break: break-all; }
+    td::before { content: attr(data-label); flex: none; width: 76px;
+                 color: #888780; font-size: 12px; }
+    td:first-child { padding-top: 8px; }
+    td:last-child { padding-bottom: 8px; }
+  }
 </style>
 </head>
 <body>
@@ -173,26 +191,34 @@ if (EMBEDDED) {
   </div>
 </main>
 
+<script src="/ui/common.js"></script>
 <script>
-const TOKEN = localStorage.getItem("zkai_admin_token") || "";
 const STATE_ZH = {
   received: "待认领", running: "进行中", waiting_decision: "等你拍板",
   done: "已完成", failed: "失败", dropped: "无规则"
 };
 let current = null;
 
-function api(path, options) {
-  const opts = options || {};
-  opts.headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
-  return fetch(path, opts).then(function (r) {
-    if (!r.ok) { throw new Error("请求失败：HTTP " + r.status); }
-    return r.json();
-  });
+/* 令牌与请求走共享外壳：401 时自动弹登录框（手机第一次打开 /ui/events 的
+   唯一活路——以前这一页没有任何输入令牌的地方，飞书卡片点进来就是死路）。 */
+async function api(path, options) {
+  try {
+    return await ZKUI.api(path, options);
+  } catch (err) {
+    if (err.isAuth) {
+      ZKUI.promptLogin("打开事件流需要管理令牌（与网关 .env 里的 ZKAI_ADMIN_TOKEN 相同）");
+    }
+    throw err;
+  }
 }
 
+/* 五字符全转义：state 会被拼进 class 属性，弱化版（不转义引号）是
+   「靠上游枚举兜底」而不是「靠自己转义兜底」，换字段就会出事。 */
 function esc(value) {
   return String(value === null || value === undefined ? "" : value)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    .replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
 }
 
 function shortTime(iso) {
@@ -207,13 +233,13 @@ function render(events) {
   const body = document.getElementById("rows");
   body.innerHTML = events.map(function (e) {
     return "<tr data-id=\"" + e.id + "\">" +
-      "<td>" + e.id + "</td>" +
-      "<td><span class=\"pill " + esc(e.state) + "\">" + esc(STATE_ZH[e.state] || e.state) + "</span></td>" +
-      "<td>" + esc(e.source) + "</td>" +
-      "<td>" + esc(e.type) + "</td>" +
-      "<td>" + esc(e.summary) + "</td>" +
-      "<td class=\"muted\">" + esc(e.rule || "无规则") + " / " + esc(e.role || "-") + "</td>" +
-      "<td class=\"muted\">" + shortTime(e.received_at) + "</td>" +
+      "<td data-label=\"编号\">" + e.id + "</td>" +
+      "<td data-label=\"状态\"><span class=\"pill " + esc(e.state) + "\">" + esc(STATE_ZH[e.state] || e.state) + "</span></td>" +
+      "<td data-label=\"来源\">" + esc(e.source) + "</td>" +
+      "<td data-label=\"类型\">" + esc(e.type) + "</td>" +
+      "<td data-label=\"摘要\">" + esc(e.summary) + "</td>" +
+      "<td class=\"muted\" data-label=\"规则 / 执行体\">" + esc(e.rule || "无规则") + " / " + esc(e.role || "-") + "</td>" +
+      "<td class=\"muted\" data-label=\"收到时间\">" + shortTime(e.received_at) + "</td>" +
       "</tr>";
   }).join("");
   document.getElementById("empty").style.display = events.length ? "none" : "block";

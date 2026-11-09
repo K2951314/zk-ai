@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZK-Agent · 批量任务跑批</title>
 <style>
   :root {
@@ -31,6 +31,9 @@
     }
   }
   * { box-sizing: border-box; }
+  /* button 的 display:inline-flex 会盖掉 UA 的 [hidden]{display:none}，
+     「停止」按钮在会话未开始时一直可见（真机 2026-11-08 抓到）。 */
+  [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 13px/1.6 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
@@ -233,7 +236,7 @@
   #composer.drop { outline: 2px dashed var(--accent, #185fa5); outline-offset: -4px; }
   /* 工具栏：左附件、右发送 */
   .attach-bar {
-    display: flex; gap: 8px; align-items: center;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     font-size: 12px; color: var(--muted);
   }
   .attach-bar .spacer { flex: 1 1 auto; }
@@ -298,11 +301,72 @@
     padding: 10px 16px; box-shadow: var(--shadow-md); z-index: 50; font-size: 13px;
   }
 
+  .modal {
+    position: fixed; inset: 0; z-index: 60; padding: 20px;
+    background: rgba(16, 24, 40, .38); display: grid; place-items: center;
+  }
+  .modal[hidden] { display: none; }
+  .modal-card {
+    width: min(720px, 100%); max-height: 86vh; overflow: hidden;
+    display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow-md);
+  }
+  .modal-head, .modal-foot {
+    display: flex; align-items: center; gap: 10px; padding: 11px 16px;
+    border-bottom: 1px solid var(--border); flex: none;
+  }
+  .modal-foot { border-bottom: none; border-top: 1px solid var(--border); }
+  .modal-head b { flex: 1; font-size: 14px; }
+  .modal-body {
+    padding: 14px 16px; overflow-y: auto; flex: 1;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  .field > label { font-weight: 600; font-size: 13px; }
+  .field .hint { margin: 3px 0 8px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .path-row { display: flex; gap: 8px; }
+  .path-row input { flex: 1; min-width: 0; font-family: Consolas, monospace; font-size: 12px; }
+  .quick-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .quick-row button { font-size: 12px; padding: 3px 9px; }
+  .dir-list {
+    margin-top: 8px; max-height: 210px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--panel-2);
+  }
+  .dir-item {
+    padding: 6px 10px; font-size: 12px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dir-item:last-child { border-bottom: none; }
+  .dir-item:hover { background: var(--accent-soft); color: var(--accent); }
+  .perm-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+  .perm-card {
+    display: flex; flex-direction: column; gap: 4px; cursor: pointer;
+    padding: 10px 12px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius); background: var(--panel);
+  }
+  .perm-card.on { border-color: var(--accent); background: var(--accent-soft); }
+  .perm-card b { font-size: 13px; }
+  .perm-card span { font-size: 12px; color: var(--muted); line-height: 1.6; }
+
+  /* 手机层（2026-11-08 手机远控 M1，对齐 docs/界面交互方案.md 的硬项）：
+     100dvh 防浏览器工具栏吃掉发送键；顶栏 wrap 防 7 个元素横向溢出；
+     输入 16px 防 iOS 聚焦自动放大；safe-area 给全面屏留边。 */
   @media (max-width: 860px) {
+    body { height: 100dvh; }
     main { flex-direction: column-reverse; }
     aside { width: 100%; max-height: 42vh; border-right: none; border-bottom: 1px solid var(--border); }
     #stream { padding: 14px; }
-    form#composer { padding: 10px 12px; }
+    form#composer { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+    header {
+      flex-wrap: wrap; row-gap: 6px; padding: 8px 12px;
+      padding-top: calc(8px + env(safe-area-inset-top));
+    }
+    header select { max-width: 46vw; }
+    select, input[type=text], textarea { font-size: 16px; }
+    header button, form#composer button, .attach-bar button { min-height: 40px; }
+    .exec-menu { left: 12px; right: 12px; }
   }
 </style>
 </head>
@@ -328,7 +392,7 @@
       <div id="empty">
         <h2>给 Agent 一个任务</h2>
         <p>例如：<em>把所有脚本的 print 换成 logger</em>、<em>给 app/services 下每个公开函数补 docstring 并跑 pytest 验证</em>。<br>
-        模型默认走 <code>zk-auto</code>；写文件和跑命令会先请你批准。</p>
+        模型默认走 <code>zk-auto</code>；先在下面选好工作区和权限档，开工后就不再反复打断。</p>
         <p class="hint"><strong>要让桌面应用干活，看这里：</strong><br>
         · 改表格 / 文档 / PPT —— <strong>直接描述任务就行</strong>，Agent 会自己调本机编辑器工具；<br>
         · 让 CodeBuddy、Qoder、Claude 等命令行工具干 —— 点下面的「选执行体」，或打 <code>@</code> 挑一个；<br>
@@ -341,9 +405,13 @@
       <textarea id="taskInput" placeholder="描述任务，Enter 发送；@ 可点名执行体，一条消息可点名多个（按顺序串行跑）&#10;图片和文件可以直接粘贴或拖进来"></textarea>
       <div class="attachments" id="attachments"></div>
       <div class="attach-bar">
+        <button type="button" id="pickWorkspace" title="选择这个任务的工作区文件夹">📁 工作区</button>
+        <button type="button" id="pickPermission" title="开工前先定好权限档">权限：默认</button>
         <button type="button" id="pickExec">选执行体</button>
         <button type="button" id="pickImage">图片</button>
         <button type="button" id="pickFile">文件</button>
+        <button type="button" id="copyForCatpaw" title="把任务复制到剪贴板，去 CatPawAI 里粘贴运行">复制给 CatPawAI</button>
+        <button type="button" id="pasteBack" title="把剪贴板里的 CatPawAI 结果贴回输入框">贴回结果</button>
         <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         <input type="file" id="fileInput" multiple hidden>
         <span class="spacer"></span>
@@ -353,6 +421,40 @@
   </section>
 </main>
 
+<div id="settingsModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <b>任务设置</b>
+      <button type="button" id="settingsClose" class="small">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>工作区</label>
+        <p class="hint">AI 只在这个文件夹里读写，越界一律拒绝。工作区在任务创建后不能改，新建任务时可以重选。</p>
+        <div class="path-row">
+          <input type="text" id="wsPath" spellcheck="false" placeholder="点下面的文件夹，或直接粘贴路径">
+          <button type="button" id="wsUp" class="small">上一级</button>
+        </div>
+        <div id="wsQuick" class="quick-row"></div>
+        <div id="wsDrives" class="quick-row"></div>
+        <div id="wsDirs" class="dir-list"></div>
+      </div>
+      <div class="field">
+        <label>权限</label>
+        <p class="hint">开工前选一档，运行中就不再反复打断。破坏性命令和越界路径在任何档位都会被拦住。</p>
+        <div id="permCards" class="perm-cards"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span id="settingsMsg" class="small muted"></span>
+      <span class="spacer"></span>
+      <button type="button" id="settingsCancel" class="small">取消</button>
+      <button type="button" id="settingsSave" class="primary small">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/ui/common.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -482,6 +584,11 @@ async function api(path, opts = {}) {
     },
   });
   if (!res.ok) {
+    // 手机从飞书卡片点进来、localStorage 还是空的时候，这是唯一活路：
+    // 弹令牌输入框，而不是每条请求都只 toast 一句 HTTP 401。
+    if (res.status === 401 && window.ZKUI) {
+      ZKUI.promptLogin("打开任务台需要管理令牌（与网关 .env 里的 ZKAI_ADMIN_TOKEN 相同）");
+    }
     let msg = `HTTP ${res.status}`;
     try {
       const body = await res.json();
@@ -497,6 +604,10 @@ const state = {
   session: null,       // session object
   messages: [],
   streamCtrl: null,    // AbortController for SSE
+  streamRetryTimer: null,   // SSE 断线重连定时器
+  streamAttempt: 0,         // 当前连续失败次数（成功建立后清零）
+  streamSessionId: null,    // 正在跟随的会话（重连时校验，防止追错会话）
+  approvalPollTimer: null,  // SSE 彻底失联后的低频轮询
   pendingApprovals: new Map(),  // approval_id -> seq of rendered card
   autoScroll: true,
   executors: [],       // 可派的外部执行体（@ 面板）
@@ -507,6 +618,11 @@ const state = {
   //: 待发送的图片（data URL 数组）。跟输入框文本一起在提交时清空。
   images: [],
   files: [],
+  //: 新任务用的工作区与权限档；已有会话以 session 里的值为准。
+  workspace: "",
+  permission: "default",
+  permDraft: "default",
+  wsBrowse: "",
 };
 
 function toast(msg) {
@@ -518,6 +634,25 @@ function toast(msg) {
 }
 
 // ---------------------------------------------------------------- render
+const PERMISSION_MODES = {
+  default: {
+    name: "默认权限",
+    desc: "工作区内写文件直接做；跑命令、越界和危险操作仍会问你",
+  },
+  ask: {
+    name: "每次都问",
+    desc: "写文件和跑命令都逐条批准，最稳但会打断",
+  },
+  full: {
+    name: "完全访问",
+    desc: "写文件和跑命令都不再逐条确认；黑名单和越界仍硬拦",
+  },
+};
+const PERMISSION_ORDER = ["default", "ask", "full"];
+function permissionName(mode) {
+  return (PERMISSION_MODES[mode] || PERMISSION_MODES.default).name;
+}
+
 const AGENT_STATUS_ZH = {
   pending: "排队中", running: "执行中", waiting_approval: "待批准",
   done: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
@@ -686,26 +821,46 @@ function addStepLine(text) {
   if (state.autoScroll) stream.scrollTop = stream.scrollHeight;
 }
 
+function syncSettingsButtons() {
+  const mode = state.current ? (state.session?.permission || "default") : state.permission;
+  $("pickPermission").textContent = `权限：${permissionName(mode)}`;
+  const locked = !!state.current;
+  $("pickWorkspace").disabled = locked;
+  $("pickWorkspace").title = locked
+    ? "工作区在任务创建后不能改；点「＋ 新任务」可以重选"
+    : "选择这个任务的工作区文件夹";
+}
+
 function setHeader() {
   const s = state.session;
   const active = s && (s.status === "running" || s.status === "waiting_approval");
   $("cancelBtn").hidden = !active;
   $("wsChip").textContent = s?.workspace ? s.workspace.split(/[\\/]/).pop() : "未开始";
+  $("wsChip").title = s?.workspace || "还没选工作区";
   $("sendBtn").disabled = !!active;
   $("sendBtn").textContent = active ? "执行中…" : (state.current ? "▶ 继续" : "▶ 运行");
+  syncSettingsButtons();
 }
 
 // ---------------------------------------------------------------- SSE
+/* 断线恢复（2026-11-08 手机远控 M1）：手机锁屏 / 切微信必断线，原来断了
+   只有一行「可点刷新重试」——断线期间进入 waiting_approval 的审批，人回来
+   也不知道。现在指数退避重连（1s 起步封顶 30s）；连不上 5 次转 15s 低频
+   轮询会话状态兜底，至少保证「在等审批 / 已结束」这两个关键状态能到达人。 */
 async function connectEvents(sessionId) {
+  clearTimeout(state.streamRetryTimer);
+  stopApprovalPolling();
   state.streamCtrl?.abort();
   const ctrl = new AbortController();
   state.streamCtrl = ctrl;
+  state.streamSessionId = sessionId;
   try {
     const res = await fetch(`/zkadmin/agent/sessions/${sessionId}/events`, {
       headers: { "X-Admin-Token": TOKEN, Accept: "text/event-stream" },
       signal: ctrl.signal,
     });
     if (!res.ok || !res.body) throw new Error(`事件流连接失败（HTTP ${res.status}）`);
+    state.streamAttempt = 0;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -722,9 +877,58 @@ async function connectEvents(sessionId) {
         }
       }
     }
+    // 流正常走完 = 会话已结束，不用重连
   } catch (err) {
     if (ctrl.signal.aborted) return;
-    addStepLine(`连接中断（${err.message}），可点「刷新」重试`);
+    scheduleStreamRetry(sessionId, err);
+  }
+}
+
+function scheduleStreamRetry(sessionId, err) {
+  if (state.streamSessionId !== sessionId) return;
+  const attempt = (state.streamAttempt || 0) + 1;
+  state.streamAttempt = attempt;
+  if (attempt > 5) {
+    addStepLine(`事件流连不上（${err.message}），转入低频轮询：会话结束或需要审批时这里会提示`);
+    startApprovalPolling(sessionId);
+    return;
+  }
+  const wait = Math.min(30000, 1000 * 2 ** (attempt - 1));
+  addStepLine(`连接中断（${err.message}），${Math.round(wait / 1000)} 秒后自动重连（第 ${attempt} 次）`);
+  state.streamRetryTimer = setTimeout(() => {
+    if (state.current === sessionId) connectEvents(sessionId);
+  }, wait);
+}
+
+/* SSE 彻底连不上时的兜底轮询：只盯关键状态，不重放过程。 */
+function startApprovalPolling(sessionId) {
+  stopApprovalPolling();
+  let announced = "";
+  state.approvalPollTimer = setInterval(async () => {
+    if (state.current !== sessionId) { stopApprovalPolling(); return; }
+    try {
+      const detail = await api(`/zkadmin/agent/sessions/${sessionId}`);
+      const status = detail.session?.status;
+      if (status !== announced) {
+        announced = status;
+        if (status === "waiting_approval") {
+          addStepLine("⏸ 会话在等你批准一个操作——请刷新页面查看审批卡");
+        } else if (status === "running") {
+          addStepLine("会话仍在执行中…");
+        } else {
+          addStepLine(status === "done" ? "会话已完成（轮询得知）" : `会话已结束（${status}）`);
+          stopApprovalPolling();
+          loadSessions();
+        }
+      }
+    } catch { /* 网络抖动下一轮再说 */ }
+  }, 15000);
+}
+
+function stopApprovalPolling() {
+  if (state.approvalPollTimer) {
+    clearInterval(state.approvalPollTimer);
+    state.approvalPollTimer = null;
   }
 }
 
@@ -784,6 +988,9 @@ function handleEvent(ev) {
         ev.status === "interrupted" ? "网关重启导致任务中断，接着发消息即可续跑" :
         (AGENT_STATUS_ZH[ev.status] || ev.status);
       addRow(`<div class="step-line">${esc(label)}</div>`);
+      // 会话已终：断线重连与兜底轮询都该收摊（原来轮询会一直空转）
+      clearTimeout(state.streamRetryTimer);
+      stopApprovalPolling();
       setHeader();
       loadSessions();
       return;
@@ -1005,6 +1212,131 @@ function updateExecBar() {
   }
 }
 
+// ---------------------------------------------------------------- 任务设置
+function renderPermCards() {
+  const box = $("permCards");
+  box.innerHTML = "";
+  for (const mode of PERMISSION_ORDER) {
+    const meta = PERMISSION_MODES[mode];
+    const card = document.createElement("div");
+    card.className = "perm-card" + (mode === state.permDraft ? " on" : "");
+    card.innerHTML = `<b>${esc(meta.name)}</b><span>${esc(meta.desc)}</span>`;
+    card.onclick = () => { state.permDraft = mode; renderPermCards(); };
+    box.appendChild(card);
+  }
+}
+
+function renderDirPicker(data) {
+  const dirs = $("wsDirs");
+  dirs.innerHTML = "";
+  if (!data.dirs.length) {
+    dirs.innerHTML = `<div class="dir-item">（这里没有子文件夹）</div>`;
+  }
+  for (const d of data.dirs) {
+    const row = document.createElement("div");
+    row.className = "dir-item";
+    row.textContent = "📁 " + d.name;
+    row.onclick = () => browseDir(d.path);
+    dirs.appendChild(row);
+  }
+  const quick = $("wsQuick");
+  quick.innerHTML = "";
+  for (const q of data.quick) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = q.name;
+    btn.onclick = () => browseDir(q.path);
+    quick.appendChild(btn);
+  }
+  const drives = $("wsDrives");
+  drives.innerHTML = "";
+  for (const d of data.drives) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = d;
+    btn.onclick = () => browseDir(d);
+    drives.appendChild(btn);
+  }
+}
+
+async function browseDir(path) {
+  const msg = $("settingsMsg");
+  msg.textContent = "正在读取目录…";
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const data = await api(`/zkadmin/agent/fs/list${query}`);
+    state.wsBrowse = data.current;
+    $("wsPath").value = data.current;
+    $("wsUp").disabled = !data.parent;
+    $("wsUp").dataset.parent = data.parent || "";
+    renderDirPicker(data);
+    msg.textContent = "";
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+}
+
+function openSettings() {
+  const locked = !!state.current;
+  state.permDraft = locked ? (state.session?.permission || "default") : state.permission;
+  $("settingsMsg").textContent = "";
+  $("wsPath").readOnly = locked;
+  $("wsPath").value = locked ? (state.session?.workspace || "") : state.workspace;
+  $("wsUp").disabled = true;
+  $("wsUp").dataset.parent = "";
+  $("wsQuick").innerHTML = "";
+  $("wsDrives").innerHTML = "";
+  $("wsDirs").innerHTML = "";
+  renderPermCards();
+  $("settingsModal").hidden = false;
+  if (locked) {
+    $("settingsMsg").textContent = "工作区已锁定；权限可以随时改。";
+  } else {
+    browseDir(state.workspace || "");
+  }
+}
+
+async function saveSettings() {
+  const msg = $("settingsMsg");
+  try {
+    if (state.current) {
+      const current = state.session?.permission || "default";
+      if (state.permDraft !== current) {
+        const data = await api(`/zkadmin/agent/sessions/${state.current}/permission`, {
+          method: "POST", body: JSON.stringify({ permission: state.permDraft }),
+        });
+        state.session = data.session;
+        toast(`权限已改成「${permissionName(state.permDraft)}」`);
+      }
+    } else {
+      state.workspace = state.wsBrowse || $("wsPath").value.trim();
+      state.permission = state.permDraft;
+      toast(`已设为「${permissionName(state.permission)}」`);
+    }
+    $("settingsModal").hidden = true;
+    setHeader();
+  } catch (err) { msg.textContent = err.message; }
+}
+
+$("pickWorkspace").onclick = openSettings;
+$("pickPermission").onclick = openSettings;
+$("settingsClose").onclick = () => { $("settingsModal").hidden = true; };
+$("settingsCancel").onclick = () => { $("settingsModal").hidden = true; };
+$("settingsSave").onclick = saveSettings;
+$("wsUp").onclick = () => {
+  const parent = $("wsUp").dataset.parent;
+  if (parent) browseDir(parent);
+};
+$("wsPath").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    browseDir($("wsPath").value.trim());
+  }
+});
+$("settingsModal").addEventListener("click", (e) => {
+  if (e.target === $("settingsModal")) $("settingsModal").hidden = true;
+});
+
 // ---------------------------------------------------------------- actions
 async function loadSessions() {
   try {
@@ -1099,6 +1431,8 @@ $("composer").onsubmit = async (e) => {
         body: JSON.stringify({
           task: text,
           model: $("modelSel").value || null,
+          workspace: state.workspace || null,
+          permission: state.permission,
           images: state.images,
           files: state.files,
         }),
@@ -1279,6 +1613,49 @@ $("fileInput").onchange = (e) => {
   e.target.value = "";
 };
 
+/* ================= CatPawAI 半自动旁路 =================
+   它的免费模型（GLM-5.3-FlashX）只在桌面版里，没有无头入口；CDP 也看不到
+   聊天输入框（2026-11-08 实测：主窗口 + webview 都没有 textarea）。
+   所以只做两个动作：复制任务 / 贴回结果，中间的运行交给用户。 */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  document.execCommand("copy");
+  area.remove();
+}
+
+$("copyForCatpaw").onclick = async () => {
+  const text = $("taskInput").value.trim();
+  if (!text) { toast("输入框是空的，先写任务"); return; }
+  try {
+    await copyText(text);
+    toast("任务已复制。去 CatPawAI 粘贴运行，跑完点「贴回结果」");
+  } catch (err) { toast("复制失败：" + err.message); }
+};
+
+$("pasteBack").onclick = async () => {
+  const input = $("taskInput");
+  try {
+    const text = (await navigator.clipboard.readText()).trim();
+    if (!text) { toast("剪贴板是空的"); return; }
+    const head = "以下是 CatPawAI 返回的结果，请基于它继续：";
+    input.value = (input.value.trim() ? input.value.trim() + "\n\n" : "") + head + "\n\n" + text;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    toast("已贴回输入框，确认后点运行");
+  } catch (err) {
+    toast("读不到剪贴板，请直接在输入框按 Ctrl+V");
+  }
+};
+
 
 function clipboardFiles(e) {
   const out = [];
@@ -1328,7 +1705,7 @@ $("newBtn").onclick = () => {
   state.messages = [];
   state.streamCtrl?.abort();
   $("stream").innerHTML = `<div id="empty"><h2>给 Agent 一个任务</h2>
-    <p>模型默认走 <code>zk-auto</code>；写文件和跑命令会先请你批准。</p></div>`;
+    <p>模型默认走 <code>zk-auto</code>；先在下面选好工作区和权限档，开工后就不再反复打断。</p></div>`;
   setHeader();
   $("taskInput").focus();
 };

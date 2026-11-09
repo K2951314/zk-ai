@@ -89,6 +89,37 @@ def _parse(item: Any, index: int, warnings: list[str]) -> ModelEntry | None:
     )
 
 
+def describe_channels(entries: list[ModelEntry], auto_via: set[str]) -> str:
+    """把模型画像压成给 Agent 看的一段渠道说明。
+
+    ``auto_via`` 是当前能自动派单的渠道（执行体花名册里的 tool 名）。
+    不在里面的（catpawai / workbuddy 这类桌面端）必须明确写「只能人工」，
+    否则模型只看到花名册，会以为「花名册里没有 = 这个模型不存在」——
+    2026-11-08 运营者就因此被回了一句「GLM-5.3-Flash-X 我这边没有」。
+    """
+    if not entries:
+        return ""
+    auto: list[str] = []
+    manual: list[str] = []
+    for entry in entries:
+        label = f"{entry.name}（{entry.id}）"
+        if entry.tier == "free":
+            label += "免费"
+        if entry.verified == "unverified":
+            label += "、未核实"
+        if entry.via and entry.via in auto_via:
+            auto.append(f"{label}：可经 {entry.via} 派单（以该工具的模型清单为准）")
+        else:
+            where = entry.via or "桌面端"
+            manual.append(f"{label}：只在 {where} 里可用，需要人工操作")
+    parts: list[str] = []
+    if auto:
+        parts.append("可自动派单：" + "；".join(auto))
+    if manual:
+        parts.append("只能人工用：" + "；".join(manual))
+    return "\n".join(f"- {part}" for part in parts)
+
+
 def load_catalog(config_dir: Path) -> tuple[list[ModelEntry], list[str]]:
     """读 ``model_catalog.yaml``；文件缺失返回空（属正常状态）。"""
     path: Path | None = None

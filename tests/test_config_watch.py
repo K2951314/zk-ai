@@ -511,6 +511,12 @@ async def test_reload_config_re_mirrors_the_database(tmp_path: Path) -> None:
         after = {row["id"] for row in await repo.list_models()}
         assert after == {"m2"}, "重载后 DB 镜像要换成新配置"
         assert container.router.aliases.names() == ["zk-two"]
+
+        # 进程级缓存也要跟着换：get_app_config() 以前只在启动时写一次，
+        # reload 之后调用会拿到陈旧 AppConfig（2026-11-09 洁癖审查）。
+        from app.core.config import get_app_config
+
+        assert get_app_config() is container.config
     finally:
         await container.shutdown()
 

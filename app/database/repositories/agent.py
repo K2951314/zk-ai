@@ -32,10 +32,17 @@ class AgentRepository:
         title: str,
         model: str,
         workspace: str,
+        permission: str = "default",
     ) -> None:
         async with self.db.session() as session:
             session.add(
-                AgentSession(id=session_id, title=title, model=model, workspace=workspace)
+                AgentSession(
+                    id=session_id,
+                    title=title,
+                    model=model,
+                    workspace=workspace,
+                    permission=permission,
+                )
             )
             await session.commit()
 
@@ -78,6 +85,16 @@ class AgentRepository:
             if title is not None:
                 row.title = title[:200]
             await session.commit()
+
+    async def update_permission(self, session_id: str, permission: str) -> bool:
+        """改一个会话的权限档；会话不存在返回 False。"""
+        async with self.db.session() as session:
+            row = await session.get(AgentSession, session_id)
+            if row is None:
+                return False
+            row.permission = permission
+            await session.commit()
+            return True
 
     async def delete_session(self, session_id: str) -> bool:
         async with self.db.session() as session:
@@ -155,6 +172,7 @@ class AgentRepository:
             "title": row.title,
             "model": row.model,
             "workspace": row.workspace,
+            "permission": row.permission or "default",
             "status": row.status,
             "steps": row.steps,
             "input_tokens": row.input_tokens,

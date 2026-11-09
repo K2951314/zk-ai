@@ -50,6 +50,9 @@ class NotifyConfig:
     #: feishu = 发卡片；json = 原样 POST 事件 JSON（接自建服务/其他 IM 用）
     format: str = "feishu"
     silent: list[tuple[dt.time, dt.time]] = field(default_factory=list)
+    #: 半夜要不要为「需要拍板」破静默（默认 false：等到早上，由补推机制在
+    #: 静默结束后补送——不会丢，只是晚）。设 true = 拍板卡片立即响铃。
+    wake_on_decision: bool = False
     #: 飞书是境内服务，默认直连不走系统代理（网关自己有代理，别串味）
     use_proxy: bool = False
     #: 卡片按钮跳转的控制台地址
@@ -72,6 +75,7 @@ def build_notify_config(ruleset: RuleSet, *, console_base: str = "") -> NotifyCo
         secret=_expand_env(str(raw.get("secret") or "")),
         format=str(raw.get("format") or "feishu").lower(),
         silent=parse_windows(raw.get("silent")),
+        wake_on_decision=bool(raw.get("wake_on_decision", False)),
         use_proxy=bool(raw.get("use_proxy", False)),
         console_base=str(console_base or raw.get("console_base") or "").rstrip("/"),
     )
@@ -88,7 +92,10 @@ def should_push(
     """要不要推、不推的原因。返回 ``(是否推送, 原因)``。
 
     顺序有意为之：静默时段在 ``tell`` 之前判 —— 半夜「必须你批」的
-    也要等到早上，除非规则自己写了 ``tell: always`` 且没配静默。
+    也要等到早上，除非配了 ``wake_on_decision``（拍板卡片立即响铃）。
+    无论哪种，被静默挡下的卡片都会留在库里（``notified=False``），
+    由 ``EventService._maybe_push_pending`` 在静默结束后补送——
+    **静默只延迟，不吞**（2026-11-08 审查 P1 的根修）。
     """
     if not config.enabled:
         return False, "未配置 webhook"
@@ -99,7 +106,11 @@ def should_push(
     windows = list(config.silent)
     if rule is not None:
         windows.extend(parse_windows(rule.silent))
-    if windows and in_silent_window(windows, now or dt.datetime.now()):
+    if (
+        windows
+        and in_silent_window(windows, now or dt.datetime.now())
+        and not (config.wake_on_decision and need_decision)
+    ):
         return False, "处于静默时段"
     return True, ""
 
@@ -111,6 +122,58 @@ def sign_feishu(timestamp: str, secret: str) -> str:
     key = f"{timestamp}\n{secret}".encode()
     digest = hmac.new(key, digestmod=hashlib.sha256).digest()
     return base64.b64encode(digest).decode("utf-8")
+
+
+def _receipt_of(event: dict[str, Any]) -> dict[str, Any]:
+    """事件 payload 里的回执段（complete() 落进去的 ask/notice/problems）。"""
+    payload = event.get("payload")
+    raw = payload.get("receipt") if isinstance(payload, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _render_receipt(lines: list[str], receipt: dict[str, Any]) -> None:
+    """把回执里「给人看」的部分画进卡片正文。
+
+    2026-11-08 审查 P1：Agent 按提示词把要拍板的问题写进 ``ask``，
+    但卡片只渲染 verdict 正文——人收得到「要拍板」，收不到「拍什么」。
+    ask 最多画 3 项（卡片不是详情页），其余在控制台看。
+    """
+    asks = [item for item in (receipt.get("ask") or []) if isinstance(item, dict)]
+    if asks:
+        lines.append("")
+        lines.append(f"**要你拍板（{len(asks)} 项）**")
+        for index, item in enumerate(asks[:3], start=1):
+            title = str(item.get("title") or "（无标题）")
+            lines.append(f"**{index}. {title}**")
+            text = str(item.get("text") or "").strip()
+            if text:
+                lines.append(text)
+            options = [str(o) for o in (item.get("options") or []) if str(o).strip()]
+            if options:
+                recommend = item.get("recommend")
+                rendered = []
+                for i, option in enumerate(options[:6]):
+                    mark = (
+                        "（✅ 推荐）"
+                        if isinstance(recommend, int) and 0 <= recommend < len(options) and i == recommend
+                        else ""
+                    )
+                    rendered.append(f"{i + 1}）{option}{mark}")
+                lines.append("　" + "  ".join(rendered))
+    notices = [item for item in (receipt.get("notice") or []) if isinstance(item, dict)]
+    if notices:
+        lines.append("")
+        lines.append("**注意（要你亲自做的事）**")
+        for item in notices[:3]:
+            title = str(item.get("title") or "").strip()
+            text = str(item.get("text") or "").strip()
+            lines.append(f"- {title or text}")
+            if title and text:
+                lines.append(f"  {text}")
+    problems = [str(p) for p in (receipt.get("problems") or []) if str(p).strip()]
+    if problems:
+        lines.append("")
+        lines.append("⚠ 回执问题：" + "；".join(problems[:3]))
 
 
 def build_card(event: dict[str, Any], *, console_base: str = "") -> dict[str, Any]:
@@ -134,6 +197,7 @@ def build_card(event: dict[str, Any], *, console_base: str = "") -> dict[str, An
         lines.append("")
         lines.append("**结论**")
         lines.append(verdict)
+    _render_receipt(lines, _receipt_of(event))
 
     elements: list[dict[str, Any]] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
@@ -150,12 +214,17 @@ def build_card(event: dict[str, Any], *, console_base: str = "") -> dict[str, An
             }
         )
     if console_base:
+        # 交活时带了 session_id 就深链进对应会话（agent.html 早就支持
+        # ?session=，以前通知侧从来不拼——点开是空的还得自己找）。
+        target = f"{console_base}/ui/agent"
+        if event.get("session_id"):
+            target += f"?session={event['session_id']}"
         actions.append(
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "去控制台处理"},
                 "type": "primary",
-                "url": f"{console_base}/ui/agent",
+                "url": target,
             }
         )
     if actions:

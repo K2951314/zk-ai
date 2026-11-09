@@ -5,6 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.deps import ContainerDep
+from app.core.logging import get_logger
+
+logger = get_logger("api.health")
 
 router = APIRouter(tags=["health"])
 
@@ -32,20 +35,18 @@ async def health(container: ContainerDep) -> dict:
         "version": container.settings.version,
         "environment": container.settings.environment,
         "uptime_seconds": round(container.uptime(), 2),
-        # 部署形态：客户端接入面板与消耗器页都按这一块分流（本机写入 vs 公网调用、
-        # 日志落在哪个盘上）。is_remote 是核心判据——控制台据此决定要不要把
-        # 127.0.0.1 的配置抄给用户。
+        # 部署形态：客户端接入面板与消耗器页都按这一块分流（本机写入 vs 公网调用）。
+        # is_remote 是核心判据——控制台据此决定要不要把 127.0.0.1 的配置抄给用户。
+        # 2026-11-08 审查：这里曾经带出 listen 与四个绝对路径（burner_log_path /
+        # burner_state_path / config_dir / data_dir）——/health 是控制台有意
+        # 不带令牌读的端点（Caddy 白名单），公网部署时等于把文件系统布局送出去。
+        # 需要路径真相的地方走 /zkadmin/chatgpt 的 deploy 段（在令牌之后）。
         "deploy": {
             "is_remote": container.settings.is_remote_deploy,
             "exposure": container.settings.exposure or (
                 "server" if container.settings.is_remote_deploy else "local"),
             "public_base_url": container.settings.public_base_url_effective,
             "client_base_url": container.settings.client_base_url,
-            "listen": f"{container.settings.host}:{container.settings.port}",
-            "burner_log_path": str(container.settings.burner_log_path),
-            "burner_state_path": str(container.settings.burner_state_path),
-            "config_dir": str(container.settings.resolved_config_dir),
-            "data_dir": str(container.settings.resolved_data_dir),
         },
         "database": {"ok": database_ok, "dialect": container.database.url.split(":")[0]},
         "providers": {
@@ -92,7 +93,11 @@ def _stale_config_files() -> list[str]:
         from app.core.config_writer import stale_config_files
 
         return stale_config_files()
-    except Exception:  # pragma: no cover - 体检失败不该让 /health 挂掉
+    except Exception:  # 体检失败不该让 /health 挂掉
+        # 但也不能一个字不留：这是「外部改过配置还没 reload」的体检器，
+        # 静默失明 = 控制台永远显示「没有陈旧文件」，运营者被假象安抚
+        # （2026-11-08 审查：同型事故在 /health 的 config 段发生过一次）。
+        logger.exception("stale_config_files 体检失败")
         return []
 
 

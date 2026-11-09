@@ -102,9 +102,12 @@ def agent_config(tmp_path: Path, *, max_steps: int = 40):
     return config
 
 
-async def start_session(harness, adapter, *, task: str = "做个任务") -> str:
+async def start_session(harness, adapter, *, task: str = "做个任务",
+                        permission: str = "ask") -> str:
+    # 老用例默认「每次都问」：它们断言的是「写文件必须批准」这条旧行为。
+    # 新档位的语义由 permission 专项用例覆盖。
     service = harness.container.agent_service
-    created = await service.start(task=task)
+    created = await service.start(task=task, permission=permission)
     return created["session"]["id"]
 
 
@@ -341,6 +344,197 @@ async def test_max_steps_break_loop(tmp_path):
     assert row["steps"] == 2
     messages = await service.repo.messages(sid)
     assert any(m["kind"] == "note" and "步数上限" in (m["content"] or "") for m in messages)
+    await harness.container.shutdown()
+
+
+async def test_max_steps_zero_means_unlimited(tmp_path):
+    """0 = 不限制：多轮工具调用不会被步数熔断停掉。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        tool_resp(("list_dir", {"path": "."})),
+        tool_resp(("list_dir", {"path": "."})),
+        tool_resp(("list_dir", {"path": "."})),
+        text_resp("三轮都跑完了"),
+    )
+    harness = await build_harness(agent_config(tmp_path, max_steps=0),
+                                  adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter)
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done"
+    # 3 轮工具调用 + 1 轮收尾回答，说明 0 不会在半路把循环掐掉。
+    assert row["steps"] == 4
+    messages = await service.repo.messages(sid)
+    assert not any(m["kind"] == "note" and "步数上限" in (m["content"] or "")
+                   for m in messages)
+    await harness.container.shutdown()
+
+
+async def test_system_prompt_lists_desktop_only_models(tmp_path):
+    """模型画像里「只能人工」的渠道要进系统提示词。
+
+    否则模型只看得到执行体花名册，会回「GLM-5.3-Flash-X 我这边没有」——
+    2026-11-08 运营者实际踩到。
+    """
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "model_catalog.yaml").write_text(
+        "models:\n"
+        "  - id: glm-5.3-flashx\n"
+        "    name: GLM 5.3 FlashX\n"
+        "    via: catpawai\n"
+        "    tier: free\n"
+        "    verified: config\n",
+        encoding="utf-8",
+    )
+    config.settings.config_dir = cfg_dir
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("好的"),
+    )
+    harness = await build_harness(config, adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter)
+    await wait_for_status(service, sid, {"done", "failed"})
+
+    system = adapter.requests[0].messages[0]
+    assert system.role == "system"
+    text = system.text()
+    assert "本机模型渠道" in text
+    assert "GLM 5.3 FlashX" in text
+    assert "只能人工用" in text
+    await harness.container.shutdown()
+
+
+async def test_default_permission_writes_without_asking(tmp_path):
+    """默认档：工作区内写文件直接执行，不弹审批卡。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        tool_resp(("write_file", {"path": "a.txt", "content": "1"})),
+        text_resp("写好了"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter, permission="default")
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done"
+    assert row["permission"] == "default"
+    assert (tmp_path / "ws" / "a.txt").read_text(encoding="utf-8") == "1"
+    messages = await service.repo.messages(sid)
+    assert not any(m["kind"] == "approval" for m in messages)
+    await harness.container.shutdown()
+
+
+async def test_full_permission_runs_command_without_asking(tmp_path):
+    """完全访问：命令也不再逐条批准。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        tool_resp(("run_command", {"command": "echo zkai"})),
+        text_resp("跑完了"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter, permission="full")
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done"
+    assert row["permission"] == "full"
+    messages = await service.repo.messages(sid)
+    tool_rows = [m for m in messages if m["kind"] == "tool_result"]
+    assert tool_rows and "zkai" in (tool_rows[0]["content"] or "")
+    await harness.container.shutdown()
+
+
+async def test_full_permission_still_blocks_destructive_command(tmp_path):
+    """完全访问也绕不过硬黑名单（免审批路径不经过 prepare，必须再拦一次）。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        tool_resp(("run_command", {"command": "rm -rf /"})),
+        text_resp("被拦住了"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter, permission="full")
+
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done"
+    messages = await service.repo.messages(sid)
+    tool_rows = [m for m in messages if m["kind"] == "tool_result"]
+    assert tool_rows and "黑名单" in (tool_rows[0]["content"] or "")
+    await harness.container.shutdown()
+
+
+async def test_permission_is_persisted_and_restored_on_followup(tmp_path):
+    """档位落库，续跑时按原档恢复。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("第一轮"),
+        text_resp("第二轮"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter, permission="full")
+    await wait_for_status(service, sid, {"done", "failed"})
+
+    detail = await service.followup(sid, "接着来")
+    assert detail is not None
+    assert detail["session"]["permission"] == "full"
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["permission"] == "full"
+    await harness.container.shutdown()
+
+
+async def test_set_permission_updates_db_and_live_run(tmp_path):
+    """运行中改档立即生效（下一次工具调用起）。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        tool_resp(("write_file", {"path": "a.txt", "content": "1"})),
+        text_resp("好"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    service = harness.container.agent_service
+    sid = await start_session(harness, adapter, permission="ask")
+    await wait_for_status(service, sid, {"waiting_approval"})
+
+    row = await service.set_permission(sid, "full")
+    assert row is not None and row["permission"] == "full"
+    assert service._running[sid].permission == "full"
+
+    await service.cancel(sid)
+    await harness.container.shutdown()
+
+
+async def test_api_fs_list_and_permission_switch(tmp_path):
+    """目录浏览接口与权限档接口。"""
+    adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
+        text_resp("ok"),
+    )
+    harness = await build_harness(agent_config(tmp_path), adapters={"fake": adapter})
+    app = create_app(harness.container.settings)
+    app.state.container = harness.container
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/zkadmin/agent/fs/list", params={"path": str(tmp_path)})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["current"] == str(tmp_path.resolve())
+        assert isinstance(body["dirs"], list)
+
+        r = await client.get("/zkadmin/agent/fs/list",
+                             params={"path": str(tmp_path / "nope")})
+        assert r.status_code == 400
+
+        r = await client.post("/zkadmin/agent/sessions",
+                              json={"task": "x", "permission": "full"})
+        assert r.status_code == 201
+        sid = r.json()["session"]["id"]
+        assert r.json()["session"]["permission"] == "full"
+        await wait_for_status(harness.container.agent_service, sid, {"done", "failed"})
+
+        r = await client.post(f"/zkadmin/agent/sessions/{sid}/permission",
+                              json={"permission": "ask"})
+        assert r.status_code == 200
+        assert r.json()["session"]["permission"] == "ask"
+
+        r = await client.post(f"/zkadmin/agent/sessions/{sid}/permission",
+                              json={"permission": "乱写"})
+        assert r.status_code == 400
     await harness.container.shutdown()
 
 

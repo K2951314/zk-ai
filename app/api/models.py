@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.deps import ContainerDep
+from app.api.deps import ContainerDep, require_client_auth
 
-router = APIRouter(tags=["models"])
+# 2026-11-08 审查 P2：聊天面（/v1/chat/completions 等）都挂了
+# require_client_auth，唯独模型清单匿名可读——设了 ZKAI_API_TOKEN 后，
+# 别名表、部署 targets、上下文窗口仍可被任意探测。OpenAI 官方 API 的
+# /v1/models 同样在 Bearer 之后。
+router = APIRouter(tags=["models"], dependencies=[Depends(require_client_auth)])
 
 
 @router.get("/v1/models", summary="列出模型与别名")
