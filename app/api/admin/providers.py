@@ -111,8 +111,8 @@ async def verify_provider_models(
     市场原来只看目录，于是运营者会把死模型加进来，直到第一次真请求才暴露——
     而那时它已经在别名的故障转移链里，或者被设成了接口模型。
 
-    探测用 ``max_tokens=1`` 的最小请求，且给一个**短超时**（默认 20s）：
-    "挂死"本身就是结论，没必要陪它等 60 秒。串行执行（并发探测会被供应商
+    探测用 ``_VERIFY_MAX_TOKENS`` token 的最小真实请求，且给一个**短超时**
+    （默认 20s）："挂死"本身就是结论，没必要陪它等 60 秒。串行执行（并发探测会被供应商
     当成滥用，也分不清限流是谁引起的）。
     """
     provider = container.config.providers.get(provider_id)
@@ -121,17 +121,23 @@ async def verify_provider_models(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"message": f"供应商 '{provider_id}' 不存在"}},
         )
-    credential = next(iter(container.pool.for_provider(provider_id)), None)
+    credential, missing_ref = _probe_credential(container, provider_id)
     if credential is None and provider.requires_credential:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": {
-                    "message": f"供应商 '{provider_id}' 还没有可用的 Key，无法验证",
-                    "type": "no_credential",
-                }
-            },
-        )
+        if missing_ref is not None:
+            # 全军覆没（配了 Key 但 .env 里都是空值）：保持旧行为，拿第一把
+            # 照旧探。「值是空的」这件事由目录探测的 note 负责提示，验证这条
+            # 路不额外发明一种失败模式。
+            credential = next(iter(container.pool.for_provider(provider_id)), None)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "message": f"供应商 '{provider_id}' 还没有可用的 Key，无法验证",
+                        "type": "no_credential",
+                    }
+                },
+            )
     adapter = container.router.adapter(provider_id)
     timeout = max(3.0, float(payload.timeout_seconds or 20.0))
 
@@ -170,7 +176,7 @@ async def _verify_one_model(
     request = ChatCompletionRequest(
         model=model.id,
         messages=[ChatMessage(role="user", content="hi")],
-        max_tokens=1,
+        max_tokens=_VERIFY_MAX_TOKENS,
     )
     ctx = ProviderContext(
         request_id=f"probe_{upstream}",
@@ -226,6 +232,36 @@ def _probe_verdict(info: Any) -> str:
     return "error"
 
 
+def _probe_credential(container: Any, provider_id: str) -> tuple[Any, str | None]:
+    """给市场探测/验证挑一把真能用的 Key；顺带回报「全军覆没时缺的是谁」。
+
+    第一把 Key 的 env 变量没值，不代表整池都缺（sensenova-01 就是留空的网关
+    独享位，_02~_09 都有值）——探测只需要任意一把**有值**的 Key。
+
+    返回 ``(credential, missing_ref)``。credential 为 None 时看 missing_ref：
+    None = 一把 Key 都没配；非 None = 配了但都没值，缺的是这个变量名。
+    目录探测靠 missing_ref 组织 note；验证只在「一把都没配」时拒绝，
+    「配了但都没值」保持旧行为（拿第一把照旧探）。
+    """
+    credentials = container.pool.for_provider(provider_id)
+    credential = next(iter(credentials), None)
+    if credential is None or credential.secret_source != "missing":  # noqa: S105 - source label
+        return credential, None
+    usable = next(
+        (c for c in credentials if c.secret_source != "missing"),  # noqa: S105 - source label
+        None,
+    )
+    if usable is not None:
+        return usable, None
+    return None, credential.secret_ref
+
+
+#: 探测请求给多少输出预算。
+#: ⚠ **不能用 max_tokens=1**（2026-11-11 执行体探测实测踩过，同源常量见
+#: app/services/agent/cli/models.py 的 _PROBE_MAX_TOKENS）：推理模型会把 token
+#: 全花在 reasoning_content 上，1 token 的请求把它们**全部误判成不可用**
+#: （实测误杀 16/39，比不探测还糟）。200 够一次思考加一个词，成本仍可忽略。
+_VERIFY_MAX_TOKENS = 200
 #: 手填 ID 的上限，故意对齐 ``VerifyModelsRequest.limit`` 的默认值：
 #: 手填的模型一定会逐个实测，超过后端一次能探的数量就会有几个永远停在「未验证」。
 _MANUAL_ID_CAP = 12
@@ -338,33 +374,22 @@ async def provider_models(
             "data": [],
             "note": "该供应商已在配置里禁用（enabled: false）——启用后才能探测模型",
         }
-    credential = next(iter(container.pool.for_provider(provider_id)), None)
+    credential, missing_ref = _probe_credential(container, provider_id)
     if credential is None and provider.requires_credential:
+        note = (
+            "该供应商还没有任何 Key——先去「凭据池 → ➕ 加 Key」"
+            if missing_ref is None
+            else (
+                f"该供应商的 Key 没有实际值（{missing_ref} 在 .env 里是空的）"
+                "——去「凭据池 → ➕ 加 Key」把值填上"
+            )
+        )
         return {
             "object": "list",
             "provider_id": provider_id,
             "data": [],
-            "note": "该供应商还没有任何 Key——先去「凭据池 → ➕ 加 Key」",
+            "note": note,
         }
-    if credential is not None and credential.secret_source == "missing":  # noqa: S105 - source label
-        # 第一把 Key 缺值不代表整池都缺（例如 sensenova-01 是留空的网关独享位，
-        # 而 _02~_09 都有值）——目录探测只需要任意一把有效 Key。
-        usable = next(
-            (c for c in container.pool.for_provider(provider_id)
-             if c.secret_source != "missing"),  # noqa: S105 - source label
-            None,
-        )
-        if usable is None:
-            return {
-                "object": "list",
-                "provider_id": provider_id,
-                "data": [],
-                "note": (
-                    f"该供应商的 Key 没有实际值（{credential.secret_ref} 在 .env 里是空的）"
-                    "——去「凭据池 → ➕ 加 Key」把值填上"
-                ),
-            }
-        credential = usable
     manual_ids = _manual_model_ids(manual_models)
     adapter = container.router.adapter(provider_id)
     catalogue: dict[str, dict[str, Any]] = {}
@@ -800,6 +825,10 @@ async def add_credential(
 
     cred = CredentialConfig(
         id=payload.id,
+        # 盖上 provider_id：ProviderConfig 的 validator 只在构造时跑，往既有
+        # provider 上追加凭据不会重跑，不传就是 None（删除 404 / reconcile 误清
+        # 的根因，见 pool.register_provider 的盖章处）。
+        provider_id=provider_id,
         env_var=payload.env_var,
         value=credential["value"],
         enabled=payload.enabled,

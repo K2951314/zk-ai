@@ -134,6 +134,7 @@ class FakeAdapter(ProviderAdapter):
         self, request: ChatCompletionRequest, ctx: ProviderContext
     ) -> ChatCompletionResponse:
         behavior = self._record(ctx, stream=False)
+        self.calls[-1]["max_tokens"] = request.max_tokens
         # Real adapters always build a payload first; do the same so that
         # unmappable parameters are recorded here too.
         self.build_payload(request, ctx.deployment)
@@ -154,6 +155,7 @@ class FakeAdapter(ProviderAdapter):
         self, request: ChatCompletionRequest, ctx: ProviderContext
     ) -> AsyncIterator[ChatCompletionChunk]:
         behavior = self._record(ctx, stream=True)
+        self.calls[-1]["max_tokens"] = request.max_tokens
         self.build_payload(request, ctx.deployment)
         self.streams_opened += 1
         completed = False

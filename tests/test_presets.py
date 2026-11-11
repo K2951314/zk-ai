@@ -90,6 +90,81 @@ def test_qwen38_flash_next_keeps_its_org_prefix_mapping() -> None:
     assert preset.display_name == "Qwen3.8 Flash Next"
 
 
+# --------------------------------------------------------------------------- #
+# 华为云 MaaS（provider id: HW，西南-贵阳一）
+# 2026-11-11 运营者实测：市场上的 deepseek-v4.1-flash-1017 显示 256K / 无思考
+# 档位——因为预设表的 family 键是商汤的公告 id（deepseek-flash），华为目录用的
+# 是另一套 id，最长后缀匹配不上，整行掉进 guess_from_name 的保守 256K。
+# 官方口径（Model List + 计费说明 + Anthropic 兼容接口文档 + 下线公告）录入后，
+# 这几个测试钉住三件事：HW 目录 id 全部命中、规格不被猜、别的供应商不被带偏。
+# --------------------------------------------------------------------------- #
+def test_huawei_v41_flash_1017_has_real_specs() -> None:
+    """运营者开在华为上的主力模型：1M 上下文 + none/low/high/max（默认 high）。"""
+    preset = preset_for("deepseek-v4.1-flash-1017", "HW")
+    assert preset.provider == "HW"
+    assert preset.context_window == 1_048_576, "V4.1 Flash 1017 是 1M，不是 256K"
+    assert preset.reasoning_efforts == ("none", "low", "high", "max")
+    assert preset.reasoning_effort_default == "high"
+    assert preset.spec_source == "official"
+    assert preset.max_output_tokens_max == 393_216  # 384K
+
+
+def test_huawei_catalogue_ids_all_resolve_to_official_presets() -> None:
+    """HW 目录里的每个 id 都必须命中 HW 专属预设，且不是 256K 的猜测值。"""
+    expected = {
+        "deepseek-v4.1-flash-1017": 1_048_576,
+        "deepseek-v4.1-flash": 1_048_576,
+        "deepseek-v4-flash": 1_048_576,
+        "glm-5.3": 1_048_576,
+        "glm-5.2": 1_048_576,
+        "glm-5.1": 202_752,               # 198K
+        "glm.5.2-arkts-spark": 202_752,   # 198K
+        "openpangu-2.0-pro": 524_288,     # 512K
+        "openpangu-2.0-flash": 524_288,
+    }
+    for model_id, ctx in expected.items():
+        preset = preset_for(model_id, "HW")
+        assert preset.provider == "HW", f"{model_id} 没命中 HW 预设（会掉进 256K 猜测）"
+        assert preset.spec_source == "official", f"{model_id} 的规格不是官方口径"
+        assert preset.context_window == ctx, f"{model_id} 上下文应为 {ctx}"
+
+
+def test_huawei_arkts_spark_id_carries_a_dot() -> None:
+    """华为目录里 ArkTS-SPARK 的 id 带点（glm.5.2-arkts-spark）——不是笔误。
+
+    官方文档写连字符，但实测连字符 404「Invalid model」、带点 403「未开通」，
+    所以预设的 family 必须按目录的带点 id 建，否则市场永远匹配不上。
+    """
+    dotted = match_preset("glm.5.2-arkts-spark", "HW")
+    assert dotted is not None and dotted.provider == "HW"
+    assert dotted.context_window == 202_752, "arkts 自己的规格是 198K"
+    # 连字符版（官方文档的写法）不该命中 arkts 条目：它上游 404，只会经最长
+    # 前缀落到 glm-5.2 家族（1M），然后被「验证可调用」的 not_found 拦下。
+    dashed = match_preset("glm-5.2-arkts-spark", "HW")
+    assert dashed is None or dashed.context_window != 202_752
+
+
+def test_huawei_retiring_models_are_labelled() -> None:
+    """华为 2026-11 下线潮：glm-5.1（11-16）与 V4.1-Flash 非 1017 版（11-30）
+    都要在市场显示里标出来，别让运营者把下线模型加进链路。"""
+    for model_id in ("glm-5.1", "deepseek-v4.1-flash", "deepseek-v4-flash",
+                     "openpangu-2.0-pro", "openpangu-2.0-flash"):
+        preset = preset_for(model_id, "HW")
+        assert "下线" in preset.display_name, f"{model_id} 没标下线"
+
+
+def test_huawei_entries_do_not_hijack_other_providers() -> None:
+    """按供应商拆的契约：加 HW 条目不能改变别的供应商的命中结果。"""
+    sensenova = preset_for("deepseek-v4-flash", "sensenova")
+    assert sensenova.provider is None, "商汤的通用条目还在"
+    nvidia = preset_for("glm-5.3", "nvidia")
+    assert nvidia.provider == "nvidia", "NVIDIA 的 glm-5.3 条目还在"
+    # modelscope / AMD 的同名模型顺带拿到 1M（模型级事实），不再是 256K 猜测
+    modelscope = preset_for("deepseek-ai/DeepSeek-V4.1-Flash-1017", "modelscope")
+    assert modelscope.context_window == 1_048_576
+    assert modelscope.spec_source == "official"
+
+
 def test_sensenova_68_flash_carries_the_official_1m_window() -> None:
     """商汤目录报 262144，官方文档写 1M —— 预设必须按官方写，并留证据。
 

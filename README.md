@@ -689,7 +689,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 59 个测试模块，1343 个用例，全部 Mock
+├── tests/                # conftest + 59 个测试模块，1352 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -697,13 +697,21 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 117 个文件约 32,718 行，`tests/` 59 个测试模块 1343 个用例（约 23,555 行），
+规模：`app/` 117 个文件约 33,035 行，`tests/` 59 个测试模块 1352 个用例（约 23,750 行），
 `scripts/` 22 个文件约 6,511 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-11：新增三个测试模块（CLI 模型清单「只有实测算数」、
 额度 429 等重置点、独立脚本必须打 `/zkadmin`），统一前端设计 token 源，
 把执行体模型实测结论落盘持久化，并补 13 条守卫（快照 5 条 + 上下文窗口 /
 瞬时失败 4 条 + 限流 1 条 + 刷新路径 3 条），用例 1313 → 1343。
+同日晚间续一：修控制台「加 Key」链路四个缺陷（凭据不盖 provider_id 导致删除
+404 / reconcile 误清、YAML 同 id 凭据改成替换而非追加、verify 探测补兄弟 Key
+回退、探测预算 1 → 200 token 防推理模型误杀），补 4 条回归（均经变异验证），
+用例 1343 → 1347。
+同日晚间续二：华为云 MaaS（provider HW）接入——按官方 Model List / 计费说明 /
+Anthropic 兼容接口文档 / 下线公告补全 9 个目录 id 的预设（V4.1-Flash-1017 是
+1M + none/low/high/max，不再是 256K 猜测；arkts-spark 的 id 带点；下线模型
+带标），补 5 条回归，用例 1347 → 1352。
 上一轮 2026-11-10 删 `/ui/report` 跳转壳与其路由，`_UI_PAGES` 自动少一页、
 三个 parametrize 各少一例（1314 → 1311），新增守卫又补回 2 例 → 1313。
 再上一次是 2026-11-08 晚（手机远控 M1，新增 `tests/test_ui_pages.py`），
@@ -1402,7 +1410,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1343 个用例，全部通过，零网络、零真实配额。**
+**1352 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

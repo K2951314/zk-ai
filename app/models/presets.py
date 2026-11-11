@@ -540,6 +540,273 @@ _PRESETS: tuple[ModelPreset, ...] = (
             "Mamba-Transformer 混合 MoE，120B 总参 / 12B 激活",
         ),
     ),
+    # --- 华为云 MaaS（ModelArts Studio，区域固定西南-贵阳一）---------------- #
+    # 规格来源（2026-11-11 核对，全部官方口径）：
+    #   长度/能力   → 官方 Model List（model_list_0001，更新于 2026-10-28）+
+    #                各模型产品页（贵州备案号 = 贵阳一）
+    #   价格        → 官方计费说明 price-maas-0002（¥/百万 tokens，忙 08:00-20:59 /
+    #                闲 21:00-07:59 两档；下表按 ¥7.1/$ 折算成美元，闲时约半价）
+    #   effort 词表 → 官方《Anthropic兼容接口》model-call-022
+    #   下线时间    → 官方下线公告 bulletin-maas-0002（西南-贵阳一）
+    # 实测（2026-11-11，已开通账号）：deepseek-v4.1-flash-1017 的
+    #   reasoning_effort none/low/high/max 全 200；medium 被上游按官方映射
+    #   （low/medium → high）收下；非法值 400 ModelArts.81001。
+    # ⚠ 目录里 ArkTS-SPARK 的 id 带**点**（glm.5.2-arkts-spark）：官方文档写连字符，
+    #   但实测连字符 404「Invalid model」、带点 403「未开通」——以目录 id 为准。
+    # ⚠ 华为云 2026-11 下线潮（贵阳一）：kimi-k2.6 已于 11-08 下线（目录里本来就没有）；
+    #   glm-5.1 于 11-16 下线；deepseek-v4.1-flash（非 1017）/ deepseek-v4-flash /
+    #   openPangu 全系于 11-30 下线。**别把下线模型加进链路**，要加就加 1017 版。
+    ModelPreset(
+        family="deepseek-v4.1-flash-1017",
+        display_name="DeepSeek V4.1 Flash 1017",
+        # 官方 Model List：上下文 1M / 最大输入 1M / 最大输出 384K / 最大思维链 96K
+        context_window=1_048_576,
+        capabilities={
+            "coding": 9.0, "reasoning": 9.0, "tool_use": 9.0, "vision": 9.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 9.0, "cost": 10.0,
+        },
+        # ¥2/¥8（时段1，缓存命中 ¥0.2）÷7.1；闲时 ¥1/¥4
+        input_price=0.28, output_price=1.13,
+        description="华为云 MaaS 的 V4.1 Flash 1017 版，多模态 + 前缀续写",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=393_216,
+        spec_source="official",
+        # 官方 effort 词表 none/low/high/max，默认 high（四档实测全 200）
+        reasoning_efforts=("none", "low", "high", "max"),
+        reasoning_effort_default="high",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 1M、最大输出 384K、最大思维链 96K；支持图片理解（公网 URL / Base64，≤600 张）",
+            "reasoning_effort 实测 none/low/high/max 全 200；medium 上游按官方映射收为 high；非法值 400",
+            "价格（时段1）：输入 ¥2、输出 ¥8、缓存命中输入 ¥0.2 每百万 tokens；闲时（21:00-07:59）¥1/¥4",
+            "默认限流 TPM 200 万 / RPM 100；支持前缀续写 + 前缀缓存",
+        ),
+    ),
+    ModelPreset(
+        family="deepseek-v4.1-flash",
+        display_name="DeepSeek V4.1 Flash（2026-11-30 下线 → 1017 版）",
+        # 官方 Model List：同为 1M / 384K；该版 reasoning_effort **没有 none**
+        context_window=1_048_576,
+        capabilities={
+            "coding": 9.0, "reasoning": 9.0, "tool_use": 9.0, "vision": 9.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 9.0, "cost": 10.0,
+        },
+        input_price=0.28, output_price=1.13,
+        description="华为云 MaaS V4.1 Flash 旧版（20260910），11-30 下线",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=393_216,
+        spec_source="official",
+        # 官方文档该版只有 low/high/max——没有 none，思考关不掉（与 1017 版的差别）
+        reasoning_efforts=("low", "high", "max"),
+        reasoning_effort_default="high",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 1M、最大输出 384K、最大思维链 96K；支持图片理解",
+            "reasoning_effort 只有 low/high/max（无 none，关不掉思考）；默认 high",
+            "价格同 1017 版（时段1 输入 ¥2/输出 ¥8，闲时 ¥1/¥4）；默认限流 TPM 100 万 / RPM 100",
+            "⚠ 2026-11-30 00:00 下线（ bulletin-maas-0002），继任 deepseek-v4.1-flash-1017",
+        ),
+    ),
+    ModelPreset(
+        family="deepseek-v4-flash",
+        display_name="DeepSeek V4 Flash（2026-11-30 下线 → 1017 版）",
+        # 官方 Model List：上下文 1M / 最大输出 384K / 最大思维链 96K
+        context_window=1_048_576,
+        capabilities={
+            "coding": 8.5, "reasoning": 8.5, "tool_use": 9.0, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 9.0, "speed": 9.5, "cost": 9.5,
+        },
+        # ¥2/¥4（时段1）÷7.1；闲时 ¥1.4/¥2.8
+        input_price=0.28, output_price=0.56,
+        description="华为云 MaaS V4 Flash（上一代），11-30 下线",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=393_216,
+        spec_source="official",
+        # DeepSeek-V4 系列官方词表只有 high/max，默认 high
+        reasoning_efforts=("high", "max"),
+        reasoning_effort_default="high",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 1M、最大输出 384K；官方 Model List 未列图片理解",
+            "（计费说明却写它「支持图像理解」——两份官方口径冲突，以更新的 Model List 为准）",
+            "reasoning_effort 只有 high/max（DeepSeek-V4 系列口径），默认 high",
+            "价格（时段1）：输入 ¥2、输出 ¥4 每百万 tokens；闲时 ¥1.4/¥2.8",
+            "默认限流 TPM 60 万 / RPM 15（比 1017 版紧得多）；⚠ 2026-11-30 下线，继任 1017 版",
+        ),
+    ),
+    ModelPreset(
+        family="glm-5.3",
+        display_name="GLM-5.3",
+        # 官方 Model List：1M / 最大输入 1M / 最大输出 128K / 最大思维链 128K
+        context_window=1_048_576,
+        capabilities={
+            "coding": 9.5, "reasoning": 9.0, "tool_use": 8.5, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 8.5, "speed": 6.5, "cost": 9.5,
+        },
+        # ¥8/¥28（缓存命中 ¥2）÷7.1
+        input_price=1.13, output_price=3.94,
+        description="智谱旗舰（743B MoE）· 华为云口径，思考不可关",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        # 官方 effort 词表 low/high/max，默认 max；官方明写「思考不可关闭」——没有 none
+        reasoning_efforts=("low", "high", "max"),
+        reasoning_effort_default="max",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 1M、最大输出 128K、最大思维链 128K",
+            "reasoning_effort 只有 low/high/max，默认 max；**深度思考不可关闭**（官方原话）",
+            "价格（无忙闲时）：输入 ¥8、输出 ¥28、缓存命中输入 ¥2 每百万 tokens",
+            "默认限流 TPM 200 万 / RPM 100；支持前缀缓存",
+        ),
+    ),
+    ModelPreset(
+        family="glm-5.2",
+        display_name="GLM-5.2",
+        # 官方 Model List：1M / 最大输入 1M / 最大输出 128K / 最大思维链 64K
+        context_window=1_048_576,
+        capabilities={
+            "coding": 9.5, "reasoning": 9.0, "tool_use": 8.5, "vision": 0.0,
+            "long_context": 10.0, "structured_output": 8.5, "speed": 7.0, "cost": 9.0,
+        },
+        # ¥8/¥28（时段1）÷7.1；时段2 ¥5.6/¥19.6
+        input_price=1.13, output_price=3.94,
+        description="智谱上一代旗舰（长程 Coding）· 华为云口径",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        # 与商汤同族词表一致：七档，默认 max
+        reasoning_efforts=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        reasoning_effort_default="max",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 1M、最大输出 128K、最大思维链 64K",
+            "reasoning_effort 七档，默认 max；上游把 xhigh 映射为 max、low/medium 映射为 high",
+            "价格（时段1）：输入 ¥8、输出 ¥28 每百万 tokens；时段2 ¥5.6/¥19.6",
+            "默认限流 TPM 100 万 / RPM 100",
+        ),
+    ),
+    ModelPreset(
+        family="glm-5.1",
+        display_name="GLM-5.1（2026-11-16 下线 → GLM-5.3）",
+        # 官方 Model List：198K / 最大输入 192K / 最大输出 128K / 最大思维链 96K
+        context_window=202_752,
+        capabilities={
+            "coding": 9.0, "reasoning": 8.5, "tool_use": 8.5, "vision": 0.0,
+            "long_context": 8.0, "structured_output": 8.0, "speed": 7.5, "cost": 8.5,
+        },
+        # ¥6/¥24（<32K，时段1）÷7.1
+        input_price=0.85, output_price=3.38,
+        description="GLM-5.1（198K），华为云 11-16 下线",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        # 官方 effort 文档未列 GLM-5.1（只列了 GLM-5.2/5.3/ArkTS-SPARK）——不猜，留空
+        reasoning_efforts=(),
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 198K、最大输入 192K、最大输出 128K、最大思维链 96K",
+            "reasoning_effort 词表官方没写（Model List 只说「思考可配置」）——需要时在表单手填",
+            "价格按时段 + 长度分档（每百万 tokens）：<32K 时段1 ¥6/¥24、时段2 ¥4.2/¥16.8；",
+            "≥32K 时段1 ¥8/¥28、时段2 ¥5.6/¥19.6",
+            "⚠ 2026-11-16 00:00 下线（ bulletin-maas-0002），继任 GLM-5.3",
+        ),
+    ),
+    ModelPreset(
+        # ⚠ family 带点不是笔误：华为目录里这个 id 就是 glm.5.2-arkts-spark，
+        # 官方文档写的连字符版实测 404「Invalid model」。
+        family="glm.5.2-arkts-spark",
+        display_name="GLM-5.2 ArkTS Spark",
+        # 官方产品页：198K / 最大输入 192K / 最大输出 128K / 最大思维链 128K
+        context_window=202_752,
+        capabilities={
+            "coding": 9.5, "reasoning": 8.5, "tool_use": 8.5, "vision": 0.0,
+            "long_context": 8.0, "structured_output": 8.0, "speed": 7.5, "cost": 8.5,
+        },
+        # ¥9.6/¥33.6（缓存命中 ¥2.4）÷7.1
+        input_price=1.35, output_price=4.73,
+        description="GLM-5.2 鸿蒙 ArkTS 专项增训（198K）",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        # 官方 effort 文档把 ArkTS-SPARK 与 GLM-5.2 并列：七档，默认 max
+        reasoning_efforts=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        reasoning_effort_default="max",
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 198K、最大输入 192K、最大输出 128K、最大思维链 128K",
+            "reasoning_effort 七档，默认 max；上游把 xhigh 映射为 max、low/medium 映射为 high",
+            "价格（无忙闲时）：输入 ¥9.6、输出 ¥33.6、缓存命中输入 ¥2.4 每百万 tokens",
+            "默认限流 TPM 100 万 / RPM 100；⚠ 调用 id 必须带点（glm.5.2-arkts-spark）",
+        ),
+    ),
+    ModelPreset(
+        family="openpangu-2.0-pro",
+        display_name="openPangu 2.0 Pro（2026-11-30 下线 → GLM-5.3）",
+        # 官方产品页：512K / 最大输入 500K / 最大输出 128K / 最大思维链 64K
+        context_window=524_288,
+        capabilities={
+            "coding": 7.5, "reasoning": 8.0, "tool_use": 8.0, "vision": 0.0,
+            "long_context": 9.0, "structured_output": 8.0, "speed": 6.5, "cost": 8.5,
+        },
+        # ¥3.2/¥14.5（<32K）÷7.1；≥32K ¥4.8/¥17.6
+        input_price=0.45, output_price=2.04,
+        description="华为自研盘古（505B MoE / 18B 激活），512K 上下文",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        # 官方 effort 文档未列 openPangu（Model List 只说「深度思考可配置」）——不猜
+        reasoning_efforts=(),
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 512K、最大输入 500K、最大输出 128K、最大思维链 64K",
+            "reasoning_effort 词表官方没写（思考模式可关闭，但档位未公布）——需要时在表单手填",
+            "价格按长度分档：<32K 输入 ¥3.2/输出 ¥14.5，≥32K ¥4.8/¥17.6（每百万 tokens，无忙闲时）",
+            "默认限流 TPM 100 万 / RPM 100；⚠ 2026-11-30 下线，官方建议换 GLM-5.3",
+        ),
+    ),
+    ModelPreset(
+        family="openpangu-2.0-flash",
+        display_name="openPangu 2.0 Flash（2026-11-30 下线 → 1017 版）",
+        # 官方产品页：512K / 最大输入 500K / 最大输出 128K / 最大思维链 64K
+        context_window=524_288,
+        capabilities={
+            "coding": 7.0, "reasoning": 7.5, "tool_use": 8.0, "vision": 0.0,
+            "long_context": 9.0, "structured_output": 8.0, "speed": 8.5, "cost": 9.5,
+        },
+        # ¥0.8/¥1.6 ÷7.1
+        input_price=0.11, output_price=0.23,
+        description="盘古速度杯（92B MoE / 6B 激活），512K 上下文",
+        providers=("HW",),
+        provider="HW",
+        max_output_tokens_max=131_072,
+        spec_source="official",
+        reasoning_efforts=(),
+        supports_tools=True,
+        supports_structured_output=True,
+        spec_notes=(
+            "上下文 512K、最大输入 500K、最大输出 128K、最大思维链 64K",
+            "reasoning_effort 词表官方没写（思考模式可关闭）——需要时在表单手填",
+            "价格（无忙闲时）：输入 ¥0.8、输出 ¥1.6 每百万 tokens（全家桶最便宜）",
+            "默认限流 TPM 100 万 / RPM 100；⚠ 2026-11-30 下线，官方建议换 DeepSeek-V4.1-Flash-1017",
+        ),
+    ),
 )
 
 #: Exact match first, then longest-suffix match on the family name.

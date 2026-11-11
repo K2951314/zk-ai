@@ -215,7 +215,10 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   | NVIDIA | `moonshotai/kimi-k3` | ✅ | 404 `Function id ... Not Found` |
   | 魔搭 | `qwen38-flash-next` | ✅ | 400 `Invalid model id` |
   新增 `POST /admin/providers/{id}/models/verify`：对每个模型发一次
-  `max_tokens=1` 的真实请求，短超时（默认 20s，「挂死」本身就是结论），
+  200 token 的真实请求（`_VERIFY_MAX_TOKENS`；2026-11-11 从 `max_tokens=1`
+  提上来——推理模型把 token 全花在思考上，1 token 会把它们全部误杀，
+  与执行体探测 `_PROBE_MAX_TOKENS` 同一个坑），短超时（默认 20s，
+  「挂死」本身就是结论），
   返回 `ok / hang / not_found / no_entitlement / rate_limited / error`。
   控制台「🧺 模型市场 → 🔬 验证可调用」按结论标注并禁用「＋ 添加」。
   **一次扫描查出 9 个部署里 5 个是死的。**

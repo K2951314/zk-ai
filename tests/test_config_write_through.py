@@ -296,6 +296,69 @@ async def test_write_env_requires_value_and_name(write_api, monkeypatch, tmp_pat
     assert not (tmp_path / "unused.env").exists()
 
 
+async def test_console_added_credential_is_deletable(write_api, tmp_path, monkeypatch) -> None:
+    """控制台加的 Key 必须带 provider_id——2026-11-11 服务器实测三连踩：
+
+    快照里 provider_id 为空 → 删除按钮拼出 /providers//credentials/<id> → 404；
+    reconcile 还会把这条凭据当「已离开配置的残留」清出池子；限流记账也记到
+    None 头上。根因是 ProviderConfig 的 stamp validator 只在构造时跑，往既有
+    provider 上追加凭据不会重跑。
+    """
+    client, _harness, config_dir = write_api
+    env_path = tmp_path / "env-under-test"
+    env_path.write_text("ZKAI_PORT=8317\n", encoding="utf-8")
+    monkeypatch.setattr("app.api.admin._common._env_file", lambda: env_path)
+
+    res = await client.post(
+        "/zkadmin/providers/fake/credentials",
+        headers=ADMIN,
+        json={
+            "id": "fake-09",
+            "env_var": "FAKE_API_KEY_09",
+            "value": "sk-" + "b" * 40,
+            "write_env": True,
+        },
+    )
+    assert res.status_code == 200, res.text
+    rows = (await client.get("/zkadmin/credentials", headers=ADMIN)).json()["data"]
+    row = next(r for r in rows if r["id"] == "fake-09")
+    assert row["provider_id"] == "fake"
+
+    disabled = await client.post("/zkadmin/credentials/fake-09/disable", headers=ADMIN)
+    assert disabled.status_code == 200
+    deleted = await client.delete(
+        "/zkadmin/providers/fake/credentials/fake-09", headers=ADMIN
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert "fake-09" not in (config_dir / "providers.yaml").read_text("utf-8")
+    assert "FAKE_API_KEY_09" not in env_path.read_text("utf-8")
+
+
+async def test_add_credential_replaces_same_id_in_yaml(write_api, tmp_path, monkeypatch) -> None:
+    """同 id 重复加 Key：运行时是替换语义，YAML 也必须替换。
+
+    盲目 append 会累积出两条同 id 凭据——2026-11-11 服务器 providers.yaml
+    实测两条 hw-01（一条废 Key 已禁用、一条好 Key 启用），重启后靠「后注册
+    覆盖前注册」才碰巧用上好的那条。
+    """
+    client, _harness, config_dir = write_api
+    env_path = tmp_path / "env-under-test"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr("app.api.admin._common._env_file", lambda: env_path)
+
+    for var in ("FAKE_KEY_A", "FAKE_KEY_B"):
+        res = await client.post(
+            "/zkadmin/providers/fake/credentials",
+            headers=ADMIN,
+            json={"id": "fake-09", "env_var": var, "value": "sk-" + "b" * 40, "write_env": True},
+        )
+        assert res.status_code == 200, res.text
+    text = (config_dir / "providers.yaml").read_text("utf-8")
+    assert text.count("id: fake-09") == 1
+    assert "FAKE_KEY_B" in text
+    assert "FAKE_KEY_A" not in text
+
+
 async def test_provider_models_notes_when_key_missing(write_api, tmp_path, monkeypatch) -> None:
     """Probing a provider with no usable key must explain itself, not 500.
 

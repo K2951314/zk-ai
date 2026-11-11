@@ -2003,6 +2003,61 @@ async def test_verify_accepts_an_id_absent_from_the_catalogue(api) -> None:
     assert got["ok"] is True
 
 
+async def test_verify_probe_prefers_the_key_that_has_a_value(monkeypatch) -> None:
+    """verify 与目录探测同一套选 Key 规则：第一把 Key 的 env 变量是空的，就用
+    有值的兄弟 Key——而不是拿空 Key 去探，把「没配值」报成「套餐无权限」。
+
+    2026-11-11 排查华为 HW 供应商时发现 verify 端点没有这层回退（目录探测有）。
+    """
+    from types import SimpleNamespace
+
+    from app.api.admin._common import VerifyModelsRequest
+    from app.api.admin.providers import verify_provider_models
+    from app.credentials.pool import CredentialPool
+    from app.models.provider import CredentialConfig, ProviderConfig, ProviderType
+
+    monkeypatch.delenv("ZKAI_TEST_EMPTY_VAR", raising=False)
+    monkeypatch.setenv("ZKAI_TEST_GOOD_VAR", "sk-real")
+    provider = ProviderConfig(
+        id="fake",
+        type=ProviderType.OPENAI,
+        base_url="http://fake.test/v1",
+        credentials=[
+            CredentialConfig(id="key-empty", env_var="ZKAI_TEST_EMPTY_VAR", priority=100),
+            CredentialConfig(id="key-good", env_var="ZKAI_TEST_GOOD_VAR", priority=90),
+        ],
+    )
+    pool = CredentialPool(allow_inline_secrets=True)
+    pool.register_provider(provider)
+    adapter = FakeAdapter(provider)
+    container = SimpleNamespace(
+        config=SimpleNamespace(providers={"fake": provider}),
+        pool=pool,
+        router=SimpleNamespace(adapter=lambda _pid: adapter),
+    )
+    result = await verify_provider_models(
+        "fake", container, VerifyModelsRequest(models=["fake-model"], timeout_seconds=5)
+    )
+    assert result["usable"] == 1
+    assert adapter.calls[-1]["credential_id"] == "key-good"
+
+
+async def test_verify_probe_gives_a_real_token_budget(api) -> None:
+    """探测不能用 max_tokens=1：推理模型把 token 全花在 reasoning_content 上，
+    1 token 的请求会把它们全部误判成不可用（2026-11-11 执行体探测实测误杀
+    16/39，见 app/services/agent/cli/models.py 的 _PROBE_MAX_TOKENS）。"""
+    client, harness = api
+    harness.adapter.queue(Behavior(text="hi", prompt_tokens=3, completion_tokens=1))
+    r = await client.post(
+        "/zkadmin/providers/fake/models/verify",
+        json={"models": ["fake-model"], "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["results"][0]["ok"] is True
+    assert harness.adapter.calls[-1]["max_tokens"] == 200
+
+
 async def test_cached_tokens_survive_the_whole_chain(fake_adapter) -> None:
     """上游报的缓存数要一路活到 DB——否则成本高估近一个数量级。
 

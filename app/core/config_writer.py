@@ -400,7 +400,22 @@ def append_credential_to_provider(
         entry["credentials"] = credentials
     # Build a plain dict first, then wrap it; ruamel needs CommentedMap for list items.
     plain = _plain({k: v for k, v in credential.items() if v is not None})
-    credentials.append(plain)
+    # 同 id 就地替换，不盲目 append：运行时（add_credential）就是替换语义，
+    # 文件里 append 会累积出两条同 id 凭据——2026-11-11 服务器 providers.yaml
+    # 实测两条 hw-01（一条废 Key 已禁用、一条好 Key 启用），重启后靠「后注册
+    # 覆盖前注册」才碰巧用上好的那条，纯属侥幸。
+    same_id = next(
+        (
+            i
+            for i, cred in enumerate(credentials)
+            if isinstance(cred, CommentedMap) and cred.get("id") == credential.get("id")
+        ),
+        None,
+    )
+    if same_id is None:
+        credentials.append(plain)
+    else:
+        credentials[same_id] = plain
     atomic_write(path, doc)
 
 

@@ -115,6 +115,14 @@ class CredentialPool:
             self._by_provider.setdefault(provider.id, [])
             for config in provider.credentials:
                 runtime = self._build_runtime(config)
+                # provider_id 必须在这里盖章：CredentialConfig 默认 None，只有
+                # ProviderConfig 构造时的 validator 会补——控制台「加 Key」那条路
+                # 是往既有 provider 上追加凭据，validator 不会重跑。缺了这个章：
+                # ① 快照 provider_id 为空，控制台删除按钮拼出
+                #    /providers//credentials/<id>，必然 404（2026-11-11 服务器实测）；
+                # ② reconcile 把 None 当「已离开配置的残留」直接清出池子；
+                # ③ 限流记账记到 None 头上。
+                runtime.provider_id = provider.id
                 self._credentials[runtime.id] = runtime
                 if runtime.id not in self._by_provider[provider.id]:
                     self._by_provider[provider.id].append(runtime.id)
