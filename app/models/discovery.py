@@ -32,11 +32,19 @@ _CONTEXT_KEYS = (
     "max_context_length",
     "input_token_limit",
     "max_tokens",            # some gateways misuse this for the input limit
+    "x_max_input_tokens",    # wb-proxy / WorkBuddy 积分代理的扩展字段
+    "maxInputTokens",       # WorkBuddy 桌面端 product-config 缓存（真实值）
 )
 #: "Does it accept images / vision input".
-_VISION_KEYS = ("enable_vision_input", "supports_vision", "vision", "accepts_images")
+_VISION_KEYS = (
+    "enable_vision_input", "supports_vision", "vision", "accepts_images",
+    "supportsImages", "x_supports_images",
+)
 #: "Does it emit a reasoning / thinking pass".
-_REASON_KEYS = ("enable_reason", "supports_reasoning", "reasoning", "can_reason")
+_REASON_KEYS = (
+    "enable_reason", "supports_reasoning", "reasoning", "can_reason",
+    "supportsReasoning",
+)
 #: "Which reasoning-effort levels can be asked for".
 _EFFORT_KEYS = ("reasoning_effort_support_list", "supported_reasoning_efforts",
                 "reasoning_efforts")

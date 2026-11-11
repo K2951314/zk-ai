@@ -1927,9 +1927,15 @@ async function openMarketModal(presetPid) {
       }
       // 目录失败但手填还在时，note 必须露出来——否则运营者只看到手填那一行，
       // 会以为这个供应商只有这一个模型。
-      const noteHtml = r.note
+      const noteHtml = (r.note
         ? `<div class="pill amber" style="display:block;margin-bottom:8px">${esc(r.note)}</div>`
-        : "";
+        : "")
+        + (r.snapshot_stale
+          ? '<div class="pill amber" style="display:block;margin-bottom:8px">模型候选集已变化，带「实测可用」的是上次验证结果——到执行体页点「刷新实测」重验新模型</div>'
+          : "")
+        + (r.transient && Object.keys(r.transient).length
+          ? `<div class="pill amber" style="display:block;margin-bottom:8px">当前限流 / 暂时没调通（仍按实测可用列出）：${esc(Object.keys(r.transient).join('、'))}。这是配额或链路状态，不是模型没权限。</div>`
+          : "");
       const VERDICT = {
         ok: ["healthy", "可调用"],
         hang: ["danger", "挂死"],
@@ -1944,13 +1950,15 @@ async function openMarketModal(presetPid) {
         const [tone, label] = v ? (VERDICT[v.verdict] || ["amber", v.verdict]) : ["gray", "未验证"];
         const cell = v
           ? `<span class="pill ${tone}" title="${esc(v.message || "")}">${v.ok ? "✅" : "⛔"} ${esc(label)}</span>`
-          : `<span class="pill gray" title="点上方「验证可调用」">未验证</span>`;
+          : (x.probed
+            ? '<span class="pill healthy" title="已真发请求验证过可用，无需再验证">✅ 实测可用</span>'
+            : '<span class="pill gray" title="点上方「验证可调用」">未验证</span>');
         return `
         <tr class="${x.already_added ? "muted" : ""}">
           <td class="acts">${x.already_added
             ? '<span class="pill gray">已收录</span>'
             : `<button class="mini primary" data-add-model="${idx}" ${v && !v.ok ? 'disabled title="实测不可调用，别加"' : ""}>＋ 添加</button>`}</td>
-          <td class="name"><b>${esc(x.suggested_model_id)}</b>${x.manual ? '<span class="chip" title="接口目录里没有，是手填后实测的">手填</span>' : ""}<span class="sub">${esc(x.upstream_model)}</span></td>
+          <td class="name"><b>${esc(x.suggested_model_id)}</b>${x.probed ? '<span class="chip" title="本项目已真发请求验证可用；上游目录里可能没列它">实测可用</span>' : (x.manual ? '<span class="chip" title="接口目录里没有，是手填后实测的">手填</span>' : "")}<span class="sub">${esc(x.upstream_model)}</span></td>
           <td class="small">${cell}</td>
           <td class="small">${fmtK(x.preset.context_window)}
             ${x.context_window_conflict
@@ -2047,7 +2055,7 @@ async function openMarketModal(presetPid) {
               (x.suggested_model_id + " " + x.upstream_model + " " + (x.preset.description || ""))
                 .toLowerCase().includes(q.toLowerCase()))
           : items;
-        $("#mk-count").textContent = `${filtered.length} / ${items.length} 个 · ${items.filter(x => x.already_added).length} 已收录`;
+        $("#mk-count").textContent = `${filtered.length} / ${items.length} 个 · ${items.filter(x => x.probed).length} 实测可用 · ${items.filter(x => x.already_added).length} 已收录（表格可滚动）`;
         renderList(q);
       };
       $("#mk-q").oninput = updateCount;
@@ -2062,7 +2070,7 @@ async function openMarketModal(presetPid) {
       } else {
         $("#mk-verify").title =
           `目录有 ${items.length} 个模型，超过自动验证上限 ${AUTO_VERIFY_MAX} 个`
-          + `——用搜索框缩小范围后点「验证可调用」`;
+          + `——带「实测可用」标签的已经真发请求验过，其余用搜索框缩小范围后点「验证可调用」`;
       }
     } catch (err) { $("#mk-list").innerHTML = `<span class="pill red">${esc(err.message)}</span>`; }
     finally { loading = false; }

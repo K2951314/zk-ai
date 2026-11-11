@@ -24,9 +24,11 @@
 
 ## 现在的优先级
 
-1. **活端点实测**（``probe_models()``）——对本机 wb-proxy 的实际可调模型
-   逐个发 ``max_tokens=1``，只有 200 才算数。这是唯一可信来源。
-2. **桌面缓存**——提供元数据（兑换率 / 工具 / 图片 / 上下文），
+1. **活端点实测**（``probe_models()``）——对本机 wb-proxy 的候选模型逐个发
+   一次真对话请求，只有 200 且**产出内容**才算数（``max_tokens=200``，
+   给推理模型留思考预算）。这是唯一可信来源。结论**落盘**到
+   ``data/model-probe.json``（gitignore），跨网关重启存活。
+2. **桌面缓存**——提供候选 id 与元数据（兑换率 / 工具 / 图片 / 上下文），
    但**只用来给实测通过的模型补充属性**，不能反过来当成清单。
 3. **CLI 自己的口径**——``qoder --list-models`` / ``codebuddy --help``。
    ⚠ 保留它是因为运营者明确要求两条腿：CLI 登录的是另一个账号，额度叠加。
@@ -39,7 +41,8 @@
 是**后端根本没部署这类能力**（图片/视频模型走的是另一个接口，不是 chat）。
 所以「缓存在列」连「目录里有」都不如——它是整个产品线的模型表。
 
-缓存 5 分钟：实测要发 N 个 HTTP 请求（并发 6，约 3~5 秒），不能每次刷新都付。
+实测结果进程缓存 10 分钟、落盘快照 24 小时；候选集指纹变化时标 ``stale``，
+由界面提示运营者点「刷新实测」，不偷偷再发几十个请求。
 """
 
 from __future__ import annotations
@@ -73,6 +76,121 @@ _RATE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)")
 #: WorkBuddy 是 to C 端的封装，CodeBuddy 是同一套内核的另一个品牌。
 _DESKTOP_CACHE_HOMES = ("~/.workbuddy/cache", "~/.codebuddy/cache")
 _DESKTOP_CACHE_GLOB = "acc-product-config-v3-*.json"
+
+
+# --------------------------------------------------------------------------- #
+# 落盘实测快照（跨进程 / 重启）
+# --------------------------------------------------------------------------- #
+#: 只有「真发过请求」的结论才配跨重启存活，清单本身永远现场重算。
+#: ``data/`` 已在 .gitignore，属运行时数据，不进仓库。
+_SNAPSHOT_FILE = Path(__file__).resolve().parents[4] / "data" / "model-probe.json"
+#: 超过一天就不再冒充「当前可用」——界面应提示刷新。
+_SNAPSHOT_TTL = 24 * 3600.0
+
+
+def _snapshot_path() -> Path:
+    """测试可用 ``ZKAI_MODEL_PROBE_SNAPSHOT`` 指到临时目录，绝不碰真实快照。"""
+    override = os.environ.get("ZKAI_MODEL_PROBE_SNAPSHOT", "")
+    return Path(override) if override else _SNAPSHOT_FILE
+
+
+def _read_snapshot() -> dict[str, Any] | None:
+    """读落盘结论；坏文件 / 过期 / 版本不符一律当没有，不抛给调用方。"""
+    try:
+        raw = json.loads(_snapshot_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("version") != 1:
+        return None
+    results = raw.get("results")
+    captured = raw.get("captured_at")
+    if not isinstance(results, dict) or not results or not isinstance(captured, (int, float)):
+        return None
+    if time.time() - float(captured) > _SNAPSHOT_TTL:
+        return None
+    return raw
+
+
+def candidate_ids() -> list[str]:
+    """最新候选集 = 桌面端缓存里的模型 id（去重、排除自建本地模型）。
+
+    ⚠ **不拿 wb-proxy ``/v1/models`` 当候选增量源**：2026-11-11 实测它只列
+    14 个且全是桌面缓存的子集，反而漏了 ``hy4free`` / ``glm-5.3-flash`` 这些
+    真能调的新模型（目录 ≠ 权限，见模块 docstring）。桌面缓存由客户端运行时
+    自动刷新，是本机最新的候选来源；真能不能调仍由 :func:`probe_models` 判。
+    """
+    return [m["id"] for m in read_desktop_catalog()[0]]
+
+
+def candidate_fingerprint(ids: list[str] | None = None) -> str:
+    """候选集指纹：只用来判断「目录变了、该重新实测」，**不当权限用**。"""
+    import hashlib
+
+    basis = ids if ids is not None else candidate_ids()
+    return hashlib.sha256("\n".join(sorted(basis)).encode("utf-8")).hexdigest()[:16]
+
+
+def _write_snapshot(results: dict[str, tuple[bool, str]]) -> None:
+    """合并式写盘：只覆盖本次真测过的 id，保留其它历史结论。
+
+    原子替换；写失败静默——快照是加速项，不能因为它挂掉让探测本身失败。
+    """
+    prev = (_read_snapshot() or {}).get("results") or {}
+    merged: dict[str, dict[str, Any]] = {
+        mid: {"ok": bool(v.get("ok")), "error": str(v.get("error") or "")}
+        for mid, v in prev.items() if isinstance(v, dict)
+    }
+    for mid, (ok, err) in results.items():
+        if (
+            not ok
+            and _is_transient(err)
+            and isinstance(prev.get(mid), dict)
+            and prev[mid].get("ok")
+        ):
+            # 本次只是限流 / 链路抖动：保留「真发请求验证过」的结论，
+            # 同时把本次状态留下来，界面才能如实说「当前限流」。
+            merged[mid] = {"ok": True, "error": f"暂态：{err}"[:300]}
+            continue
+        merged[mid] = {"ok": bool(ok), "error": str(err or "")}
+    payload = {
+        "version": 1,
+        "captured_at": time.time(),
+        "candidate_fingerprint": candidate_fingerprint(),
+        "results": merged,
+    }
+    path = _snapshot_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return
+
+
+def verified_snapshot() -> dict[str, Any]:
+    """跨重启可用的实测结论：``{ids, captured_at, stale, results, transient}``。
+
+    ``stale=True`` 表示候选集指纹变了（上线新模型 / 桌面缓存刷新）：清单仍是
+    上次真测过的，界面该提示刷新，而不是偷偷再发几十个真实请求。
+    ``transient`` 是「已验证可用、但本次探测被限流/超时」的模型 → 界面要
+    如实标出「当前限流」，不能假装一切正常，也不能把模型从清单里删掉。
+    """
+    raw = _read_snapshot()
+    if not raw:
+        return {"ids": [], "captured_at": 0.0, "stale": True,
+                "results": {}, "transient": {}}
+    results = {
+        mid: (bool(v.get("ok")), str(v.get("error") or ""))
+        for mid, v in raw["results"].items() if isinstance(v, dict)
+    }
+    return {
+        "ids": [mid for mid, (ok, _) in results.items() if ok],
+        "captured_at": float(raw["captured_at"]),
+        "stale": raw.get("candidate_fingerprint") != candidate_fingerprint(),
+        "results": results,
+        "transient": {mid: err for mid, (ok, err) in results.items() if ok and err},
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -263,6 +381,31 @@ _PROBE_TIMEOUT = 20.0
 _PROBE_TTL = 600.0
 #: ``{model_id: (可用, 错误摘要)}`` 及其抓取时间
 _PROBE_CACHE: tuple[float, dict[str, tuple[bool, str]]] | None = None
+#: 一次「没测成」不等于「模型不能用」：超时 / 5xx 是链路抖动。
+#: 2026-11-11 实测 ``kimi-k2.8-preview`` 一次 ReadTimeout 就把清单从 36 打到 35，
+#: 运营者因此看到「模型又不对了」。这类失败不能覆盖已验证结论。
+_TRANSIENT_MARKERS = (
+    "Timeout", "ConnectError", "NetworkError", "RemoteProtocolError",
+    "ServerDisconnected", "ReadError", "WriteError",
+)
+
+
+def _is_transient(error: str) -> bool:
+    """区分「本次没测成」与「上游明确说不能用」。
+
+    **429（限流 / 免费额度用尽）、5xx、超时、连接类异常**都算瞬时：
+    它们只说明这次没调成，不说明模型没权限。2026-11-11 实测 hy4free 回
+    ``429 使用量已超出频率限制…明日重置``，被旧逻辑当成否决、直接掉出清单。
+    其它 4xx（11102 无权限、11103 无后端）、``finish_reason=error``、无产出
+    才是**明确结论**，必须如实记录。
+    """
+    if error.startswith("HTTP "):
+        parts = error.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            code = int(parts[1])
+            return code == 429 or code >= 500
+        return False
+    return any(marker in error for marker in _TRANSIENT_MARKERS)
 
 
 def _wb_proxy_url() -> str:
@@ -398,6 +541,13 @@ async def probe_models(candidates: list[str], *, force: bool = False) -> dict[st
         return {}
     if results:
         _PROBE_CACHE = (time.time(), results)
+        # 落盘：实测结论要能跨网关重启存活，否则每次冷启动都退回配置快照。
+        _write_snapshot(results)
+        # 落盘时可能保留了「上次已验证、本次只是超时」的结论，
+        # 让进程内缓存与磁盘一致，避免同一个 TTL 窗口里清单又抖回去。
+        snap = verified_snapshot()
+        if snap["results"]:
+            _PROBE_CACHE = (time.time(), dict(snap["results"]))
     return results
 
 
@@ -534,7 +684,10 @@ def cached_models(tool: str, command: str) -> list[str]:
     if cached and time.time() - cached[0] < _TTL:
         return list(cached[1])
     if tool in {"codebuddy", "workbuddy"}:
-        ids = [d["id"] for d in available_model_details(tool, command) if d.get("probed")]
+        # 进程内实测缓存优先；冷了读落盘快照——网关重启后不该又退回
+        # cli_tools.yaml 里那份 9 个模型的手工快照（运营者看到的就是那个）。
+        hot = [d["id"] for d in available_model_details(tool, command) if d.get("probed")]
+        ids = hot or list(verified_snapshot()["ids"])
     else:
         ids = []
     if ids:
@@ -543,23 +696,39 @@ def cached_models(tool: str, command: str) -> list[str]:
 
 
 def cached_model_details(tool: str, command: str) -> list[dict]:
-    """取模型详情（含兑换率），**只读实测缓存，冷时退回桌面元数据**。
+    """取模型详情（含兑换率）：**优先实测结论，冷时读落盘快照**。
 
     三级：
-    1. 实测缓存命中 → 只返回 ``probed=True`` 的那些（真验证过，最可信）
-    2. 实测缓存冷 → 返回桌面缓存的条目，全部标 ``probed=False``，
-       兑换率照给（它是本地 JSON 读的，不是猜的），但**能不能调未知**
-    3. 桌面缓存也没有 → 空
+    1. 进程内实测缓存命中 → 只返回 ``probed=True`` 的（真验证过，最可信）
+    2. 进程缓存冷、**落盘快照还在有效期** → 用快照里已验证的 id，
+       桌面缓存补元数据，同样标 ``probed=True``（跨重启不退化）
+    3. 快照也没有 → 返回桌面缓存条目，全部标 ``probed=False``，
+       兑换率照给（本地 JSON 读的，不是猜的），但**能不能调未知**
 
-    ⚠ 第 2 级是 ``/model-inventory`` 首屏秒开的关键：该接口是高频的只读页，
-    不能为了"确认真能调"去发 65 次 HTTP 请求（那要 5 秒）。但它也**不该**
-    因为缓存冷就什么都不显示——桌面文件里明明有兑换率。
-    所以如实区分：``probed=False`` 的条目，前端要说「未实测」，
-    等运营者点「刷新实测」或任务台拉到清单，再升级成 ``probed=True``。
+    ⚠ 第 3 级是 ``/model-inventory`` 首屏秒开的关键：高频只读页不能为了
+    "确认真能调"发几十次 HTTP。但也**不该**因为缓存冷就什么都不显示——
+    如实区分：``probed=False`` 的条目，前端要说「未实测」，
+    等运营者点「刷新实测」再升级成 ``probed=True``。
     """
     if tool not in {"codebuddy", "workbuddy"}:
         return []
     probed = [d for d in available_model_details(tool, command) if d.get("probed")]
+    if not probed:
+        # 进程缓存冷 → 读落盘实测结论，再用桌面缓存补兑换率/工具/上下文。
+        # 这一步是「刷新实测」能跨网关重启生效的关键。
+        snap = verified_snapshot()
+        if snap["ids"]:
+            meta = {m["id"]: m for m in read_desktop_catalog()[0]}
+            for model_id in snap["ids"]:
+                base = dict(meta.get(model_id) or {
+                    "id": model_id, "name": model_id, "rate": None,
+                    "tools": None, "images": None, "reasoning": None,
+                    "max_input_tokens": 0, "description": "", "is_default": False,
+                    "vendor": "",
+                })
+                base["probed"] = True
+                base["probe_error"] = ""
+                probed.append(base)
     if probed:
         return probed
     catalog, _ = read_desktop_catalog()

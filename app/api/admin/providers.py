@@ -272,6 +272,39 @@ def _manual_model_ids(raw: str | None) -> list[str]:
     return list(ordered)
 
 
+def merge_probed_models(
+    catalogue: dict[str, dict[str, Any]],
+    probed_ids: set[str],
+    desktop_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """把「实测可用但上游目录没列」的模型补进目录，不改动原对象。
+
+    2026-11-11 实测：wb-proxy ``/v1/models`` 只列 14 个旧 id，
+    ``hy4free`` / ``glm-5.3-flash`` 等真能调的新模型一个都没有。
+    目录是目录，不是权限——补进来的行走和目录行完全相同的预设/价格流水线。
+
+    ⚠ **必须带桌面缓存元数据**（``desktop_meta``）：只补 ``{"id": mid}`` 会让
+    ``model_facts()`` 读不到上下文窗口，整行回落到预设表的 256000——
+    而 ``hy4free`` 真实是 960000、``glm-5.3-flash`` 是 1000000。
+    2026-11-11 运营者就是靠「hy4 明明 1M 左右，市场却显示 200k」发现的。
+    """
+    merged = dict(catalogue)
+    meta = desktop_meta or {}
+    for mid in probed_ids:
+        if mid in merged:
+            continue
+        raw = meta.get(mid) or {}
+        entry: dict[str, Any] = {"id": mid}
+        if raw.get("max_input_tokens"):
+            entry["maxInputTokens"] = int(raw["max_input_tokens"])
+        if raw.get("images") is not None:
+            entry["supportsImages"] = bool(raw["images"])
+        if raw.get("reasoning") is not None:
+            entry["supportsReasoning"] = bool(raw["reasoning"])
+        merged[mid] = entry
+    return merged
+
+
 @router.get("/providers/{provider_id}/models", summary="列出供应商的上游模型")
 async def provider_models(
     provider_id: str,
@@ -362,6 +395,24 @@ async def provider_models(
     # 目录不等于「这个供应商所有能调的模型」：网页上新上的模型常常还没进
     # /v1/models。手填的 ID 补进同一条流水线，照样拿预设/价格/已收录判定，
     # 前端不需要为它们另造一套行结构；只在行上标 manual，让运营者看清来源。
+    # workbuddy 的上游目录（wb-proxy ``/v1/models``）2026-11-11 实测只列 14 个
+    # 旧 id，而且漏了 ``hy4free`` / ``glm-5.3-flash`` 这些真能调的新模型
+    # （目录 ≠ 权限）。把本项目**已落盘的实测结论**补进同一条流水线，
+    # 市场才能同时做到「最新」和「可用」，而不是只复述一份陈旧目录。
+    probed_ids: set[str] = set()
+    snapshot_stale = False
+    transient_notes: dict[str, str] = {}
+    if provider_id == "workbuddy":
+        from app.services.agent.cli.models import read_desktop_catalog, verified_snapshot
+
+        snap = verified_snapshot()
+        probed_ids = set(snap["ids"])
+        snapshot_stale = bool(snap["stale"])
+        transient_notes = dict(snap.get("transient") or {})
+        # 桌面缓存是本机唯一带真实 maxInputTokens / 能力标记的来源。补进目录的
+        # 行必须带上它，否则上下文窗口会掉回预设表的 256000。
+        desktop_meta = {m["id"]: m for m in read_desktop_catalog()[0]}
+        catalogue = merge_probed_models(catalogue, probed_ids, desktop_meta)
     catalogue_ids = set(catalogue)
     for mid in manual_ids:
         catalogue.setdefault(mid, {"id": mid})
@@ -454,6 +505,8 @@ async def provider_models(
             "upstream_model": upstream,
             # True = 上游目录里没有，是运营者手填后补进来的（前端标「手填」）。
             "manual": upstream in manual_set,
+            # True = 本项目真发过请求验证可用（落盘快照），比目录更可信。
+            "probed": upstream in probed_ids,
             "suggested_model_id": _suggest_model_id(upstream),
             "already_added": preset.family in known_models
             or upstream in known_upstream,
@@ -514,6 +567,13 @@ async def provider_models(
         "provider_id": provider_id,
         "data": data,
     }
+    # 只给 workbuddy 加，其它供应商的响应形状保持不变（既有守卫钉着）。
+    if provider_id == "workbuddy":
+        # 候选集指纹变了：清单仍是上次真测过的，提示运营者点「刷新实测」。
+        payload["snapshot_stale"] = snapshot_stale
+        payload["probed_count"] = len(probed_ids)
+        # 已验证可用、但本次探测被限流/超时的模型：如实透出，别假装正常。
+        payload["transient"] = transient_notes
     if probe_note:
         payload["note"] = probe_note
     return payload

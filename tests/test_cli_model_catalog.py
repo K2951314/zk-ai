@@ -31,8 +31,11 @@ from app.services.agent.cli import models as model_discovery
 
 
 @pytest.fixture(autouse=True)
-def _clear() -> None:
+def _clear(monkeypatch, tmp_path) -> None:
     model_discovery.clear_cache()
+    # 落盘快照一律指到临时目录：测试绝不读写真实的 data/model-probe.json，
+    # 也不会因为本机跑过一次实测而行为漂移。
+    monkeypatch.setenv("ZKAI_MODEL_PROBE_SNAPSHOT", str(tmp_path / "probe.json"))
     yield
     model_discovery.clear_cache()
 
@@ -221,3 +224,158 @@ def test_config_snapshot_is_not_a_catalog_claim() -> None:
     assert "兜底" in block or "fallback" in block, (
         "codebuddy 段的 models 必须注明只是离线兜底，真实清单来自桌面端缓存"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 落盘实测快照：刷新一次之后，网关重启也不该退回配置快照里的 9 个模型
+# --------------------------------------------------------------------------- #
+def test_probe_snapshot_survives_process_cache_clear(tmp_path, monkeypatch) -> None:
+    """清掉进程缓存（≈ 网关重启）后，仍要给出上次真测过的清单。
+
+    这是「执行体里的模型不对」的直接修复：以前刷新实测只活 10 分钟内存，
+    之后 /executors 就回落到 cli_tools.yaml 里那份手工快照。
+    """
+    _write_cache(tmp_path, {"models": [
+        {"id": "hy4free", "credits": "x0.00", "supportsToolCall": True},
+        {"id": "kling-video-v3", "credits": "x0.30"},
+    ]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({
+        "hy4free": (True, ""),
+        "kling-video-v3": (False, "HTTP 400 Backend [maas] is not supported"),
+    })
+    model_discovery.clear_cache()
+    assert model_discovery.verified_snapshot()["ids"] == ["hy4free"]
+    assert model_discovery.cached_models("codebuddy", "codebuddy") == ["hy4free"]
+    details = model_discovery.cached_model_details("codebuddy", "codebuddy")
+    assert [d["id"] for d in details] == ["hy4free"]
+    assert details[0]["probed"] is True
+    assert details[0]["rate"] == 0.0
+
+
+def test_expired_or_corrupt_snapshot_is_not_trusted(monkeypatch, tmp_path) -> None:
+    """坏文件 / 过期快照不能冒充「当前可用」，宁可回落到未实测标注。"""
+    path = tmp_path / "probe.json"
+    monkeypatch.setenv("ZKAI_MODEL_PROBE_SNAPSHOT", str(path))
+    path.write_text("{not json", encoding="utf-8")
+    assert model_discovery.verified_snapshot()["ids"] == []
+    path.write_text(json.dumps({
+        "version": 1, "captured_at": 1.0, "candidate_fingerprint": "old",
+        "results": {"old-model": {"ok": True, "error": ""}},
+    }), encoding="utf-8")
+    assert model_discovery.verified_snapshot()["ids"] == [], "过期快照不能冒充当前可用"
+
+
+def test_write_snapshot_merges_without_losing_history(tmp_path, monkeypatch) -> None:
+    """增量刷新只覆盖本次真测过的 id，别把其它历史结论冲掉。"""
+    _write_cache(tmp_path, {"models": [{"id": "a"}, {"id": "b"}, {"id": "c"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({"a": (True, ""), "b": (False, "HTTP 400")})
+    model_discovery._write_snapshot({"c": (True, "")})
+    snap = model_discovery.verified_snapshot()
+    assert set(snap["ids"]) == {"a", "c"}
+    assert snap["results"]["b"] == (False, "HTTP 400")
+
+
+def test_candidate_fingerprint_changes_when_catalog_changes(tmp_path, monkeypatch) -> None:
+    """有新模型上线时指纹要变（界面据此提示刷新），但指纹本身不是权限。"""
+    _write_cache(tmp_path, {"models": [{"id": "a", "credits": "x0.1"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    ids = model_discovery.candidate_ids()
+    assert ids == ["a"]
+    assert model_discovery.candidate_fingerprint(ids) == model_discovery.candidate_fingerprint()
+    assert model_discovery.candidate_fingerprint(ids) != model_discovery.candidate_fingerprint(
+        [*ids, "hy4free"]
+    )
+
+
+def test_probed_models_are_merged_into_stale_catalogue() -> None:
+    """目录 ≠ 权限：目录没列但实测能调的模型要补进模型市场。
+
+    2026-11-11 实测：wb-proxy /v1/models 只列 14 个旧 id，hy4free /
+    glm-5.3-flash 真能调却一个都没列。补进来的行不能覆盖目录原有元数据，
+    也不能就地改调用方传进来的对象（后面还要算 manual_set）。
+    """
+    from app.api.admin.providers import merge_probed_models
+
+    catalogue = {"hy3": {"id": "hy3", "owned_by": "workbuddy"}}
+    merged = merge_probed_models(catalogue, {"hy3", "hy4free", "glm-5.3-flash"})
+    assert set(merged) == {"hy3", "hy4free", "glm-5.3-flash"}
+    assert merged["hy3"]["owned_by"] == "workbuddy"
+    assert catalogue == {"hy3": {"id": "hy3", "owned_by": "workbuddy"}}
+
+
+# --------------------------------------------------------------------------- #
+# 上下文窗口：别再拿预设表的 256000 冒充真实值
+# --------------------------------------------------------------------------- #
+def test_discovery_recognises_workbuddy_context_aliases() -> None:
+    """wb-proxy 的 x_ 扩展字段与桌面缓存的驼峰字段都要认得。
+
+    运营者原话：「hy4 明明就是 1M 左右的上下文，而模型市场里显示才 200k」。
+    200k 来自预设表，真实值在桌面缓存的 ``maxInputTokens``（hy4free=960000）。
+    """
+    from app.models.discovery import model_facts
+
+    assert model_facts({"x_max_input_tokens": 192000}).context_window == 192000
+    assert model_facts({"maxInputTokens": 960000}).context_window == 960000
+    assert model_facts({}).context_window is None
+
+
+def test_probed_rows_carry_real_context_window() -> None:
+    """目录外补进来的模型必须带桌面缓存元数据，不能只补一个裸 id。"""
+    from app.api.admin.providers import merge_probed_models
+    from app.models.discovery import model_facts
+
+    meta = {"hy4free": {"id": "hy4free", "max_input_tokens": 960000,
+                        "images": True, "reasoning": True}}
+    merged = merge_probed_models({"hy3": {"id": "hy3"}}, {"hy4free"}, meta)
+    facts = model_facts(merged["hy4free"])
+    assert facts.context_window == 960000
+    assert facts.vision_input is True
+    assert facts.reasoning is True
+
+
+def test_transient_probe_failure_keeps_verified_conclusion(tmp_path, monkeypatch) -> None:
+    """一次 ReadTimeout 不能把已验证可用的模型踢出清单。
+
+    2026-11-11 实测 ``kimi-k2.8-preview`` 超时一次，清单就从 36 掉到 35，
+    运营者看到的「模型又有差异」有一半是这个抖动。
+    """
+    _write_cache(tmp_path, {"models": [{"id": "flaky", "credits": "x0.10"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({"flaky": (True, "")})
+    model_discovery._write_snapshot({"flaky": (False, "ReadTimeout")})
+    assert model_discovery.verified_snapshot()["ids"] == ["flaky"]
+
+
+def test_hard_probe_failure_still_overrides(tmp_path, monkeypatch) -> None:
+    """明确否决（4xx / 11102）必须覆盖旧结论——别把宽容做成「永不更新」。"""
+    _write_cache(tmp_path, {"models": [{"id": "gone", "credits": "x0.10"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({"gone": (True, "")})
+    model_discovery._write_snapshot({"gone": (False, 'HTTP 400 {"code":11102}')})
+    assert model_discovery.verified_snapshot()["ids"] == []
+
+
+def test_rate_limit_keeps_verified_conclusion_but_is_surfaced(tmp_path, monkeypatch) -> None:
+    """429 免费额度限流不推翻已验证结论，但要留下「当前限流」状态。
+
+    2026-11-11 实测：探测 65 个模型自己触发了 hy4free 的每日免费额度上限
+    （错误写明「明日 10:20 重置」），旧逻辑把它当否决，模型直接从市场消失。
+    限流是配额状态，不是「这个模型没权限」。
+    """
+    _write_cache(tmp_path, {"models": [{"id": "free-tier", "credits": "x0.00"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({"free-tier": (True, "")})
+    model_discovery._write_snapshot({
+        "free-tier": (False, 'HTTP 429 {"code":6004,"msg":"使用量已超出频率限制"}'),
+    })
+    snap = model_discovery.verified_snapshot()
+    assert snap["ids"] == ["free-tier"], "限流不应把已验证模型踢出清单"
+    assert "429" in snap["transient"]["free-tier"], "要如实透出当前限流状态"
