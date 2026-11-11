@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/ui/console.css">
 </head>
 <body>
+<a class="skip-link" href="#main">跳到主内容</a>
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
@@ -16,20 +17,21 @@
         <div class="sub">本地 AI 网关控制台</div>
       </span>
     </div>
-    <nav class="nav" id="tabs">
-      <div class="nav-label">监控</div>
+    <nav class="nav" id="tabs" aria-label="主导航">
+      <div class="nav-label">巡检</div>
       <button class="nav-item active" data-view="overview"><span class="ico">📊</span>总览</button>
-      <button class="nav-item" data-view="pool"><span class="ico">🔑</span>凭据池</button>
-      <button class="nav-item" data-view="requests"><span class="ico">📨</span>请求记录</button>
-      <button class="nav-item" data-view="usage"><span class="ico">📈</span>用量统计</button>
       <button class="nav-item" data-view="report"><span class="ico">🩺</span>体检</button>
+      <div class="nav-label">配置</div>
+      <button class="nav-item" data-view="models"><span class="ico">🧩</span>模型</button>
+      <button class="nav-item" data-view="pool"><span class="ico">🔑</span>凭据</button>
+      <div class="nav-label">观测</div>
+      <button class="nav-item" data-view="usage"><span class="ico">📈</span>用量</button>
+      <button class="nav-item" data-view="requests"><span class="ico">📨</span>请求记录</button>
+      <div class="nav-label">自动化</div>
       <button class="nav-item" data-view="events"><span class="ico">📡</span>事件流</button>
       <button class="nav-item" data-view="agent"><span class="ico">🤖</span>Agent 任务台</button>
       <button class="nav-item" data-view="taskspaces"><span class="ico">📁</span>任务空间</button>
-      <button class="nav-item" data-view="pricing"><span class="ico">💲</span>模型与价格</button>
-      <div class="nav-label">配置</div>
-      <button class="nav-item" data-view="models"><span class="ico">🧩</span>模型与别名</button>
-      <button class="nav-item" data-view="burner"><span class="ico">🔥</span>积分消耗器</button>
+      <button class="nav-item is-disabled" data-view="burner" title="已在 config/burner.yaml 里停用（disabled: true），点进去只能看账本与日志"><span class="ico">🔥</span>积分消耗器<em class="nav-off">已停用</em></button>
     </nav>
     <div class="sidebar-foot">
       <div>版本 <span class="ver" id="side-version">-</span></div>
@@ -58,7 +60,8 @@
       <button id="btn-chatgpt" title="客户端接入：base_url、令牌、各客户端配置片段">🌏 客户端接入</button>
     </header>
 
-    <main>
+    <main id="main">
+      <h1 class="sr-only">ZK-AI 控制台</h1>
       <section class="view active" id="view-overview"></section>
       <section class="view" id="view-pool"></section>
       <section class="view" id="view-requests"></section>
@@ -76,17 +79,17 @@
 
 <nav id="mnav" aria-label="主要视图"></nav>
 <aside id="drawer"></aside>
-<div id="toasts"></div>
-<div class="modal-mask" id="model-modal"></div>
-<div class="modal-mask" id="alias-modal"></div>
-<div class="modal-mask" id="limits-modal"></div>
-<div class="modal-mask" id="market-modal"></div>
-<div class="modal-mask" id="addkey-modal"></div>
-<div class="modal-mask" id="providers-modal"></div>
-<div class="modal-mask" id="chatgpt-modal"></div>
-<div class="modal-mask" id="rename-cred-modal"></div>
-<div id="auth"><div class="card">
-  <h3>🔑 需要管理令牌</h3>
+<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="model-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="alias-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="limits-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="market-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="addkey-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="providers-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="chatgpt-modal"></div>
+<div class="modal-mask" role="dialog" aria-modal="true" id="rename-cred-modal"></div>
+<div id="auth" role="dialog" aria-modal="true" aria-labelledby="auth-title"><div class="card">
+  <h3 id="auth-title">🔑 需要管理令牌</h3>
   <div class="small muted" style="line-height:1.7">把项目 <code>.env</code> 里 <code>ZKAI_ADMIN_TOKEN=</code> 后面那串原样粘进来。
   改过 <code>.env</code> 后令牌会变，浏览器里存的旧值需要重新粘一次。令牌只保存在本机浏览器的 localStorage。</div>
   <input type="text" id="auth-token" placeholder="粘贴管理令牌 …">

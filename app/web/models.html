@@ -3,29 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>模型与价格 · ZK-AI</title>
+<title>执行体与价格 · ZK-AI</title>
 <style>
-  :root {
-    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f5;
-    --border: #e3e8ee; --border-strong: #d3dae3;
-    --text: #1a2230; --text-2: #4a5666; --muted: #7a8798;
-    --accent: #2563eb; --accent-soft: #eff4ff;
-    --ok: #15803d; --ok-soft: #ecfdf3;
-    --warn: #b45309; --warn-soft: #fffbeb;
-    --err: #b91c1c; --err-soft: #fef2f2;
-    --radius: 10px; --radius-sm: 6px;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1218; --panel: #161b24; --panel-2: #1d232e;
-      --border: #2a323f; --border-strong: #3a4453;
-      --text: #e7edf4; --text-2: #b8c3d1; --muted: #8794a6;
-      --accent: #5b9cff; --accent-soft: rgba(91, 156, 255, .12);
-      --ok: #4ade80; --ok-soft: rgba(74, 222, 128, .10);
-      --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .10);
-      --err: #f87171; --err-soft: rgba(248, 113, 113, .10);
-    }
-  }
+  @import url("/ui/tokens.css");
+
+  /* 本页只留组件样式；色板 / 字阶 / 圆角全部来自 tokens.css。 */
+
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -96,12 +79,12 @@
 <header>
   <div class="logo">💲</div>
   <div>
-    <h1>模型与价格</h1>
-    <div class="sub">每个工具能调哪些模型、分别什么价；价格来源逐条标明，不估算。</div>
+    <h1>执行体与价格</h1>
+    <div class="sub">外部 CLI 执行体能调哪些模型、实测什么价。网关自己的模型牌价在控制台「模型」页。</div>
   </div>
   <div class="spacer"></div>
   <button class="btn" onclick="load()">刷新</button>
-  <a class="btn" href="/ui/agent">返回任务台</a>
+  <a class="btn" href="/ui?view=pricing">返回控制台</a>
 </header>
 <main>
   <section class="summary">
@@ -112,11 +95,12 @@
 </main>
 <script src="/ui/common.js"></script>
 <script>
-function esc(value) {
-  return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
-  });
-}
+// 主题跟控制台走（父文档 data-theme → 本机存储 → 系统偏好）。
+// common.js 在这里加载，主题必须在首次绘制前写上 <html>，否则暗色下闪白。
+var themeApplied = (document.documentElement.dataset.theme = ZKUI.theme());
+/* HTML 转义走共享外壳（2026-11-10）。原来这页有一份自己的实现，
+   和 taskspaces.html 逐字相同——同一个网关四份转义规则是 XSS 面。 */
+var esc = ZKUI.esc;
 
 /* 令牌与请求走共享外壳；401 弹登录框（手机直开 /ui/models 的兜底）。 */
 async function api(path, options) {
@@ -173,19 +157,33 @@ function priceCell(row) {
   return '<span class="muted">' + esc(row.price_note || "没有价格数据") + "</span>";
 }
 
-function gatewayTable(rows) {
-  const body = rows.map(function (row) {
-    return "<tr>"
-      + '<td class="name">' + esc(row.display_name || row.id)
-      + '<span class="sub muted">' + esc(row.id) + "</span></td>"
-      + "<td>" + sourcePill(row.price_source) + "</td>"
-      + "<td>" + priceCell(row) + "</td>"
-      + "<td>" + (row.enabled ? '<span class="pill ok">启用</span>'
-                              : '<span class="pill muted">停用</span>') + "</td>"
-      + "</tr>";
-  }).join("");
-  return "<table><thead><tr><th>模型</th><th>价格来源</th><th>价格</th><th>状态</th></tr></thead>"
-    + "<tbody>" + body + "</tbody></table>";
+/* 兑换率渲染：credits 是「一次对话扣多少积分倍率」，x0.29 表示按 0.29 倍计费。
+   来源是 WorkBuddy/CodeBuddy 桌面端缓存（唯一带价格的权威源）；
+   CLI 的 --help / --list-models 都不带价格，所以那边 rate 是 null，
+   如实显示「兑换率未知」而不是编一个「免费」。 */
+function ratePill(rate) {
+  if (rate === null || rate === undefined) return "";
+  if (rate === 0) return ' <span class="pill ok">免费</span>';
+  const tone = rate <= 0.2 ? "ok" : rate <= 0.6 ? "" : "warn";
+  return ' <span class="pill ' + tone + '">×' + Number(rate).toFixed(2) + "</span>";
+}
+
+function modelMeta(model) {
+  const bits = [];
+  if (model.tools === true) bits.push("工具");
+  if (model.images === true) bits.push("图片");
+  if (model.max_input_tokens) bits.push(Math.round(model.max_input_tokens / 1000) + "K 上下文");
+  if (model.tools === null || model.tools === undefined) bits.push("属性未知（CLI 不提供）");
+  return bits.join(" · ");
+}
+
+/* 清单来源标签。三种口径的差别见 docs/模型市场与预设.md：
+   probed = 真发请求验证过（唯一可信）；live = CLI 自己报的名字（可能是静态帮助文字）；
+   config = 配置文件快照（最弱，只作兜底）。 */
+function sourceBadge(src) {
+  if (src === "probed") return '<span class="pill ok">实测可用</span>';
+  if (src === "live") return '<span class="pill muted">CLI 自报（未实测）</span>';
+  return '<span class="pill muted">配置快照（未实测）</span>';
 }
 
 function executorTable(rows) {
@@ -193,10 +191,13 @@ function executorTable(rows) {
     const models = Array.isArray(row.models) ? row.models : [];
     const lines = models.length
       ? models.map(function (model) {
+          const meta = modelMeta(model);
           return '<div style="margin-bottom:4px">'
-            + "<b>" + esc(model.id) + "</b> " + sourcePill(model.price_source)
-            + (model.free ? ' <span class="pill ok">免费</span>' : "")
-            + '<div class="muted">' + esc(model.price_note || "") + "</div></div>";
+            + "<b>" + esc(model.id) + "</b>" + ratePill(model.rate)
+            + (model.free && (model.rate === null || model.rate === undefined)
+                ? ' <span class="pill muted">配置标为免费</span>' : "")
+            + (meta ? '<div class="muted">' + esc(meta) + "</div>" : "")
+            + "</div>";
         }).join("")
       : '<span class="muted">这个工具没有可列出的模型</span>';
     return "<tr>"
@@ -204,11 +205,10 @@ function executorTable(rows) {
       + '<span class="sub muted">' + esc(row.role || "无角色") + "</span></td>"
       + "<td>" + lines + "</td>"
       + "<td>" + esc(row.cost_tier || "—") + "</td>"
-      + '<td><span class="pill ' + (row.models_source === "live" ? "ok" : "muted") + '">'
-      + (row.models_source === "live" ? "实时清单" : "配置快照") + "</span></td>"
+      + '<td>' + sourceBadge(row.models_source) + "</td>"
       + "</tr>";
   }).join("");
-  return "<table><thead><tr><th>工具</th><th>模型与价格</th><th>档位</th><th>清单来源</th></tr></thead>"
+  return "<table><thead><tr><th scope='col'>工具</th><th scope='col'>模型与兑换率</th><th scope='col'>档位</th><th scope='col'>清单来源</th></tr></thead>"
     + "<tbody>" + body + "</tbody></table>";
 }
 
@@ -236,27 +236,26 @@ function render(data) {
   const box = document.getElementById("body");
   const sumBox = document.getElementById("summary");
   const s = data.summary || {};
+  // 2026-11-10：这一页收窄为「外部 CLI 执行体」——网关模型的牌价在控制台
+  // 「模型」页的模型表里已经有（每条部署后面带 💲输入/输出），此处不再重复
+  // 一份。两份表并存的结果是：改了 models.yaml 之后，这边照旧显示旧价，
+  // 而运营者不知道该信哪个。
   sumBox.innerHTML =
-    "共 <b>" + esc(s.total_models) + "</b> 个模型：网关 "
-    + esc(s.gateway_models) + " 个、外部工具 " + esc(s.executor_models) + " 个；"
-    + "其中 <b>" + esc(s.priced_models) + "</b> 个有可核实的价格。"
+    "外部 <b>" + esc(s.executor_models) + "</b> 个模型有清单；"
+    + "网关模型的牌价请看控制台「模型」页（那边是同一份 models.yaml 的实时值）。"
     + '<div class="muted" style="margin-top:6px">'
     + (data.notes || []).map(esc).join("<br>") + "</div>";
 
-  const gateway = Array.isArray(data.gateway) ? data.gateway : [];
   const executors = Array.isArray(data.executors) ? data.executors : [];
   let html = "";
-  if (gateway.length) {
-    html += '<section class="group"><div class="group-head"><h3>网关模型</h3>'
-      + '<span class="desc">价格是配置里的真实牌价，美元 / 每百万 token</span></div>'
-      + gatewayTable(gateway) + "</section>";
-  }
   if (executors.length) {
-    html += '<section class="group"><div class="group-head"><h3>外部工具</h3>'
-      + '<span class="desc">它们没有价目表：有实测的显示实测均价，没有的如实标未知</span></div>'
+    html += '<section class="group"><div class="group-head"><h3>外部 CLI 执行体</h3>'
+      + '<span class="desc">清单里的每个模型都真发过一次请求验证可用（'
+      + '不是抄帮助文档，也不是桌面缓存的全部条目）；'
+      + '兑换率 ×N 是桌面端 credits 倍率，即一次对话的积分倍数</span></div>'
       + executorTable(executors) + "</section>";
   }
-  box.innerHTML = html || '<div class="empty">还没有任何模型配置。</div>';
+  box.innerHTML = html || '<div class="empty">还没有配置任何外部 CLI 执行体。</div>';
 }
 
 load();

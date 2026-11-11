@@ -11,66 +11,90 @@ const EMBEDDED = location.search.indexOf("embed=1") >= 0;
 if (EMBEDDED) {
   document.documentElement.className = "embed";
 }
+// 原来这段只是藏页头。主题相关的两件事（token 变量、data-theme）在下面：
+// common.js 在这里加载（而不是像原来那样放到 body 末尾），因为主题必须在
+// 首次绘制前落到 <html> 上，否则暗色下会先闪一下白。
+</script>
+<script src="/ui/common.js"></script>
+<script>
+// common.js 已加载 → 立刻把主题写到 <html>，避免暗色下闪白。
+// ZKUI.theme() 三级回落：父文档 data-theme → localStorage → 系统偏好。
+// 用 `var` 而不是裸赋值：test_console_zh 的「每个 script 块必须有顶层声明」
+// 守卫会把单条赋值当成「代码被拼到标签外」的信号。
+var themeApplied = (document.documentElement.dataset.theme = ZKUI.theme());
 </script>
 <style>
-  :root { color-scheme: light; }
+  @import url("/ui/tokens.css");
+
+  /* 本页只留组件样式；色板 / 字阶 / 圆角全部来自 tokens.css。 */
+  /* 事件状态胶囊是本页特有语义，颜色仍取统一 token，暗色自动跟随。 */
+  :root {
+    --pill-received-bg: var(--accent-soft); --pill-received-ink: var(--accent);
+    --pill-running-bg: var(--warn-soft);   --pill-running-ink: var(--warn);
+    --pill-decision-bg: var(--warn-soft);  --pill-decision-ink: var(--warn);
+    --pill-done-bg: var(--ok-soft);        --pill-done-ink: var(--ok);
+    --pill-failed-bg: var(--err-soft);     --pill-failed-ink: var(--err);
+    --pill-dropped-bg: var(--bg-sunk);     --pill-dropped-ink: var(--muted);
+  }
+
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-         font-size: 14px; line-height: 1.6; color: #2c2c2a; background: #f7f6f2; }
+         font-size: 14px; line-height: 1.6; color: var(--ink); background: var(--bg); }
   header { display: flex; align-items: baseline; gap: 12px; padding: 16px 20px;
-           background: #fff; border-bottom: 1px solid #e3e1da; }
+           background: var(--surface); border-bottom: 1px solid var(--border); }
   header h1 { margin: 0; font-size: 16px; font-weight: 500; }
-  header .sub { color: #888780; font-size: 12px; }
-  header a { margin-left: auto; color: #185fa5; text-decoration: none; font-size: 13px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header a { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
   main { padding: 16px 20px 40px; max-width: 1180px; }
   .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-  .card { flex: 1 1 150px; background: #fff; border: 1px solid #e3e1da; border-radius: 12px;
+  .card { flex: 1 1 150px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
           padding: 12px 14px; }
   .card .n { font-size: 22px; font-weight: 500; }
-  .card .k { font-size: 12px; color: #888780; }
-  .card.warn .n { color: #ba7517; }
-  .card.danger .n { color: #a32d2d; }
+  .card .k { font-size: 12px; color: var(--muted); }
+  .card.warn .n { color: var(--warn); }
+  .card.danger .n { color: var(--danger); }
   .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
   select, button { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 8px;
-                   border: 1px solid #d3d1c7; background: #fff; color: inherit; cursor: pointer; }
-  button.primary { background: #185fa5; border-color: #185fa5; color: #fff; }
-  button.danger { background: #a32d2d; border-color: #a32d2d; color: #fff; }
-  table { width: 100%; border-collapse: collapse; background: #fff;
-          border: 1px solid #e3e1da; border-radius: 12px; overflow: hidden; }
-  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #f1efe8; vertical-align: top; }
-  th { font-weight: 500; font-size: 12px; color: #5f5e5a; background: #fbfaf7; }
+                   border: 1px solid var(--border-strong); background: var(--surface);
+                   color: inherit; cursor: pointer; }
+  button.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
+  button.danger { background: var(--danger); border-color: var(--danger); color: var(--bg); }
+  table { width: 100%; border-collapse: collapse; background: var(--surface);
+          border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 500; font-size: 12px; color: var(--ink-2); background: var(--surface-2); }
   tr:last-child td { border-bottom: none; }
   tbody tr { cursor: pointer; }
-  tbody tr:hover { background: #fbfaf7; }
+  tbody tr:hover { background: var(--surface-2); }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
-  .pill.received { background: #e6f1fb; color: #0c447c; }
-  .pill.running { background: #faeeda; color: #633806; }
-  .pill.waiting_decision { background: #faeeda; color: #854f0b; }
-  .pill.done { background: #e1f5ee; color: #085041; }
-  .pill.failed { background: #fcebeb; color: #791f1f; }
-  .pill.dropped { background: #f1efe8; color: #5f5e5a; }
-  .muted { color: #888780; font-size: 12px; }
-  .compose { background: #fff; border: 1px solid #e3e1da; border-radius: 12px;
+  .pill.received { background: var(--pill-received-bg); color: var(--pill-received-ink); }
+  .pill.running { background: var(--pill-running-bg); color: var(--pill-running-ink); }
+  .pill.waiting_decision { background: var(--pill-decision-bg); color: var(--pill-decision-ink); }
+  .pill.done { background: var(--pill-done-bg); color: var(--pill-done-ink); }
+  .pill.failed { background: var(--pill-failed-bg); color: var(--pill-failed-ink); }
+  .pill.dropped { background: var(--pill-dropped-bg); color: var(--pill-dropped-ink); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .compose { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
              padding: 14px 16px; margin-bottom: 14px; }
-  .compose label { display: block; font-size: 12px; color: #5f5e5a; margin-bottom: 10px; }
+  .compose label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 10px; }
   .compose .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
   .compose .row label { flex: 1 1 180px; margin-bottom: 10px; }
   .compose input, .compose textarea {
     display: block; width: 100%; margin-top: 3px; font: inherit; font-size: 13px;
-    padding: 6px 9px; border: 1px solid #d3d1c7; border-radius: 8px;
-    background: #fff; color: inherit; }
+    padding: 6px 9px; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--surface); color: inherit; }
   .compose textarea { resize: vertical; }
-  #detail { margin-top: 16px; background: #fff; border: 1px solid #e3e1da;
+  #detail { margin-top: 16px; background: var(--surface); border: 1px solid var(--border);
             border-radius: 12px; padding: 14px 16px; display: none; }
   #detail.on { display: block; }
   #detail h2 { margin: 0 0 6px; font-size: 14px; font-weight: 500; }
-  #detail pre { white-space: pre-wrap; word-break: break-word; background: #fbfaf7;
-                border: 1px solid #f1efe8; border-radius: 8px; padding: 10px;
+  #detail pre { white-space: pre-wrap; word-break: break-word; background: var(--surface-2);
+                border: 1px solid var(--line); border-radius: 8px; padding: 10px;
                 font-family: ui-monospace, Consolas, monospace; font-size: 12px;
                 max-height: 360px; overflow: auto; }
   .row { display: flex; gap: 8px; margin-top: 10px; }
-  .empty { padding: 28px; text-align: center; color: #888780; background: #fff;
-           border: 1px dashed #d3d1c7; border-radius: 12px; }
+  .empty { padding: 28px; text-align: center; color: var(--muted); background: var(--surface);
+           border: 1px dashed var(--border-strong); border-radius: 12px; }
   html.embed header { display: none; }
   html.embed main { padding: 14px 16px 28px; max-width: none; }
   /* 手机：七列表格在 390px 视口上是 640px 的横向灾难。
@@ -81,13 +105,13 @@ if (EMBEDDED) {
     header h1 { white-space: nowrap; }
     table { border: none; background: none; }
     thead { display: none; }
-    tbody tr { display: block; background: #fff; border: 1px solid #e3e1da;
+    tbody tr { display: block; background: var(--surface); border: 1px solid var(--border);
                border-radius: 12px; margin-bottom: 10px; padding: 8px 0; }
-    tbody tr:hover { background: #fff; }
+    tbody tr:hover { background: var(--surface); }
     td { display: flex; gap: 8px; align-items: baseline;
          border-bottom: none; padding: 3px 14px; word-break: break-all; }
     td::before { content: attr(data-label); flex: none; width: 76px;
-                 color: #888780; font-size: 12px; }
+                 color: var(--muted); font-size: 12px; }
     td:first-child { padding-top: 8px; }
     td:last-child { padding-bottom: 8px; }
   }
@@ -166,13 +190,13 @@ if (EMBEDDED) {
   <table>
     <thead>
       <tr>
-        <th style="width:56px">编号</th>
-        <th style="width:88px">状态</th>
-        <th style="width:120px">来源</th>
-        <th style="width:150px">类型</th>
-        <th>摘要</th>
-        <th style="width:130px">规则 / 执行体</th>
-        <th style="width:96px">收到时间</th>
+        <th scope="col" style="width:56px">编号</th>
+        <th scope="col" style="width:88px">状态</th>
+        <th scope="col" style="width:120px">来源</th>
+        <th scope="col" style="width:150px">类型</th>
+        <th scope="col">摘要</th>
+        <th scope="col" style="width:130px">规则 / 执行体</th>
+        <th scope="col" style="width:96px">收到时间</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -191,7 +215,6 @@ if (EMBEDDED) {
   </div>
 </main>
 
-<script src="/ui/common.js"></script>
 <script>
 const STATE_ZH = {
   received: "待认领", running: "进行中", waiting_decision: "等你拍板",
@@ -212,14 +235,10 @@ async function api(path, options) {
   }
 }
 
-/* 五字符全转义：state 会被拼进 class 属性，弱化版（不转义引号）是
-   「靠上游枚举兜底」而不是「靠自己转义兜底」，换字段就会出事。 */
-function esc(value) {
-  return String(value === null || value === undefined ? "" : value)
-    .replace(/[&<>"']/g, function (ch) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
-    });
-}
+/* 五字符全转义走共享外壳（ZKUI.esc）。state 会被拼进 class 属性，
+   必须真的转义引号——靠「上游枚举不会出怪值」是兜不住换字段的。 */
+var esc = ZKUI.esc;
+var toast = ZKUI.toast;
 
 function shortTime(iso) {
   if (!iso) { return "-"; }
@@ -268,7 +287,7 @@ function openDetail(id) {
     document.getElementById("d-approve").style.display = show ? "inline-block" : "none";
     document.getElementById("d-reject").style.display = show ? "inline-block" : "none";
   }).catch(function (err) {
-    document.getElementById("hint").textContent = err.message;
+    toast("打开事件详情失败：" + err.message, "err");
   });
 }
 
@@ -282,7 +301,7 @@ function decide(approved) {
     document.getElementById("detail").classList.remove("on");
     load();
   }).catch(function (err) {
-    document.getElementById("hint").textContent = err.message;
+    toast("批准/否决没成功：" + err.message, "err");
   });
 }
 
@@ -290,7 +309,7 @@ function load() {
   const state = document.getElementById("f-state").value;
   const query = state ? "?state=" + encodeURIComponent(state) : "";
   api("/zkadmin/events" + query).then(function (data) { render(data.events || []); })
-    .catch(function (err) { document.getElementById("hint").textContent = err.message; });
+    .catch(function (err) { toast("读取事件列表失败：" + err.message, "err"); });
   api("/zkadmin/events/stats?days=7").then(function (s) {
     const byState = s.by_state || {};
     document.getElementById("n-open").textContent = s.open || 0;

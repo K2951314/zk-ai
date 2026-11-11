@@ -69,7 +69,7 @@ curl "https://$SERVER/zkai/v1/chat/completions" \
 https://<服务器地址>/ui/?token=<ZKAI_ADMIN_TOKEN>
 ```
 
-- `/ui` 控制台总览，`/ui/report` 体检报告，`/ui/agent` Agent 任务台。
+- `/ui` 控制台（体检是其中内置视图，`/ui/report` 已删除），`/ui/agent` Agent 任务台。
 - `?token=` 是网关 `index.html` 原生支持的直登参数，登入后地址栏会被
   `history.replaceState` 抹掉，不会留在浏览器历史里。
 - 也可以不带 `?token=` 打开，然后在页面右上角「🔑 令牌」里粘一次，
@@ -91,7 +91,7 @@ https://<服务器地址>/ui/?token=<ZKAI_ADMIN_TOKEN>
 |---|---|---|
 | `/zkai/v1/*` | OpenAI 兼容接口 | `Bearer <ZKAI_API_TOKEN>`，Caddy 精确比对 |
 | `/v1/*`、`/health` | 同上（裸路径形式） | 同上 |
-| `/ui` `/ui/report` `/ui/agent` | 控制台 HTML 外壳 | 不校验（外壳零数据，见下） |
+| `/ui` `/ui/agent` | 控制台 HTML 外壳 | 不校验（外壳零数据，见下） |
 | `/admin/*` | 管理接口 | 按请求形态分流，见下 |
 | `/health` | 探活 | 正确 API token，或 Referer 指向 `/ui`（见下） |
 

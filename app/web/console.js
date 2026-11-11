@@ -12,7 +12,7 @@ const esc = v => String(v ?? "").replace(/[&<>"']/g, c => (
 const MNAV = [
   { view: "overview", ico: "📊", label: "总览" },
   { view: "models",   ico: "🧩", label: "模型" },
-  { view: "burner",   ico: "🔥", label: "消耗器" },
+  { view: "pool",     ico: "🔑", label: "凭据" },
   { view: "more",     ico: "•••", label: "更多" },
 ];
 
@@ -44,19 +44,34 @@ function mnavClose() {
 }
 
 function mnavMore() {
-  // 「更多」抽：桌面侧栏的其余入口，一行一个，挤指够得到
-  const items = [
-    { view: "pool", ico: "🔑", label: "凭证池" },
-    { view: "requests", ico: "📨", label: "请求记录" },
-    { view: "usage", ico: "📈", label: "用量统计" },
-    { view: "report", ico: "🩺", label: "体检" },
-    { view: "events", ico: "📡", label: "事件流" },
-    { view: "agent", ico: "🤖", label: "Agent 任务台" },
-  ];
+  // 「更多」抽：桌面侧栏里没进底栏的那些入口，一行一个，拇指够得到。
+  //
+  // 2026-11-10：清单改为从 #tabs 的 DOM 派生，不再手写第二份。
+  // 之前 MNAV、mnavMore()、index.html 的 <nav> 是三份各自维护的导航文案，
+  // 加一个视图要改三处、漏一处就出现「桌面上有、手机上找不到」。
+  // 现在唯一的真相是 index.html：底栏只从 MNAV 挑高频三项，其余全在这里。
+  const bottom = new Set(MNAV.filter(m => m.view !== "more").map(m => m.view));
+  const items = Array.from(document.querySelectorAll("#tabs button[data-view]"))
+    .filter(btn => !bottom.has(btn.dataset.view))
+    .map(btn => {
+      // 取文案时把 .ico（emoji）和 .nav-off（「已停用」徽标）都摘掉，
+      // 不能直接用 lastChild.textContent——消耗器那个按钮的最后一个子节点
+      // 正好是徽标，取出来会只剩「已停用」三个字。
+      const clone = btn.cloneNode(true);
+      clone.querySelectorAll(".ico, .nav-off").forEach(n => n.remove());
+      return {
+        view: btn.dataset.view,
+        ico: (btn.querySelector(".ico") || {}).textContent || "",
+        label: (clone.textContent || "").trim(),
+        off: btn.classList.contains("is-disabled"),
+      };
+    });
   const rows = items.map(m => {
     const attrs = `href="javascript:void 0" data-go="${m.view}"`;
     return `<a class="mnav-row" ${attrs}><span class="ico">${m.ico}</span>`
-      + `<span class="grow" style="text-align:left">${m.label}</span><span class="muted">›</span></a>`;
+      + `<span class="grow" style="text-align:left">${esc(m.label)}</span>`
+      + (m.off ? `<span class="nav-off">已停用</span>` : "")
+      + `<span class="muted">›</span></a>`;
   }).join("");
   mnavPanel(`<div class="dr-head"><h2 class="grow">更多</h2>`
     + `<button class="mini" id="mnav-close">✕ 关闭</button></div>`
@@ -235,14 +250,27 @@ const MODAL_IDS = [
   "#addkey-modal", "#providers-modal", "#chatgpt-modal", "#rename-cred-modal", "#auth",
 ];
 /** 打开一个弹窗，并关掉其它所有遮罩（父弹窗由调用方负责收尾）。 */
+/* 弹窗焦点管理（2026-11-11）：打开时记住触发元素、把焦点送进弹窗；
+   关闭后还回去。Esc / 点遮罩也必须走 closeModal，否则焦点会
+   留在已经隐藏的弹窗里，键盘用户下一步就不知道按到哪了。 */
+let _modalReturn = null;
+function _restoreModalFocus() {
+  const el = _modalReturn;
+  _modalReturn = null;
+  if (el && document.contains(el) && typeof el.focus === "function") el.focus();
+}
 function openModal(sel) {
   const target = $(sel);
   if (!target) return;
+  if (!target.classList.contains("show")) _modalReturn = document.activeElement;
   MODAL_IDS.filter(id => id !== sel).forEach(id => {
     const el = $(id);
     if (el) el.classList.remove("show");
   });
   target.classList.add("show");
+  const first = target.querySelector(
+    "input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)");
+  if (first) first.focus();
 }
 /** 关掉除 keep 以外的全部弹窗；keep 通常传正在展示的那个，避免误伤。 */
 function closeModals(keep) {
@@ -250,10 +278,12 @@ function closeModals(keep) {
     const el = $(id);
     if (el) el.classList.remove("show");
   });
+  if (!keep) _restoreModalFocus();
 }
 function closeModal(sel) {
   const el = $(sel);
   if (el) el.classList.remove("show");
+  _restoreModalFocus();
 }
 
 function pill(status) {
@@ -300,6 +330,9 @@ const LOADERS = {
 //: 内容区，而不是另开标签页——切走再切回来要保留现场（Agent 正在跑的会话
 //: 不能因为刷新一次就重建）。所以 frame 只建一次。
 const EMBED_VIEWS = new Set(["events", "agent", "taskspaces", "pricing"]);
+//: 二级视图 → 侧栏里该高亮哪个一级入口。pricing（执行体与价格）不是独立对象，
+//: 它归在「模型」下，入口是模型页的按钮（2026-11-10 从侧栏下沉）。
+const PARENT_VIEW = { pricing: "models" };
 const _frames = {};
 function embedFrame(id, src) {
   const host = $("#view-" + id);
@@ -310,7 +343,7 @@ function embedFrame(id, src) {
   frame.className = "view-frame";
   frame.title = id === "agent" ? "Agent 任务台"
     : id === "taskspaces" ? "任务空间"
-    : id === "pricing" ? "模型与价格" : "事件流";
+    : id === "pricing" ? "执行体与价格" : "事件流";
   frame.src = src;
   host.innerHTML = "";
   host.appendChild(frame);
@@ -329,8 +362,12 @@ function switchView(name) {
   state.view = name;
   // 内嵌页自己管滚动与内边距，主区留 padding 会多出一圈空白
   document.body.classList.toggle("embed-view", EMBED_VIEWS.has(name));
+  // 二级视图在侧栏里没有自己的按钮（如 pricing 归在「模型」下），
+  // 这时高亮它所属的一级板块。不这样做的话，从「模型」页点「执行体与价格」
+  // 进去，侧栏会一项都不亮——运营者会以为「我不在任何页面」。
+  const highlight = PARENT_VIEW[name] || name;
   document.querySelectorAll("nav button").forEach(b =>
-    b.classList.toggle("active", b.dataset.view === name));
+    b.classList.toggle("active", b.dataset.view === highlight));
   document.querySelectorAll("section.view").forEach(s =>
     s.classList.toggle("active", s.id === "view-" + name));
   refresh();
@@ -585,7 +622,7 @@ async function loadOverview() {
     <div id="ov-health-result"></div>
     <h4 class="sec">最近请求（点击任意一行看完整明细）</h4>
     <div class="tablewrap"><table>
-      <thead><tr><th>时间</th><th>请求模型</th><th>实际模型</th><th>供应商/凭据</th><th>状态</th><th>错误</th><th>延迟</th></tr></thead>
+      <thead><tr><th scope="col">时间</th><th scope="col">请求模型</th><th scope="col">实际模型</th><th scope="col">供应商/凭据</th><th scope="col">状态</th><th scope="col">错误</th><th scope="col">延迟</th></tr></thead>
       <tbody class="clickable">${recent || '<tr><td colspan="7" class="muted">暂无记录</td></tr>'}</tbody>
     </table></div>`;
 
@@ -612,7 +649,7 @@ async function loadOverview() {
     try {
       const r = await api("/admin/health/check", { method: "POST", json: {} });
       $("#ov-health-result").innerHTML = `<h4 class="sec">健康检查结果（${esc(r.kind)} · ${dur((r.duration_ms || 0) / 1000)}）</h4>
-        <div class="tablewrap"><table><thead><tr><th>凭据</th><th>结果</th><th>延迟</th><th>错误</th></tr></thead><tbody>
+        <div class="tablewrap"><table><thead><tr><th scope="col">凭据</th><th scope="col">结果</th><th scope="col">延迟</th><th scope="col">错误</th></tr></thead><tbody>
         ${r.results.map(x => `<tr><td>${esc(x.provider_id)}/${esc(x.credential_id || "-")}</td>
           <td>${x.ok ? pill("healthy") : pill("unhealthy")}</td>
           <td>${Math.round(x.latency_ms)}ms</td>
@@ -847,8 +884,8 @@ async function loadPool() {
       <button id="pool-clear-all">🧹 全部清冷却</button>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th class="acts">操作</th><th>凭据</th><th>供应商</th><th>状态</th><th>优先级</th><th>配额用量</th><th>成功</th><th>失败</th>
-      <th>限流</th><th>冷却剩余</th><th>最后错误</th><th>密钥</th><th class="acts-end">操作</th></tr></thead>
+      <thead><tr><th scope="col" class="acts">操作</th><th scope="col">凭据</th><th scope="col">供应商</th><th scope="col">状态</th><th scope="col">优先级</th><th scope="col">配额用量</th><th scope="col">成功</th><th scope="col">失败</th>
+      <th scope="col">限流</th><th scope="col">冷却剩余</th><th scope="col">最后错误</th><th scope="col">密钥</th><th scope="col" class="acts-end">操作</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="13" class="muted">无凭据</td></tr>'}</tbody>
     </table></div>
     <div class="note-block">📌 = 当前钉在这把 Key 上的会话数。同一通对话会优先复用上一步成功的 Key
@@ -1022,7 +1059,7 @@ function openProvidersModal() {
         <button id="pv-close">关闭</button>
       </div>
       <div class="tablewrap" style="max-height:55vh"><table>
-        <thead><tr><th class="acts">操作</th><th>供应商</th><th>接入地址</th><th>状态</th><th>超时</th><th>限额</th></tr></thead>
+        <thead><tr><th scope="col" class="acts">操作</th><th scope="col">供应商</th><th scope="col">接入地址</th><th scope="col">状态</th><th scope="col">超时</th><th scope="col">限额</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="7" class="muted">无供应商</td></tr>'}</tbody>
       </table></div>
     </div>`;
@@ -1236,8 +1273,8 @@ async function loadRequests(keepFilters) {
       <button id="r-reset">重置</button>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th>时间</th><th>请求模型</th><th>实际模型</th><th>别名</th><th>供应商/凭据</th>
-      <th>模式</th><th>状态</th><th>HTTP</th><th>错误</th><th>尝试</th><th>延迟</th><th>Tokens</th><th>成本</th></tr></thead>
+      <thead><tr><th scope="col">时间</th><th scope="col">请求模型</th><th scope="col">实际模型</th><th scope="col">别名</th><th scope="col">供应商/凭据</th>
+      <th scope="col">模式</th><th scope="col">状态</th><th scope="col">HTTP</th><th scope="col">错误</th><th scope="col">尝试</th><th scope="col">延迟</th><th scope="col">Tokens</th><th scope="col">成本</th></tr></thead>
       <tbody class="clickable">${rows || '<tr><td colspan="13" class="muted">无匹配记录</td></tr>'}</tbody>
     </table></div>
     <div class="toolbar" style="margin-top:10px">
@@ -1303,7 +1340,7 @@ async function openDrawer(requestId) {
       ${r.routing_reason ? `<details class="raw"><summary>路由决策</summary><pre>${esc(r.routing_reason)}</pre></details>` : ""}
       <h4 class="sec">尝试明细（共 ${(d.attempts || []).length} 次）</h4>
       <div class="tablewrap"><table>
-        <thead><tr><th>#</th><th>供应商</th><th>凭据</th><th>结果</th><th>HTTP</th><th>错误</th><th>详情</th><th>延迟</th><th>Tokens</th></tr></thead>
+        <thead><tr><th scope="col">#</th><th scope="col">供应商</th><th scope="col">凭据</th><th scope="col">结果</th><th scope="col">HTTP</th><th scope="col">错误</th><th scope="col">详情</th><th scope="col">延迟</th><th scope="col">Tokens</th></tr></thead>
         <tbody>${attempts || '<tr><td colspan="9" class="muted">无尝试记录（可能是修复前的流式请求）</td></tr>'}</tbody>
       </table></div>`;
     $("#drawer").classList.add("open");
@@ -1360,21 +1397,21 @@ async function loadUsage() {
       ${kpi("等价成本", fmtCost(u.cost_usd), "按公开牌价折算；免费渠道=省下的钱，付费渠道=真实成本")}
     </div>
     <h4 class="sec">按天</h4>
-    <div class="tablewrap"><table><thead><tr><th>日期</th><th>请求数</th><th>Tokens</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th scope="col">日期</th><th scope="col">请求数</th><th scope="col">Tokens</th></tr></thead>
       <tbody>${daily || '<tr><td colspan="3" class="muted">暂无数据</td></tr>'}</tbody></table></div>
     <h4 class="sec">按别名（客户端选了哪条链）</h4>
     <div class="tablewrap"><table><thead><tr>
-      <th>别名</th><th>请求数</th><th>输入 Tokens</th><th>输出 Tokens</th>
-      <th>输入/输出</th><th>成本</th></tr></thead>
+      <th scope="col">别名</th><th scope="col">请求数</th><th scope="col">输入 Tokens</th><th scope="col">输出 Tokens</th>
+      <th scope="col">输入/输出</th><th scope="col">成本</th></tr></thead>
       <tbody>${aliasRows(u.by_alias || [])}</tbody></table></div>
     <h4 class="sec">按供应商</h4>
-    <div class="tablewrap"><table><thead><tr><th>供应商</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th scope="col">供应商</th><th scope="col">请求数</th><th scope="col">Tokens</th><th scope="col">成本</th></tr></thead>
       <tbody>${rows(u.by_provider || [], "provider")}</tbody></table></div>
     <h4 class="sec">按模型（Top）</h4>
-    <div class="tablewrap"><table><thead><tr><th>模型</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th scope="col">模型</th><th scope="col">请求数</th><th scope="col">Tokens</th><th scope="col">成本</th></tr></thead>
       <tbody>${rows(u.top_models || [], "model")}</tbody></table></div>
     <h4 class="sec">按凭据（哪把 Key 在干活）</h4>
-    <div class="tablewrap"><table><thead><tr><th>凭据</th><th>请求数</th><th>Tokens</th><th>成本</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th scope="col">凭据</th><th scope="col">请求数</th><th scope="col">Tokens</th><th scope="col">成本</th></tr></thead>
       <tbody>${rows(u.by_credential || [], "credential_id")}</tbody></table></div>`;
   $("#u-days").onchange = e => { state.usageDays = Number(e.target.value); loadUsage(); };
   $("#u-backfill").onclick = async () => {
@@ -1424,18 +1461,19 @@ async function loadModels() {
        <details class="raw grow"><summary>展开</summary><pre>${m.config_warnings.map(esc).join("\n")}</pre></details></div>` : "";
   $("#view-models").innerHTML = `
     <div class="view-head">
-      <h2>模型与别名</h2>
+      <h2>模型</h2>
       <span class="desc">模型 → 部署 → 供应商全景；别名的目标链顺序即优先级</span>
     </div>
     ${warnings}
     <div class="toolbar"><h4 class="sec grow" style="margin:0">模型（${(m.data || []).length}）</h4>
       <button class="primary" id="md-market">🧺 模型市场（从供应商导入）</button>
-      <button id="md-new">➕ 手动新建</button></div>
-    <div class="tablewrap"><table><thead><tr><th class="acts">操作</th><th>模型</th><th>状态</th><th>上下文</th><th>部署（故障转移顺序）</th></tr></thead>
+      <button id="md-new">➕ 手动新建</button>
+      <button id="md-pricing" title="每个外部 CLI 执行体能调哪些模型、分别什么价">💲 执行体与价格</button></div>
+    <div class="tablewrap"><table><thead><tr><th scope="col" class="acts">操作</th><th scope="col">模型</th><th scope="col">状态</th><th scope="col">上下文</th><th scope="col">部署（故障转移顺序）</th></tr></thead>
       <tbody>${modelRows}</tbody></table></div>
     <div class="toolbar" style="margin-top:22px"><h4 class="sec grow" style="margin:0">别名（对外稳定入口）</h4>
       <button class="primary" id="al-new">➕ 新建别名</button></div>
-    <div class="tablewrap"><table><thead><tr><th class="acts">操作</th><th>别名</th><th>策略</th><th>目标链</th><th>接口模型</th><th>解析结果</th><th>状态</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th scope="col" class="acts">操作</th><th scope="col">别名</th><th scope="col">策略</th><th scope="col">目标链</th><th scope="col">接口模型</th><th scope="col">解析结果</th><th scope="col">状态</th></tr></thead>
       <tbody>${aliasRows}</tbody></table></div>
     <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
     <div class="card"><div class="row-flex">
@@ -1460,12 +1498,16 @@ async function loadModels() {
     $("#pv-out").innerHTML = `
       <div class="small muted" style="margin-bottom:6px">${esc(r.reason || "")}
       ${r.alias ? ` · 别名 ${esc(r.alias)}` : ""} · 策略 ${esc(strategyLabel(r.strategy))}</div>
-      <div class="tablewrap"><table><thead><tr><th>#</th><th>部署</th><th>供应商</th><th>上游模型</th><th>入选</th></tr></thead>
+      <div class="tablewrap"><table><thead><tr><th scope="col">#</th><th scope="col">部署</th><th scope="col">供应商</th><th scope="col">上游模型</th><th scope="col">入选</th></tr></thead>
       <tbody>${plan}</tbody></table></div>
       <details class="raw"><summary>原始数据</summary><pre>${esc(JSON.stringify(r, null, 1).slice(0, 4000))}</pre></details>`;
   };
   $("#md-new").onclick = () => openModelModal(null);
   $("#md-market").onclick = openMarketModal;
+  // 执行体与价格原是侧栏一级入口（data-view="pricing"），2026-11-10 收进本页：
+  // 它回答的是「外部 CLI 能调哪些模型、多少钱」，与模型表同属「模型」这个对象，
+  // 单开一个一级入口等于让运营者自己记得「模型在三个地方都有一点」。
+  $("#md-pricing").onclick = () => switchView("pricing");
   $("#al-new").onclick = () => openAliasModal(null);
   document.querySelectorAll("[data-edit-model]").forEach(b =>
     b.onclick = () => openModelModal(b.dataset.editModel));
@@ -1995,7 +2037,7 @@ async function openMarketModal(presetPid) {
           <span class="small muted" id="mk-count"></span>
         </div>
         <div class="tablewrap" style="max-height:55vh"><table>
-          <thead><tr><th class="acts">操作</th><th>模型</th><th>可调用</th><th>上下文</th><th>说明</th><th>牌价 $/Mtok</th></tr></thead>
+          <thead><tr><th scope="col" class="acts">操作</th><th scope="col">模型</th><th scope="col">可调用</th><th scope="col">上下文</th><th scope="col">说明</th><th scope="col">牌价 $/Mtok</th></tr></thead>
           <tbody id="mk-rows"></tbody>
         </table></div>`;
       const updateCount = () => {
@@ -2376,7 +2418,7 @@ async function openChatGptModal() {
 
       <h4 class="sec">可用模型（别名 → 实际模型）</h4>
       <div class="tablewrap" style="max-height:200px;overflow:auto">
-        <table><thead><tr><th>名字</th><th>解析到</th></tr></thead>
+        <table><thead><tr><th scope="col">名字</th><th scope="col">解析到</th></tr></thead>
         <tbody id="cg-catalogue"></tbody></table>
       </div>
       <div class="small muted" style="margin-top:6px">
@@ -2674,15 +2716,26 @@ applyTheme(localStorage.getItem("zkai_theme") || "light");
 document.querySelectorAll("#tabs button[data-view]").forEach(b => b.onclick = () => switchView(b.dataset.view));
 mnavBuild();
 document.addEventListener("keydown", e => {
-  if (e.key !== "Escape") return;
-  $("#drawer").classList.remove("open");
   const open = MODAL_IDS.map(id => $(id)).find(el => el && el.classList.contains("show"));
-  if (open) open.classList.remove("show");
+  if (e.key === "Escape") {
+    $("#drawer").classList.remove("open");
+    if (open) closeModal("#" + open.id);
+    return;
+  }
+  /* Tab 锁在弹窗内：焦点不许跑到被遮罩盖住的页面上。 */
+  if (e.key !== "Tab" || !open) return;
+  const items = Array.from(open.querySelectorAll(
+    "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]"
+  )).filter(el => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
 /* 点遮罩空白处关闭弹窗（点在卡片内部不触发） */
 MODAL_IDS.forEach(id => {
   const el = $(id);
-  if (el) el.addEventListener("click", e => { if (e.target === el) el.classList.remove("show"); });
+  if (el) el.addEventListener("click", e => { if (e.target === el) closeModal(id); });
 });
 // 窗口拉宽回桌面时把卡片标签拉回表格（避免留下永久的 data-label）
 let _mResize = null;
@@ -2704,11 +2757,7 @@ window.addEventListener("resize", () => {
 const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) { state.token = urlToken; localStorage.setItem("zkai_admin_token", urlToken); }
 const urlView = new URLSearchParams(location.search).get("view");
-// 从 /ui/report 旧链接跳转过来的：自动切到体检视图
-const gotoReport = sessionStorage.getItem("zkai_goto_report");
-if (gotoReport) sessionStorage.removeItem("zkai_goto_report");
-const initialView = gotoReport ? "report"
-  : (urlView && LOADERS[urlView]) ? urlView : state.view;
+const initialView = (urlView && LOADERS[urlView]) ? urlView : state.view;
 history.replaceState(null, "", "/ui");
 switchView(initialView);
 /* ================= 积分消耗器 ================= */
@@ -2796,8 +2845,10 @@ function burnerFields(keys, cfg) {
 const burnLog = { es: null, follow: true, retries: 0, timer: null };
 
 /* epoch -> "MM-DD HH:MM"，和窗口账表格里周锚点输入框的格式一致：
-   运营者看到下次重置，填进输入框就能直接对上，不用换算。 */
-function cgBoundaryText(ts) {
+   运营者看到下次重置，填进输入框就能直接对上，不用换算。
+   （原名 cgBoundaryText —— cg 前缀指「客户端接入」，但它其实是通用格式化，
+   被消耗器页的窗口锚点借用，2026-11-10 改名去掉误导性前缀。） */
+function monthDayTime(ts) {
   const d = new Date(ts * 1000);
   const p = n => String(n).padStart(2, "0");
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -2858,8 +2909,8 @@ async function loadBurner() {
   const rows = (d.accounts || []).map(a => {
     const pct5 = a.cap_5h ? Math.min(100, a.burned_5h / a.cap_5h * 100) : 0;
     const pctW = a.cap_week ? Math.min(100, a.burned_week / a.cap_week * 100) : 0;
-    const b5 = a.next_5h_boundary ? cgBoundaryText(a.next_5h_boundary) : "—（滚动）";
-    const bW = a.next_week_boundary ? cgBoundaryText(a.next_week_boundary) : "—（全局）";
+    const b5 = a.next_5h_boundary ? monthDayTime(a.next_5h_boundary) : "—（滚动）";
+    const bW = a.next_week_boundary ? monthDayTime(a.next_week_boundary) : "—（全局）";
     const tag = a.absolute_capped ? `<span class="tag is-err">已达上限</span>`
       : a.parked ? `<span class="tag is-warn">停靠</span>`
       : a.anchored_5h ? `<span class="tag is-ok">锚点</span>`
@@ -2939,8 +2990,8 @@ async function loadBurner() {
           <br><br><b>周重置</b>：同上，照抄商汤控制台的「周刷新」列（如 <code>10-14 18:10</code> 或 <code>10月14日 18:10</code>）。</div>
       </details>
     </div>
-    <div class="tablewrap"><table><thead><tr><th>账号</th><th>5h 剩余</th><th>本周剩余</th>
-      <th>5h 重置</th><th>周重置</th><th>状态 / 参与</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th scope="col">账号</th><th scope="col">5h 剩余</th><th scope="col">本周剩余</th>
+      <th scope="col">5h 重置</th><th scope="col">周重置</th><th scope="col">状态 / 参与</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="6" class="muted">暂无数据（消耗器可能还没跑过）</td></tr>'}</tbody></table></div>
     <div class="row-flex" style="gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap">
       <button class="mini" id="rec-btn-diff">预演改动</button>
@@ -3305,14 +3356,22 @@ function reportAgoSec(s) {
   return s + " 秒前";
 }
 
-/* 模型 -> 人话标签：帮非程序员认出谁是谁、谁快谁慢 */
+/* 模型 ID -> 人话名称。只做**名称美化**，不判断谁快谁慢——
+   快慢是配置里的 speed 能力分和实测延迟的事，写在代码里就成了会过期的断言
+   （2026-11-10 之前这里给每个模型硬打「快·便宜」标签，改配置后全部失真）。
+   按名称排序匹配：先长后短，避免 glm-5.3-flash 被 glm-5.3 抢先命中。 */
 function reportLabel(model) {
-  if (/kimi-k3/i.test(model)) return 'Kimi K3<span class="tag k">旗舰·慢但强</span>';
-  if (/glm-5\.3-flash/i.test(model)) return 'GLM-5.3 Flash<span class="tag f">快·便宜</span>';
-  if (/glm-5\.3/i.test(model)) return 'GLM-5.3<span class="tag f">快·便宜</span>';
-  if (/step-5/i.test(model)) return 'Step 5<span class="tag f">快·便宜</span>';
-  if (/deepseek/i.test(model)) return 'DeepSeek V4<span class="tag f">快·便宜</span>';
-  if (/flash-lite|qwen|nemotron/i.test(model)) return '轻量模型<span class="tag f">快·便宜</span>';
+  const NAME = [
+    [/kimi-k3/i, "Kimi K3"],
+    [/glm-5\.3-flash/i, "GLM-5.3 Flash"],
+    [/glm-5\.3/i, "GLM-5.3"],
+    [/step-5/i, "Step 5"],
+    [/deepseek/i, "DeepSeek V4"],
+    [/flash-lite|qwen|nemotron/i, "轻量模型"],
+  ];
+  for (const [re, label] of NAME) {
+    if (re.test(model)) return esc(label);
+  }
   return esc(model);
 }
 
@@ -3466,11 +3525,14 @@ async function reportLoadHistory() {
   out.innerHTML = '<div class="card">正在读网关数据…</div>';
   try {
     // 不按成功状态过滤：失败的请求才是体检要看的东西。
-    const [stats, reqs] = await Promise.all([
+    // models 是给第 ④ 节「这套链为什么这样排」用的——那一节从实时配置推导，
+    // 所以必须拿到当前的模型/部署数据，不能用写死的模型名。
+    const [stats, reqs, models] = await Promise.all([
       api(`/admin/stats?days=${days}&recent=0`),
       api(`/admin/requests?limit=500`),
+      api(`/admin/models`).catch(() => null),
     ]);
-    reportRender(stats, reqs, days);
+    reportRender(stats, reqs, days, models && models.data);
   } catch (e) {
     out.innerHTML = `<div class="card"><div class="note warn">
       <b>读不到数据：</b>${esc(e.message)}<br><br>
@@ -3479,7 +3541,78 @@ async function reportLoadHistory() {
   }
 }
 
-function reportRender(stats, reqs, days) {
+/* 「这套链为什么这样排」——从**实时配置**推导，不写死模型名。
+
+   旧版是一张硬编码表（「带图片 → Kimi K3 / Step 5」「超大请求 → GLM-5.3 / Step 5 /
+   DeepSeek」「83% 走免费额度」）。问题是**它描述的是某一时刻的 config/models.yaml**：
+   运营者改了部署、换了别名、停用某个供应商之后，这张表照旧给出旧结论，而它挂在
+   「体检」页——一页以"看穿真相"为卖点的页面，给出过时结论比没有更糟。
+
+   现在改成从 /admin/models 的部署数据现场推导：
+   - 「谁能看图」= vision >= 8 的模型（阈值见 app/routing/capability.py 的能力路由）
+   - 「谁能吃大上下文」= context_window 最大的那几个
+   - 每条都带上实际数值，运营者能自己核对，而不是相信一段叙述。
+
+   args: models = /admin/models 的 data 数组（含每个模型的 deployments）
+*/
+function routingFactsHtml(models) {
+  const rows = models || [];
+  if (!rows.length) {
+    return '<div class="note warn">读不到模型配置，这一节暂时无法推导。'
+      + '点上方「刷新」重试；若持续为空，看「模型」页是否也读不到数据。</div>';
+  }
+  // 每个模型取它启用的部署里最强的那个能力值——一个模型挂了多个供应商时，
+  // 只要有一个部署支持看图，这个模型就「看得见图」。
+  const facts = rows.map(m => {
+    const deps = (m.deployments || []).filter(d => d.enabled !== false);
+    const caps = m.capabilities || {};
+    const vision = Math.max(0, ...deps.map(d => Number((d.capabilities || caps).vision) || 0));
+    const ctx = Math.max(0, ...deps.map(d => Number(d.context_window) || 0));
+    const speed = Number(caps.speed) || 0;
+    return {
+      id: m.id, name: m.display_name || m.id,
+      enabled: m.enabled !== false, deps: deps.length,
+      vision, ctx, speed,
+    };
+  }).filter(f => f.enabled && f.deps > 0);
+
+  if (!facts.length) {
+    return '<div class="note warn">当前没有任何「启用且有可用部署」的模型。</div>';
+  }
+
+  const names = list => list.map(f => `<b>${esc(f.name)}</b>`).join(" / ");
+  const VISION_MIN = 8;   // 与 capability.py 的「看得见图」门槛一致
+  const visionPool = facts.filter(f => f.vision >= VISION_MIN).sort((a, b) => b.vision - a.vision);
+  const longPool = facts.filter(f => f.ctx > 0).sort((a, b) => b.ctx - a.ctx).slice(0, 3);
+  const fastPool = facts.filter(f => f.speed >= 9).sort((a, b) => b.speed - a.speed);
+
+  const line = (q, pool, why) => {
+    if (!pool.length) {
+      return `<tr><td>${q}</td><td class="muted">当前没有模型满足</td>`
+        + `<td class="muted">${why}</td></tr>`;
+    }
+    return `<tr><td>${q}</td><td>${names(pool)}</td><td>${why}</td></tr>`;
+  };
+
+  const MAX_SHOW = 4;
+  return `
+    <div class="mscrl"><table><thead><tr><th scope="col">请求特征</th><th scope="col">谁够格接（按当前配置）</th>
+      <th scope="col">判据</th></tr></thead><tbody>
+      ${line("带图片", visionPool.slice(0, MAX_SHOW),
+        `vision 能力 ≥ ${VISION_MIN}（${visionPool.length ? "最高 " + visionPool[0].vision.toFixed(1) + "：" + esc(visionPool[0].name) : "无"}）`)}
+      ${line("超大上下文", longPool,
+        `按 context_window 排序，最大 ${longPool.length ? num(longPool[0].ctx) + " tokens（" + esc(longPool[0].name) + "）" : "—"}`)}
+      ${line("机械活（跑命令 / 读日志 / 批量改写）", fastPool.slice(0, MAX_SHOW),
+        `speed 能力 ≥ 9，快且通常也是便宜渠道`)}
+    </tbody></table></div>
+    <div class="note ok">这张表<b>从当前 config/models.yaml 现场推导</b>，不是写死的文案——
+      改部署 / 换别名 / 停用供应商之后刷新就会变。
+      真正的决策逻辑是 <span class="mono">app/routing/capability.py</span> 的能力打分 +
+      <span class="mono">config/models.yaml</span> 里每个别名的 targets 顺序与
+      requires 门槛；想看某一句具体会怎么走，用下面 ⑤ 的命令或「模型」页的「路由预览」。</div>`;
+}
+
+function reportRender(stats, reqs, days, models) {
   const u = stats.usage || {};
   const list = reqs.data || [];
   const ok = list.filter(r => r.status === 'success');
@@ -3527,11 +3660,11 @@ function reportRender(stats, reqs, days) {
 
   <div class="card">
     <h4 class="sec">② 谁在干活、慢不慢</h4>
-    <div class="mscrl"><table><thead><tr><th>模型</th><th>请求数</th><th>输入 tokens</th>
-      <th>占比</th><th>平均等</th><th>最长等</th></tr></thead>
+    <div class="mscrl"><table><thead><tr><th scope="col">模型</th><th scope="col">请求数</th><th scope="col">输入 tokens</th>
+      <th scope="col">占比</th><th scope="col">平均等</th><th scope="col">最长等</th></tr></thead>
       <tbody>${modelRows || '<tr><td colspan="6" class="muted">暂无数据</td></tr>'}</tbody></table></div>
-    <div class="note">「平均等」是这个模型的真实响应时长。<b>Kimi K3 明显慢，是因为它本来就不是速度杯</b>
-      （能力强但 speed 只有 6.0/10）；快的是 GLM / Step / DeepSeek 那几个（9.0+/10）。
+    <div class="note">「平均等」是这个模型的真实响应时长。模型之间的快慢差异<b>主要来自配置里的
+      speed 能力分</b>（见下面 ④ 的判据列），不完全等于健康度——旗舰模型为了准确度本来就慢。
       所以「慢」常常不是故障，是它分到了重活。</div>
   </div>
 
@@ -3549,22 +3682,8 @@ function reportRender(stats, reqs, days) {
   </div>
 
   <div class="card">
-    <h4 class="sec">④ 为什么派给这个模型（规则说人话）</h4>
-    <div class="mscrl"><table><thead><tr><th>如果你要…</th><th>网关会派</th><th>为什么</th></tr></thead><tbody>
-      <tr><td>带图片的请求</td><td><b>Kimi K3</b> 或 <b>Step 5</b></td>
-        <td>只有这两个「看得见图」（vision 能力 ≥8），其它模型结构上不可能入选</td></tr>
-      <tr><td>超大请求（≥10 万 token）</td><td><b>GLM-5.3 / Step 5 / DeepSeek</b></td>
-        <td>长上下文；K3 唯一的 1M 窗口已经吃满，机械长读该走空闲的链</td></tr>
-      <tr><td>带工具、且上下文 ≥2.4 万 token</td><td><b>GLM-5.3 / Step 5 / DeepSeek</b></td>
-        <td>重放几十个工具定义 + 几万历史，只为回一句「跑完了」——不需要旗舰推理</td></tr>
-      <tr><td>短问短答、或正经推理</td><td><b>Kimi K3</b></td>
-        <td>K3 有「接活标准」：请求本身得是强推理（证明 / 为什么 / 根因）才够格接</td></tr>
-      <tr><td>客户端直接写 <span class="mono">zk-k3</span></td><td><b>只用 Kimi K3</b></td>
-        <td>你明确指定就听你的，网关不插手</td></tr>
-    </tbody></table></div>
-    <div class="note ok">这套规则的用意：<b>强的模型只用来干它擅长的活</b>；
-      跑命令、读日志、批量改写这类机械活交给又快又不要钱的模型。
-      83% 的 token 走的是免费额度（商汤 / NVIDIA / 魔搭）。</div>
+    <h4 class="sec">④ 这套链为什么这样排（从当前配置实时推导）</h4>
+    ${routingFactsHtml(models)}
   </div>
 
   <details><summary class="sec" style="cursor:pointer;font-size:var(--fs-13);font-weight:600">⑤ 我想看更技术的（一次请求的完整决策过程）</summary>

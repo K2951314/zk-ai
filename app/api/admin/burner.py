@@ -191,6 +191,13 @@ async def burner_reconcile_apply(
     }
 
 
+#: ⚠ 前端零调用的端点（2026-11-10 审计）。保留它是因为**费率校准是一次性的
+#: 人工动作**：运营者拿商汤后台的「真实扣了多少积分」反推 rate_in/rate_out，
+#: 一季一次都算多。为它在控制台做一个按钮，等于把一年用一次的东西放到每天
+#: 开三次的页面上。
+#: 但「没入口」不等于「能用 curl 悄悄改」：消耗器已停用（burner.yaml 的
+#: disabled: true），停用期间改费率是白改。要用就在文档里写清调用方式，
+#: 并先确认消耗器已恢复（见 AGENTS.md「当前状态」）。
 @router.post("/burner/calibrate", summary="按实扣积分反推费率")
 async def burner_calibrate(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     state_file, config_file = _burner_paths()

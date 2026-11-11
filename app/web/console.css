@@ -23,93 +23,8 @@
          里每行都有，胶囊比有边方块更省横向空间，也更像「标签」而非「按钮」。
      色彩一律走 token，不写死 hex——暗色模式只换 token 值，不动一处选择器。
      ========================================================================== */
-  :root {
-    /* 底色三档：页面 / 沉一档（分组底、表头）/ 沉二档（代码块、次级分区） */
-    --bg: #faf9f6;
-    --bg-sunk: #f3f3ef;
-    --bg-muted: #e9ede9;
-    --surface: #ffffff;
-    --surface-2: #fdfdfb;
-    --raised: #ffffff;
-    --sidebar: #fdfdfb;
-    --field: #eef1ed;
-    /* 文字四档：正文 / 次正文 / 辅助 / 最弱（占位、禁用） */
-    --ink: #202a30;
-    --ink-2: #303c42;
-    --ink-3: #59656b;
-    --ink-4: #657176;
-    --text: var(--ink);
-    --text-2: var(--ink-2);
-    --muted: var(--ink-3);
-    /* 线条三档：分隔 / 强分隔（表头、输入框边）/ 弱分隔（卡片内嵌块） */
-    --line: #dfe4e1;
-    --line-strong: #d1d9d5;
-    --line-soft: #e9ede9;
-    --border: var(--line);
-    --border-strong: var(--line-strong);
-    /* 主色：深青 */
-    --accent: #176b75;
-    --accent-hover: #145f68;
-    --accent-ink: #145f68;
-    --accent-soft: rgba(23, 107, 117, .08);
-    --accent-softer: rgba(23, 107, 117, .05);
-    --accent-border: rgba(23, 107, 117, .28);
-    /* 语义色：红=坏 / 琥珀=需注意 / 绿=好 / 灰=禁用 */
-    --err: #b3402a;   --err-soft: rgba(179, 64, 42, .08);  --err-border: rgba(179, 64, 42, .25);
-    --warn: #b8873a;  --warn-soft: rgba(184, 135, 58, .09); --warn-border: rgba(184, 135, 58, .28);
-    --ok: #2f7d5c;    --ok-soft: rgba(47, 125, 92, .09);   --ok-border: rgba(47, 125, 92, .25);
-    --neutral: #6b7684; --neutral-soft: rgba(107, 118, 132, .09); --neutral-border: rgba(107, 118, 132, .22);
-    /* 排行色：前三名与其余（池子/模型页里用来标「谁是首选」） */
-    --rank-1: #b3402a; --rank-2: #a3642f; --rank-3: #96702e; --rank-rest: #6b7684;
-    /* 圆角刻度（参考站 six-step） */
-    --radius: 8px;          /* 控件 */
-    --radius-sm: 6px;
-    --radius-tile: 10px;    /* 小组件 */
-    --radius-card: 12px;    /* 卡片 */
-    --radius-panel: 14px;   /* 大面板 */
-    /* 阴影克制：浅色模式下几乎只用一道 1px 边，阴影只给浮层 */
-    --shadow-sm: 0 1px 2px rgba(32, 42, 48, .04);
-    --shadow-md: 0 3px 12px rgba(32, 42, 48, .08);
-    --shadow-lg: 0 12px 32px rgba(32, 42, 48, .16);
-    /* 字阶（上面注释里的九档） */
-    --fs-9: 9px; --fs-10: 10.5px; --fs-11: 11px; --fs-12: 12px;
-    --fs-13: 13px; --fs-14: 14.5px; --fs-15: 15px; --fs-20: 20px; --fs-26: 26px;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
-            "Cascadia Mono", "Liberation Mono", monospace;
-    --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-            "Hiragino Sans GB", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
-  }
-  :root[data-theme="dark"] {
-    --bg: #13191c;
-    --bg-sunk: #182024;
-    --bg-muted: #202a2f;
-    --surface: #1a2226;
-    --surface-2: #1d272b;
-    --raised: #202a2f;
-    --sidebar: #161e21;
-    --field: rgba(255, 255, 255, .06);
-    --ink: #e7eceb;
-    --ink-2: #d2dada;
-    --ink-3: #a5b0b3;
-    --ink-4: #89979d;
-    --line: rgba(255, 255, 255, .08);
-    --line-strong: rgba(255, 255, 255, .12);
-    --line-soft: rgba(255, 255, 255, .06);
-    --accent: #12ccd8;
-    --accent-hover: #2ce2e8;
-    --accent-ink: #2ce2e8;
-    --accent-soft: rgba(18, 204, 216, .12);
-    --accent-softer: rgba(18, 204, 216, .06);
-    --accent-border: rgba(18, 204, 216, .32);
-    --err: #d86a52;  --err-soft: rgba(216, 106, 82, .12);  --err-border: rgba(216, 106, 82, .32);
-    --warn: #d3b26a; --warn-soft: rgba(211, 178, 106, .12); --warn-border: rgba(211, 178, 106, .32);
-    --ok: #5fc79a;   --ok-soft: rgba(95, 199, 154, .12);   --ok-border: rgba(95, 199, 154, .32);
-    --neutral: #7b869a; --neutral-soft: rgba(123, 134, 154, .12); --neutral-border: rgba(123, 134, 154, .28);
-    --rank-1: #d86a52; --rank-2: #d18a5e; --rank-3: #d3b26a; --rank-rest: #7b869a;
-    --shadow-sm: none;
-    --shadow-md: 0 6px 18px rgba(0, 0, 0, .35);
-    --shadow-lg: 0 16px 40px rgba(0, 0, 0, .45);
-  }
+  @import url("/ui/tokens.css");
+
 
   :root[data-theme="dark"] .card,
   :root[data-theme="dark"] .tablewrap,
@@ -121,6 +36,21 @@
   :root[data-theme="dark"] .toast { box-shadow: var(--shadow-md); }
   :root[data-theme="dark"] .nav-item.active { background: var(--accent-soft); }
   * { box-sizing: border-box; }
+  /* 可访问性：屏读专用文本 + 首 Tab 可见的跳转链接 + 统一焦点环。
+     原来只有 .nav-item 有 :focus-visible，按钮 / 表格行键盘走查时看不见焦点。 */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  .skip-link {
+    position: absolute; left: 8px; top: -56px; z-index: 100;
+    background: var(--surface); color: var(--accent);
+    border: 1px solid var(--accent-border); border-radius: var(--radius-sm);
+    padding: 8px 12px; font-size: var(--fs-13); text-decoration: none;
+    transition: top .14s;
+  }
+  .skip-link:focus { top: 8px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   html { -webkit-text-size-adjust: 100%; }
   /* 根节点水平禁止滚动：否则任何一处超宽都会把视口撑开（
      innerWidth 翻到 869），固定定位的底部 Tab 就会飘到屏幕外。
@@ -128,7 +58,6 @@
      position:sticky——所以 .app 用 height:100vh + overflow:hidden 锁死，
      .content 独立滚动，sidebar 就自然钉住不动了。 */
   html, body { max-width: 100%; overflow-x: hidden; }
-  html { overflow-x: hidden; }
 
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -154,9 +83,9 @@
   }
   .brand .mark {
     width: 28px; height: 28px; border-radius: 7px; flex: none;
-    background: linear-gradient(135deg, var(--accent), #4f8cff);
+    background: var(--accent-solid);
     display: grid; place-items: center; color: #fff; font-size: var(--fs-15);
-    box-shadow: 0 2px 6px rgba(37, 99, 235, .32);
+    box-shadow: var(--shadow-sm);
   }
   .brand .name { font-size: var(--fs-15); font-weight: 700; letter-spacing: .2px; color: var(--text); }
   .brand .sub { font-size: var(--fs-11); color: var(--muted); margin-top: 1px; }
@@ -179,6 +108,19 @@
     background: var(--accent-soft); color: var(--accent); font-weight: 600;
   }
   .nav-item .ico { width: 16px; text-align: center; flex: none; opacity: .9; }
+  /* 已停用的功能仍留在侧栏（它在磁盘上、配置里都还在，假装不存在会让
+     「怎么恢复」变成要翻文档才能回答的问题），但必须一眼看出它不干活。
+     灰显 + 后缀「已停用」；点击仍然可用，进去是只读账本与日志。
+     ⚠ .nav-off 是独立类（不挂在 .nav-item 下）——移动端抽屉里的
+     「更多」也用同一个徽标，挂在 .nav-item 下那里就失效。 */
+  .nav-item.is-disabled { color: var(--muted); opacity: .72; }
+  .nav-item.is-disabled.active { color: var(--muted); background: var(--bg-sunk); }
+  .nav-off {
+    margin-left: auto; font-style: normal; font-size: var(--fs-10);
+    font-weight: 600; letter-spacing: .3px; padding: 1px 6px;
+    border-radius: 999px; background: var(--bg-muted); color: var(--muted);
+    flex: none;
+  }
   .nav-item .badge {
     margin-left: auto; font-size: var(--fs-11); font-weight: 600;
     background: var(--err); color: #fff; border-radius: 999px;
@@ -260,9 +202,9 @@
   button:hover:not(:disabled), .btn:hover { border-color: var(--accent-border); color: var(--accent); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.primary {
-    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+    background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); font-weight: 600;
   }
-  button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  button.primary:hover:not(:disabled) { background: var(--accent-solid-hover); border-color: var(--accent-solid-hover); color: var(--on-accent); }
   button.danger { color: var(--err); border-color: var(--err-border); }
   button.danger:hover:not(:disabled) { background: var(--err-soft); color: var(--err); border-color: var(--err); }
   button.mini { padding: 1px 9px; font-size: var(--fs-12); border-radius: 999px; line-height: 18px; }
@@ -408,20 +350,11 @@
   td.name { white-space: normal; word-break: break-all; min-width: 168px; }
   td.name .sub { display: block; font-size: var(--fs-11); color: var(--muted);
                  margin-top: 2px; line-height: 1.6; }
-  td.acts, th.acts {
-    position: sticky; left: 0; z-index: 2;
-    background: var(--surface); border-right: 1px solid var(--line);
-    text-align: right; white-space: nowrap; padding: 7px 10px;
-  }
-  /* 主键列（模型 / 别名 / 凭据名）允许换行，别为它撑出横向滚动 */
-  td.name { white-space: normal; word-break: break-all; min-width: 168px; }
-  td.name .sub { display: block; font-size: var(--fs-11); color: var(--muted);
-                 margin-top: 3px; line-height: 1.6; }
   /* 操作列固定在最左侧：宽表右滑时按钮永远在手边，不用先滚到底 */
   th.acts, td.acts {
     position: sticky; left: 0; z-index: 2;
     background: var(--surface); border-right: 1px solid var(--border);
-    text-align: right; white-space: nowrap;
+    text-align: right; white-space: nowrap; padding: 7px 10px;
   }
   thead th.acts { z-index: 3; }
   tbody tr:hover td.acts { background: var(--bg-sunk); }
@@ -627,7 +560,9 @@
   #auth {
     position: fixed; inset: 0; background: rgba(15, 23, 42, .42);
     display: none; align-items: center; justify-content: center;
-    z-index: 50; backdrop-filter: blur(3px); padding: 20px;
+    /* z-index 由上面「#auth { z-index: 70 }」统一给出：
+       这里曾重复写 50，反而盖过了 70，让登录层被弹窗遮住。 */
+    backdrop-filter: blur(3px); padding: 20px;
   }
   #auth.show { display: flex; }
   #auth .card { width: 440px; max-width: 94vw; box-shadow: var(--shadow-lg); }
@@ -708,8 +643,9 @@
     .grid.kpis, .cfg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .formgrid { grid-template-columns: minmax(0, 1fr); }
     .grid.kpis .kpi, .cfg-grid .field { min-width: 0; }
-    /* 手机 KPI 只留前两个最关键的（账号数、目标池），其余次要指标折叠 */
-    .grid.kpis .kpi:nth-child(n+3) { display: none; }
+    /* 所有 KPI 都显示，2 列自动换行。原先 :nth-child(n+3) 把第 3 个起
+       直接隐藏：用量页的成本、消耗器页另外 4 个指标在手机上永远看不到。
+       响应式不能以丢数据为代价（2026-11-11 修）。 */
     .kpi .k-value { font-size: var(--fs-15); overflow-wrap: anywhere; }
     .kpi .k-sub { font-size: var(--fs-11); overflow-wrap: anywhere; }
 
@@ -724,7 +660,7 @@
       display: grid; grid-template-columns: minmax(0, 1fr);
       gap: 1px; padding: 10px 11px;
       border: 1px solid var(--border); border-radius: 12px;
-      background: var(--panel); margin-bottom: 9px;
+      background: var(--surface); margin-bottom: 9px;
       box-shadow: var(--shadow-sm);
     }
     .tablewrap tbody td {
@@ -802,7 +738,7 @@
     /* 弹窗标题吸顶：长表单滚动时 ✕ 关闭按钮始终可见 */
     .modal-mask .card > h3 {
       position: sticky; top: 0; z-index: 3;
-      background: var(--panel);
+      background: var(--surface);
       padding: 6px 0; margin-top: -6px;
     }
     /* 配置片段代码块：手机上别占 280px 满屏，长串允许断行不外溢 */
@@ -819,7 +755,7 @@
     /* ---- 6. 日志、预览与字体 ---- */
     #bl-log { height: 220px; font-size: 11px; }
     .note { font-size: var(--fs-12); }
-    .view-head h2 { font-size: var(--fs-16); }
+    .view-head h2 { font-size: var(--fs-15); }
     .view-head .desc { font-size: var(--fs-12); }
     h4.sec { font-size: var(--fs-13); margin-top: 18px; }
     pre { font-size: 11px; }
@@ -830,7 +766,7 @@
        手机上把长页面改成「手风琴」：一次只展开一个片段。
        消耗器页 3500+px，全展开时运营者得滚半天才找得到想要的那一节。
        ============================================================ */
-    .msec { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); margin-bottom: 9px; overflow: hidden; }
+    .msec { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); margin-bottom: 9px; overflow: hidden; }
     .msec > .msec-head {
       display: flex; align-items: center; gap: 9px; width: 100%;
       padding: 12px 13px; background: none; border: none; text-align: left;
@@ -855,15 +791,20 @@
     .mnav-row {
       display: flex; align-items: center; gap: 10px;
       padding: 11px 12px; border: 1px solid var(--border);
-      border-radius: 10px; background: var(--panel);
+      border-radius: 10px; background: var(--surface);
       color: var(--text); text-decoration: none; font-size: var(--fs-13);
     }
     .mnav-row .ico { font-size: 17px; }
     .mnav-row:active { background: var(--accent-soft); }
 
-    /* 点击区域不小于 34px */
-    button, .nav-item, #mnav a, select, input, textarea { min-height: 34px; }
-    /* ---- 7. narrow-screen fix (2026-10-20) ---- */
+    /* 触控命中区 44px：Apple HIG / WCAG 2.1 AAA 的体验目标。
+       WCAG 2.2 AA 的底线是 24px，原先 34px 合规但低于本项目 §7 自定的 44px。 */
+    button, .nav-item, #mnav a, select, input, textarea { min-height: 44px; }
+    /* ---- 7–9. 窄屏溢出防护（原三轮补丁，规则保持原样）----
+       同一根因：基础层 tbody td 的 nowrap 会把长串撑到几百 px，
+       进而把固定定位的底部 Tab 带出视口。三组规则分别是
+       容器复位 / 单元格与徽章换行 / 行内代码换行，缺一层都会复发。
+       别为了「去掉 !important」单独删其中一组。 */
     .tablewrap { max-height: none !important; overflow: visible !important; }
     .tablewrap thead th { position: static !important; }
     .tablewrap tbody td.acts, .tablewrap tbody td.acts-end,
@@ -872,7 +813,6 @@
       border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
     .mscrl > table { min-width: 520px; }
     .mscrl > table td, .mscrl > table th { white-space: normal; word-break: break-all; }
-    /* ---- 8. narrow-screen fix round2 (2026-10-20) ---- */
     /* 徽章与胶囊：基础层 nowrap 会把卡片横向顶出，窄屏必须允许断行收缩 */
     .pill, .chip { white-space: normal !important; word-break: break-all; overflow-wrap: anywhere; max-width: 100%; }
     /* 模型表部署链：td 内的 div 默认不收缩，允许其换行并约束宽度 */
@@ -885,7 +825,6 @@
     .toolbar button { flex: 1 1 auto; min-width: 0; }
     /* 标签/提示条（tag 类）同样允许断行 */
     .tag { white-space: normal !important; word-break: break-all; }
-    /* ---- 9. narrow-screen fix round3 (2026-10-20) ---- */
     /* 探针实测：td/div.note 等容器继承基础层 tbody td 的 nowrap，
        把内部 inline 元素（b/code/chip/pill）拉成超长宽度并溢出。
        这里把这些容器的换行强制复位为 normal。 */
@@ -901,7 +840,7 @@
    样式用 .report- 前缀，避免与控制台其他视图冲突。
    ============================================================ */
 .report-live {
-  background: var(--panel); border: 1px solid var(--border);
+  background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;
 }
 .report-live-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
@@ -918,7 +857,7 @@
 }
 .report-live-cell {
   border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
-  background: var(--panel-2);
+  background: var(--bg-sunk);
 }
 .report-live-cell .l { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
 .report-live-cell .v {
@@ -931,13 +870,13 @@
 .report-live-cell.err .v { color: var(--err); }
 .report-rate {
   display: flex; height: 6px; border-radius: 3px; overflow: hidden;
-  margin-top: 8px; background: var(--panel); border: 1px solid var(--border);
+  margin-top: 8px; background: var(--surface); border: 1px solid var(--border);
 }
 .report-rate i { display: block; height: 100%; }
 .report-rate .r-ok { background: var(--ok); }
 .report-rate .r-err { background: var(--err); }
 .report-rate .r-rl { background: var(--warn); }
-.report-rate .r-idle { background: var(--strong); }
+.report-rate .r-idle { background: var(--line-strong); }
 .report-alerts { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .report-alert {
   font-size: 12.5px; padding: 9px 12px; border-radius: 0 8px 8px 0;
@@ -946,7 +885,7 @@
 .report-alert.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
 .report-alert.err { background: var(--err-soft); border-color: var(--err); color: var(--err); }
 .report-alert b { font-weight: 650; }
-.report-bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.report-bar { height: 6px; background: var(--bg-sunk); border-radius: 3px; overflow: hidden; min-width: 60px; }
 .report-bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .report-kpis-head { font-size: 12px; color: var(--muted); margin: 0 0 8px 2px; }
 .report-kpi .v.is-warn { color: var(--warn); }

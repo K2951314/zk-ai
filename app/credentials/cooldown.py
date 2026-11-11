@@ -7,6 +7,7 @@ rate-limited key backs off instead of hammering the provider.
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass, field
 
 from app.core.logging import get_logger
@@ -14,6 +15,9 @@ from app.core.logging import get_logger
 logger = get_logger("credentials.cooldown")
 
 _VALID_SCOPES = frozenset({"credential", "account", "provider"})
+
+#: 「重置时刻刚过」的最小等待（秒），见 :meth:`CooldownPolicy.seconds_until_quota_reset`。
+_MIN_RESET_WAIT = 60.0
 
 
 @dataclass(slots=True)
@@ -32,6 +36,24 @@ class CooldownPolicy:
     #: re-sweeping the sibling keys and escalating their counters for nothing.
     quota_cooldown: float = 1800.0
     quota_cooldown_max: float = 14400.0
+    #: 「每日/每窗口额度几点重置」，如 ``"00:00"``（本地时间）。
+    #: 空字符串 = 不识别（回到旧的固定 ``quota_cooldown`` 行为）。
+    #:
+    #: 为什么需要（2026-11-10 实测）：ModelScope 是「每日 200 魔粒」，额度耗尽
+    #: 后上游回 ``insufficient balance``。旧逻辑把它当普通额度耗尽，长休 1800s
+    #: 后重试——离次日重置还有 6 小时的话，接下来 12 次重试全是白撞。
+    #: 运营者的观感就是「每天都要我手动启用一次」。
+    #: 有了这个字段，长休 = **距下一个重置点的秒数**，到点自然解禁。
+    #:
+    #: 只影响 ``quota_exhausted`` 这一类（``entitlement exhausted`` /
+    #: ``insufficient balance`` / ``额度用尽``），不影响 tpm/rpm 的分钟级退避：
+    #: 那是「等一会儿就好」，这是「等窗口翻转」，两种时间尺度不能混。
+    quota_reset_at: str = ""
+    #: 重置时区偏移（小时），默认 +8（北京时间）。
+    #: 不用 zoneinfo：Windows 上 ``tzdata`` 不是标准库的一部分，实测
+    #: ``ZoneInfoError: No time zone found with key Asia/Shanghai``——
+    #: 为了一个固定偏移引入一个包不值得（与 config_watch 不用 watchdog 同理）。
+    quota_reset_utc_offset: float = 8.0
     auth_cooldown: float = 0.0
     server_error_cooldown: float = 15.0
     deployment_cooldown: float = 30.0
@@ -109,6 +131,49 @@ class CooldownPolicy:
         scope = self.throttle_scopes.get(str(kind), "credential")
         return scope if scope in _VALID_SCOPES else "credential"
 
+    def seconds_until_quota_reset(
+        self, now: float | None = None, *, spec: str | None = None
+    ) -> float | None:
+        """距下一个「额度重置时刻」还有几秒；没配置就返回 None。
+
+        *spec* 是 ``"HH:MM"``，不传则用策略自带的 :attr:`quota_reset_at`。
+        供应商级的值（``providers.yaml`` 的 ``options.quota_reset_at``）优先，
+        经 ``ErrorInfo.quota_reset_at`` 穿到这里——各家的窗口时刻本来就不同，
+        ModelScope 是每日 08:00（实测，见 providers.yaml 注释），
+        商汤是 5 小时滚动窗口。
+
+        按 :attr:`quota_reset_utc_offset` 指定的时区解释（默认 +8，北京时间）。
+        今天那一刻已经过了就顺延到明天。
+
+        刻意不返回 0：调用方拿到 0 会当「不用等」，而重置刚过、上游还没翻账
+        的那几十秒正是最容易误判的窗口。至少给 ``_MIN_RESET_WAIT`` 秒。
+        """
+        raw = self.quota_reset_at if spec is None else spec
+        spec_text = (raw or "").strip()
+        if not spec_text:
+            return None
+        parts = spec_text.split(":")
+        if len(parts) != 2:
+            logger.warning("quota_reset_at=%r 不是 HH:MM 格式，忽略", raw)
+            return None
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            logger.warning("quota_reset_at=%r 不是 HH:MM 格式，忽略", raw)
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            logger.warning("quota_reset_at=%r 超出合法范围，忽略", raw)
+            return None
+
+        moment = time.time() if now is None else now
+        offset = self.quota_reset_utc_offset * 3600.0
+        local = moment + offset
+        day_start = local - (local % 86400.0)  # 该时区当天的零点
+        target = day_start + hour * 3600.0 + minute * 60.0
+        if target <= local:
+            target += 86400.0
+        return max(_MIN_RESET_WAIT, target - local)
+
     def _apply_jitter(self, seconds: float) -> float:
         """Spread recovery timestamps so sibling keys do not wake in lockstep."""
         if self.jitter > 0 and seconds > 1:
@@ -135,6 +200,7 @@ class CooldownPolicy:
         consecutive_rate_limits: int = 0,
         configured: float | None = None,
         quota_exhausted: bool = False,
+        quota_reset_at: str | None = None,
     ) -> float:
         """Resolve the cooldown duration for a classified error."""
         if configured is not None and configured > 0:
@@ -143,6 +209,20 @@ class CooldownPolicy:
             return self.deployment_cooldown
         if error_type in {"rate_limit_error", "overloaded"}:
             if quota_exhausted:
+                # 配了「重置时刻」就以它为准：额度型长休的全部意义是「等窗口
+                # 翻转」，等过头是白撞、等不够也是白撞。
+                #
+                # 这里**刻意不再套 quota_cooldown_max**：那个上限（默认 4h）是
+                # 给「不知道几点恢复」的猜测性长休设的保险丝，而重置时刻是已知
+                # 事实。套上去的后果实测过——北京 11:23 算出还要等 20.6h，被截断
+                # 成 4h，于是每 4 小时醒一次白撞 429，一天白烧 4 次上游往返。
+                # 反过来，上游给了 Retry-After 就以它为准：窗口可能比日重置
+                # 更早打开，猜得再准也不如上游自己说。
+                reset_wait = self.seconds_until_quota_reset(spec=quota_reset_at)
+                if reset_wait is not None:
+                    if retry_after is not None and retry_after > 0:
+                        return self._apply_jitter(retry_after)
+                    return self._apply_jitter(reset_wait)
                 # The plan/credit quota will not return in 60s; back it off hard.
                 if retry_after is not None and retry_after > 0:
                     return self._apply_jitter(

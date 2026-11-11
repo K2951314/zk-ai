@@ -1,6 +1,6 @@
 """Open the gateway console with the admin token pre-filled.
 
-The console is a browser page talking to ``/admin/*`` with an
+The console is a browser page talking to ``/zkadmin/*`` with an
 ``X-Admin-Token`` header. Requiring an operator to find that token in ``.env``
 and paste it into a dialog every time (and especially after a ``.env`` edit, when
 the stored value silently 401s) is the single biggest piece of friction in this
@@ -55,7 +55,7 @@ def console_url(*, path: str = "ui", port: int = 8317, token: str | None = None)
     The token is passed as a parameter rather than via the header for one reason
     only: it is a *local* tool, the page caches it in localStorage anyway, and the
     alternative is an operator typing it in by hand. ``ZKAI_API_TOKEN`` (the
-    inference surface) is never involved here - /admin/* only.
+    inference surface) is never involved here - /zkadmin/* only.
     """
     url = f"http://127.0.0.1:{port}/{path.lstrip('/')}"
     if token:

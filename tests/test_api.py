@@ -669,20 +669,19 @@ async def test_ui_console_is_served_without_token(api) -> None:
     assert "ZK-AI 控制台" in response.text
 
 
-async def test_report_page_is_served(api) -> None:
-    """/ui/report 体检页要能直接打开（运营者从侧栏点进来）。
+async def test_the_old_report_route_is_gone(api) -> None:
+    """/ui/report 已于 2026-11-10 删除，返回 404。
 
-    与 /ui 同样是静态壳：页面本身不含数据，数据由浏览器带令牌去 /admin/* 取，
-    所以这里不需要令牌也能拿到 200。少了这条测试，「侧栏有个入口但点是 404」
-    这种问题只能等运营者自己发现。
+    历史：体检先是独立页 ``report.html``（2026-10-07），后来改成控制台内置视图
+    ``data-view="report"``，独立页只剩一个跳转壳。保留一个「点进去自动跳」的
+    路由等于永远维护一条没人需要的重定向——运营者要体检就点侧栏。
+
+    钉成 404 而不是删掉这条测试：**如果将来有人手滑把路由加回来**，
+    这里会立刻变红，而不是等半年后没人记得它为什么存在。
     """
     client, _ = api
     response = await client.get("/ui/report")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "体检" in response.text
-    # 它要跳回控制台，不能是个死胡同
-    assert 'href="/ui"' in response.text
+    assert response.status_code == 404
 
 
 async def test_admin_requests_list_filters_and_pages(api) -> None:

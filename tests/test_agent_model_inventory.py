@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from app.services.agent import model_inventory as mi
 from app.services.agent import usage_ledger
 
@@ -73,11 +75,46 @@ def test_gateway_without_numbers_is_unknown_not_zero() -> None:
 
 
 def test_executor_free_tier_without_history_is_subscription() -> None:
+    """拿不到兑换率的免费档：标「订阅内」，不编单价，也不冒充「确定免费」。
+
+    2026-11-11 改了措辞——原文「免费额度/订阅内，单价未知」容易让人以为
+    「额度明确是免费的」；实际只是配置标了 ``cost_tier: free``。
+    现在有兑换率就优先用它（见下一条），没有才退到这个口径。
+    """
     data = mi.build(gateway_models=[], executors=[_executor("free")], observed={})
     model = data["executors"][0]["models"][0]
     assert model["price_source"] == "subscription"
     assert model["input_per_mtok"] is None      # 不换算单价
-    assert "免费额度" in model["price_note"]
+    assert "免费档" in model["price_note"]
+    assert "拿不到兑换率" in model["price_note"]
+
+
+def test_executor_with_desktop_credits_rate_is_tariff() -> None:
+    """桌面端兑换率（credits）存在时，price_source 是 tariff 而不是订阅内。
+
+    这是外部 CLI **唯一的真实价格口径**——有价目表还说「价格未知」就是撒谎。
+    """
+    executor = _executor("free", [
+        {"id": "glm-5.3-flash", "free": False, "rate": 0.08,
+         "tools": True, "images": True, "max_input_tokens": 1000000},
+    ])
+    data = mi.build(gateway_models=[], executors=[executor], observed={})
+    model = data["executors"][0]["models"][0]
+    assert model["price_source"] == "tariff"
+    assert model["rate"] == pytest.approx(0.08)
+    assert "0.08" in model["price_note"]
+    # 能力字段要透传，前端靠它显示「工具 / 图片 / 上下文」
+    assert model["tools"] is True
+    assert model["max_input_tokens"] == 1000000
+
+
+def test_executor_with_zero_rate_says_free_explicitly() -> None:
+    """兑换率 0 是**真的不收费**，要说清楚，别落到「未知」。"""
+    executor = _executor("free", [{"id": "hy4free", "free": True, "rate": 0.0}])
+    data = mi.build(gateway_models=[], executors=[executor], observed={})
+    model = data["executors"][0]["models"][0]
+    assert model["price_source"] == "tariff"
+    assert "不计费" in model["price_note"]
 
 
 def test_executor_paid_without_history_is_unknown() -> None:

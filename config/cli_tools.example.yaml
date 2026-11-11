@@ -90,9 +90,18 @@ tools:
     enabled: false
     command: codebuddy
     backend: official            # 用自家订阅额度，不指向网关
-    # 2026-11-06：改用 Hy4（运营者指定，当前免费）。准确 id 是 hy4-preview，
-    # 来自 GET /zkadmin/agent/executors/cli-grinder/models 的 live 清单（共 26 个）。
-    model: hy4-preview
+    # ⚠ 真实模型清单**不在这个文件里**，也不在任何离线文件里——
+    #   `app/services/agent/cli/models.py` 的 `probe_models()` 会**真发请求**
+    #   到本机 wb-proxy（`ZKAI_WB_PROXY_URL`，默认 127.0.0.1:8787），
+    #   只有产出了内容的模型才算可用。
+    #   2026-11-11 三方实测对照（同一个账号）：
+    #     `codebuddy --help` 26 个 → 17 个不存在（静态帮助文字）
+    #     桌面缓存 65 个 → 只有 35 个是对话模型，26 个 400，4 个是补全/图片
+    #     wb-proxy `/v1/models` 14 个 → 8 个调不通，还漏了能用的 hy4free
+    #   **没有任何清单可信**，与「/v1/models 是目录不是你能调的」是同一条。
+    # 下面是免费 + 便宜的常用档，**仅作实测缓存为空时的离线兜底**。
+    # 改这里不会让一个调不通的模型变可用。
+    model: hy4free                # ×0.00 免费，960K 上下文，支持工具
     cost_tier: free
     timeout: 300
     approval_mode: plan          # 无头只允许只读分析；写操作必须人工开档
@@ -100,10 +109,9 @@ tools:
     effort: max
     # 上下文：--autocompact 上限 1M（100k~1M），到 1M 才压缩
     context_window: 1000000
-    # 完整清单以 live 接口为准；下面是 2026-11-06 快照，方便控制台下拉直接看到全部模型
-    # free_models 只是展示标签，真实计费以工具自报的 total_cost_usd 为准
-    models: [hy4-preview, hy3, deepseek-v4.1-flash, deepseek-v4.1-flash-sg, glm-5.3, glm-5.3-flash, glm-5.2, kimi-k3, kimi-k3.1-pro, kimi-k3.1-pro-highspeed, minimax-m3.1-flash, gemini-3.8-flash, gpt-6-astra, gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, grok-4.7, default-model, fast-model, balanced-model, primary-model]
-    free_models: [hy4-preview, deepseek-v4.1-flash]
+    models: [hy4free, hy4flash-exp1, hy3, glm-5.3-flash, minimax-m3.1-flash, deepseek-v4.1-flash, deepseek-v4-flash, fast-model, balanced-model]
+    # 兑换率 ×0.00 的（实测确认可用，来自桌面端 credits，2026-11-11）
+    free_models: [hy4free, hy4flash-exp1, hy4flash-exp2, hy4flash-exp3, hy4flash-exp4, hy3, hy3-b, hy3-c]
 
   # -------------------------------------------------------------------------
   # Editor SDK（本机 MCP 服务，免鉴权）—— 2026-11-07 实测

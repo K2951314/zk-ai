@@ -18,7 +18,6 @@ router = APIRouter(tags=["web"])
 _WEB = Path(__file__).resolve().parent.parent / "web"
 _INDEX = _WEB / "index.html"
 _AGENT = _WEB / "agent.html"
-_REPORT = _WEB / "report.html"
 _EVENTS = _WEB / "events.html"
 _TASKSPACES = _WEB / "taskspaces.html"
 _MODELS = _WEB / "models.html"
@@ -27,10 +26,13 @@ _MODELS = _WEB / "models.html"
 #: independently and the HTML shell stays under 1k lines).
 #: ``common.js`` 是独立页（agent/events/taskspaces/models）的共享外壳：
 #: 令牌管理 + 带 401 识别的 api + 登录兜底（2026-11-08 手机远控 M1）。
+#: ``tokens.css`` 是全站唯一设计 token 源，五个页面用 @import 引用它
+#: （2026-11-11），所以必须和 console.css 一样走同源 no-store 路由。
 _STATIC_ASSETS: dict[str, tuple[str, str]] = {
     "console.css": ("text/css; charset=utf-8", "console.css"),
     "console.js": ("application/javascript; charset=utf-8", "console.js"),
     "common.js": ("application/javascript; charset=utf-8", "common.js"),
+    "tokens.css": ("text/css; charset=utf-8", "tokens.css"),
 }
 
 #: 控制台是本地运维页，页面/脚本都很小但改动频繁。默认不带缓存头时浏览器会
@@ -52,8 +54,8 @@ async def console() -> HTMLResponse:
     return HTMLResponse(html, headers=_NO_STORE)
 
 
-# IMPORTANT: /ui/agent and /ui/report must be registered BEFORE /ui/{asset},
-# otherwise FastAPI matches them as asset="agent" / asset="report" and 404s.
+# IMPORTANT: /ui/agent must be registered BEFORE /ui/{asset},
+# otherwise FastAPI matches it as asset="agent" and 404s.
 @router.get("/ui/agent", include_in_schema=False, response_class=HTMLResponse)
 async def agent_console() -> HTMLResponse:
     """The ZK-Agent task console (single-file vanilla JS)."""
@@ -63,24 +65,6 @@ async def agent_console() -> HTMLResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": {"message": "Agent 任务台页面文件缺失"}},
-        ) from exc
-    return HTMLResponse(html, headers=_NO_STORE)
-
-
-@router.get("/ui/report", include_in_schema=False, response_class=HTMLResponse)
-async def health_report() -> HTMLResponse:
-    """The plain-language gateway report (who serves what, and why it is slow).
-
-    Same data endpoints as the console (``/admin/stats`` + ``/admin/requests``),
-    so it stays protected by ``require_admin``; this shell carries no data of its
-    own and reuses the token already stored in the browser by the console.
-    """
-    try:
-        html = _REPORT.read_text(encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - file ships with the package
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"message": "体检页面文件缺失"}},
         ) from exc
     return HTMLResponse(html, headers=_NO_STORE)
 

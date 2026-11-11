@@ -27,7 +27,14 @@ from app.core.errors import ZKAIError
 from app.services.agent import model_inventory as model_inventory_service
 from app.services.agent import taskspace, usage_ledger
 from app.services.agent.cli import load_cli_registry
-from app.services.agent.cli.models import cached_models, discover_models
+from app.services.agent.cli.models import (
+    cached_model_details,
+    cached_models,
+    discover_model_details,
+    discover_models,
+    probe_models,
+    read_desktop_catalog,
+)
 from app.services.agent.model_catalog import load_catalog as load_model_catalog
 from app.services.agent.service import AgentService
 
@@ -165,10 +172,17 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
     for role in registry.known_roles():
         rc = registry.roles[role]
         tool = registry.tools[rc.tool]
-        # CLI 自己的清单最可信；但只读缓存，绝不在这里同步启动 node 进程。
-        # 缓存冷时先用配置快照，前端点开某个执行体再走 /executors/{role}/models 拉 live。
+        # 清单来源分三级（见 docs/模型市场与预设.md）：
+        #   probed = 真发请求验证过；live = CLI 自报；config = 配置快照。
+        # 只有 probed 算数——另两级如实标注「未实测」，别让面板看起来像验证过。
         live = cached_models(tool.name, tool.command)
         models = live or tool.models or ([tool.model] if tool.model else [])
+        # 兑换率只有桌面端缓存能给（CLI 的 --help / --list-models 都不带价格）。
+        # 实测缓存热时这里是 probed 条目；冷时是桌面条目（probed=False，
+        # rate 仍真实可用），前端据 probed 决定标「实测可用」还是「未实测」。
+        details = {d["id"]: d for d in cached_model_details(tool.name, tool.command)}
+        probed_ids = {mid for mid, d in details.items() if d.get("probed")}
+        source = "probed" if (live and probed_ids & set(live)) else ("live" if live else "config")
         free = set(tool.free_models)
         items.append({
             "role": role,
@@ -180,11 +194,21 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
             "hint": rc.hint,
             # 只有这两家 CLI 有思考/上下文旋钮；gemini 0.61 没有暴露
             "knobs": ["effort", "context_window"] if tool.name in {"codebuddy", "qoder"} else [],
-            "models_source": "live" if live else "config",
+            "models_source": source,
             "models": [
                 {
                     "id": model_id,
                     "free": model_id in free if free else tool.cost_tier == "free",
+                    "probed": model_id in probed_ids,
+                    **(
+                        {
+                            "rate": details[model_id]["rate"],
+                            "tools": details[model_id]["tools"],
+                            "images": details[model_id]["images"],
+                            "max_input_tokens": details[model_id]["max_input_tokens"],
+                        }
+                        if model_id in details else {}
+                    ),
                 }
                 for model_id in models
             ],
@@ -194,22 +218,39 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
 
 @router.get("/executors/{role}/models")
 async def executor_models(role: str, container: ContainerDep) -> dict[str, Any]:
-    """该执行体**真正能调**的模型清单（能用 CLI 自己的口径就用它）。
+    """该执行体**真正能调**的模型清单。
 
-    qoder 走 ``--list-models``，codebuddy 解析 ``--help`` 的 --model 说明；
-    两条都拿不到时回落到 cli_tools.yaml 里的 ``models``。
+    对 WorkBuddy/CodeBuddy：会**真发一次探测请求**（每个候选 ``max_tokens=1``），
+    只有 200 的才进结果。这是唯一可信来源——实测 2026-11-11：桌面缓存 65 个里
+    39 个能调、26 个 400，``/v1/models`` 只列 14 个且有 8 个调不通、
+    ``--help`` 的 26 个里 17 个不存在。三者都不准，只有实测算数。
+    首次调用约 5 秒（并发 6），结果缓存 10 分钟。
+
+    其它执行体走 CLI 自己的口径（``qoder --list-models`` / ``codebuddy --help``）。
     """
     registry = load_cli_registry(container.settings)
     config = registry.tool_for_role(role)
     if config is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"执行体角色 {role!r} 不可用")
+    details = await discover_model_details(config.name, config.command)
+    if details:
+        return {
+            "role": role,
+            "source": "probed",
+            "models": [d for d in details if d.get("probed")],
+            # 调不通的单独列出来：运营者要能回答「hy4free 为什么不在列表里」
+            "unavailable": [
+                {"id": d["id"], "error": d.get("probe_error", "")}
+                for d in details if not d.get("probed")
+            ],
+        }
     live = await asyncio.to_thread(discover_models, config.name, config.command)
     ids = live or config.models or [config.model]
     free = set(config.free_models)
     return {
         "role": role,
         "source": "live" if live else "config",
-        "models": [{"id": model_id, "free": model_id in free} for model_id in ids],
+        "models": [{"id": model_id, "free": model_id in free, "rate": None} for model_id in ids],
     }
 
 
@@ -228,7 +269,14 @@ async def run_delegations(payload: DelegationPayload, agent: AgentDep) -> dict[s
 
 @router.post("/executors", status_code=201)
 async def run_executor(payload: ExecutorRunPayload, agent: AgentDep) -> dict[str, Any]:
-    """建一个「执行体直跑」会话；结果通过既有 SSE 流回来。"""
+    """建一个「执行体直跑」会话；结果通过既有 SSE 流回来。
+
+    ⚠ 前端零调用（2026-11-10 审计）。控制台的「@ 执行体」走 ``/delegations``
+    （可一次点多段、按顺序串行），这个单段入口是给**脚本 / 事件中的角色**
+    用的写入面——``scripts/agent_worker.py`` 那条链路是它的消费者。
+    保留而不是收进「高级」的理由：它不是给人点的按钮，是给 worker 调的接口。
+    改它的 payload 形状前先 grep ``agent_worker.py``，别只看前端。
+    """
     try:
         return await agent.start_delegation(
             role=payload.role,
@@ -330,7 +378,16 @@ async def mcp_usage(limit: int = 50) -> dict[str, Any]:
 
 @router.get("/model-catalog")
 async def model_catalog(container: ContainerDep) -> dict[str, Any]:
-    """重点模型画像：人工确认过的那几款 + 免费档，带证据等级。"""
+    """重点模型画像：人工确认过的那几款 + 免费档，带证据等级。
+
+    ⚠ 前端零调用（2026-11-10 审计）。它和 ``/model-inventory``（模型与价格页
+    的数据源）在"模型画像"上有重叠，但**语义不同**：inventory 回答「现在能调
+    到什么、什么价」（探测得到），catalog 回答「官方文档怎么说、实测证据等级
+    是什么」（``config/model_catalog.yaml`` 里人工维护）。前者会随账号漂移，
+    后者是稳定的知识底稿。
+    保留：将来「动态选执行体」打分要用这份证据等级（见 docs/总控大脑…§5）。
+    要合并的话先想清楚「探测值 vs 人工确认值谁覆盖谁」——它们冲突时后者才对。
+    """
     entries, warnings = load_model_catalog(container.settings.resolved_config_dir)
     return {
         "models": [entry.as_dict() for entry in entries],
@@ -358,7 +415,7 @@ async def model_inventory(
             if tool.command and tool.backend != "mcp"
         }
         if targets:
-            # 并发跑，别一个个等；discover_models 自己会写 5 分钟缓存。
+            # 并发跑，别一个个等；discover_* 自己会写 5 分钟缓存。
             await asyncio.gather(
                 *(
                     asyncio.to_thread(discover_models, name, command)
@@ -366,6 +423,14 @@ async def model_inventory(
                 ),
                 return_exceptions=True,
             )
+            # 实测（兑换率 / 工具 / 上下文 / 到底能不能调）是另一份缓存。
+            # 面板点「刷新实测」就是要重发探测请求，所以这里必须 force——
+            # 否则 10 分钟内的旧快照会让运营者以为按钮没生效。
+            wb_targets = [t for t in targets if t[0] in {"codebuddy", "workbuddy"}]
+            for _name, _cmd in wb_targets:
+                catalog, _src = await asyncio.to_thread(read_desktop_catalog)
+                if catalog:
+                    await probe_models([m["id"] for m in catalog], force=True)
     gateway_models = [
         model
         for model_id in container.config.public_model_ids()

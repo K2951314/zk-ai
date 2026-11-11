@@ -28,7 +28,11 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   `docs/服务器同步.md`、`docs/部署与运维坑.md`、`docs/控制台前端约定.md`——
   只做对应的事时才翻，规则以本文件为准。
   第四份 `docs/消耗器内部机制.md`：消耗器已停用（见「当前状态」），内部实现细节不再需要每次会话都看。
-  `docs/模型市场与预设.md`：加模型/动预设表时翻。
+  `docs/模型市场与预设.md`：加模型/动预设表时翻。**外部 CLI 执行体的模型清单也在
+  那份文档里**——重点不是「哪个源对」，而是**任何清单都不能当权限用**：
+  `codebuddy --help` 26 个名字 17 个不存在；桌面缓存 65 个 id 只有 35 个是对话模型；
+  wb-proxy `/v1/models` 14 个有 8 个调不通。现在只有 `probe_models()` 真发请求算数
+  （坑：`max_tokens=1` 会误杀所有推理模型，实测 16/39）。
   另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
   （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，

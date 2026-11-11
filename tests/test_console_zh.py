@@ -2,7 +2,7 @@
 
 前端是 vanilla JS，没有组件库也没有 i18n 框架——文案散落在 HTML
 与模板字符串里。``index.html`` 已拆出 ``console.css`` / ``console.js``（同源提供），
-但 ``agent.html`` / ``report.html`` 仍是单文件。这个测试的目的不是「全面翻译」，
+但 ``agent.html`` 等独立页仍是单文件。这个测试的目的不是「全面翻译」，
 而是**守住底线**：以后新增或改动视图时，不要把英文 UI 文案带回来。
 
 白名单保留的内容：
@@ -385,7 +385,7 @@ def test_agent_page_keeps_untouched_dom_contract() -> None:
 
 
 def test_report_page_is_self_contained_and_explains_the_division() -> None:
-    """体检视图（原 /ui/report 独立页，2026-10-07 改为控制台内置）：
+    """体检视图（原 /ui/report 独立页，2026-10-07 改为控制台内置，2026-11-10 删掉独立页）：
     用控制台同源的两个端点（/admin/stats + /admin/requests）把决策摊开，
     令牌复用控制台存在 localStorage 里那份。
 
@@ -459,11 +459,12 @@ def test_console_links_to_the_report_page() -> None:
     """控制台要有一个入口，否则这页只能靠背路径。
 
     2026-10-07：体检从独立页 /ui/report 改为控制台内置视图（data-view="report"）。
-    旧链接 /ui/report 仍保留，但只做重定向到 /ui。
+    2026-11-10：那个只剩跳转的独立页连路由一起删了——保留一个「点进去自动跳」
+    的路由等于永远维护一条没人需要的重定向，而侧栏本来就有入口。
     """
     text = _raw_html("index.html")
     assert 'data-view="report"' in text, "侧栏该有「体检」入口（内置视图）"
-    # 旧 a 标签跳转方式已废弃
+    # 旧 a 标签跳转方式已废弃，且那条路由现在 404
     assert 'href="/ui/report"' not in text, "体检已改为内置视图，不再用 a 跳转"
 
 
@@ -563,12 +564,12 @@ def test_wide_tables_keep_actions_reachable_without_scrolling() -> None:
     assert "position: sticky" in text
     # 模型表 / 别名表 / 凭据池 / 供应商 / 模型市场 五张表
     for thead in (
-        '<th class="acts">操作</th><th>模型</th>',
-        '<th class="acts">操作</th><th>别名</th>',
-        '<th class="acts">操作</th><th>凭据</th>',
-        '<th class="acts">操作</th><th>供应商</th>',
+        '<th scope="col" class="acts">操作</th><th scope="col">模型</th>',
+        '<th scope="col" class="acts">操作</th><th scope="col">别名</th>',
+        '<th scope="col" class="acts">操作</th><th scope="col">凭据</th>',
+        '<th scope="col" class="acts">操作</th><th scope="col">供应商</th>',
         # 模型市场：2026-09-29 在「模型」与「上下文」之间插了「可调用」列
-        '<th class="acts">操作</th><th>模型</th><th>可调用</th>',
+        '<th scope="col" class="acts">操作</th><th scope="col">模型</th><th scope="col">可调用</th>',
     ):
         assert thead in text, f"表头缺少左置操作列: {thead[:40]}"
     # 主键列要能换行，否则照样把表撑宽
@@ -601,6 +602,24 @@ def test_page_has_no_external_assets(page: str) -> None:
         url = m.group(1)
         assert not url.startswith(("http://", "https://", "//")), (
             f"{page} 不该引外部资源（{url}），只允许同源路径")
+
+    # 单一设计 token 源（2026-11-11）：五页必须引用同一份 tokens.css，
+    # 不许再各自定义第二套色板。历史上四个 iframe 页各写一份 :root，
+    # 于是同一个控制台里出现过四套主色。
+    css = (_WEB / "console.css").read_text(encoding="utf-8") if page == "index.html" else text
+    assert "/ui/tokens.css" in css, f"{page} 没有引用唯一设计 token 源"
+    for selector in ("--bg:", "--surface:", "--accent:", "--text:"):
+        assert selector not in css, f"{page} 又定义了一套私有全局色板（{selector}）"
+
+    # CSS 变量必须先定义再用：var(--x) 指向不存在的名字时整条声明静默失效，
+    # 守卫全绿也抓不到（历史上 --panel / --fs-16 就是这样丢了 10 处样式）。
+    tokens = (_WEB / "tokens.css").read_text(encoding="utf-8")
+    inline = "\n".join(m.group(0) for m in _STYLE_RE.finditer(_html(page)))
+    all_css = tokens + inline
+    defined = set(re.findall(r"(--[a-zA-Z0-9-]+)\s*:", all_css))
+    used = set(re.findall(r"var\(\s*(--[a-zA-Z0-9-]+)", all_css))
+    missing = used - defined
+    assert not missing, f"{page} 引用了未定义的 CSS 变量：{sorted(missing)}"
 
 
 def test_all_page_js_lives_inside_the_script_tag() -> None:

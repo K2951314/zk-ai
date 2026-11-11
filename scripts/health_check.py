@@ -42,10 +42,19 @@ async def local_check(provider_ids: list[str] | None) -> dict[str, Any]:
 
 
 async def remote_check(base_url: str) -> dict[str, Any]:
+    """经运行中的网关做一次健康检查。
+
+    ⚠ 路径是 ``/zkadmin/health/check``，不是 ``/admin/``——admin 面在
+    2026-10-08 就从 ``/admin`` 迁到了 ``/zkadmin``（把 ``/admin/*`` 还给智能询价），
+    网关只挂 ``/zkadmin``，没有任何 ``/admin`` 别名。这里原来打的是旧前缀，
+    实测 404（2026-11-10 复核：``/admin/health`` → 404，``/zkadmin/health`` → 200）。
+    控制台 ``console.js`` 的 ``api()`` 会自动把 ``/admin/`` 改写成 ``/zkadmin/``，
+    所以前端没暴露这个问题，独立脚本没有那层改写就裸着错了。
+    """
     import httpx
 
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(f"{base_url.rstrip('/')}/admin/health/check", json={})
+        response = await client.post(f"{base_url.rstrip('/')}/zkadmin/health/check", json={})
         response.raise_for_status()
         return response.json()
 

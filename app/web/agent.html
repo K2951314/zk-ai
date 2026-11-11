@@ -4,32 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZK-Agent · 批量任务跑批</title>
+<script src="/ui/common.js"></script>
+<script>
+/* 主题跟控制台走：父文档 data-theme → 本机存储 → 系统偏好（三级回落）。
+   common.js 放在首次绘制之前，暗色不会先闪一下白。
+   用 var：test_console_zh 的「每个 script 块必须有顶层声明」守卫。 */
+var themeApplied = (document.documentElement.dataset.theme = ZKUI.theme());
+</script>
 <style>
-  :root {
-    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f5; --panel-3: #e9edf2;
-    --border: #e3e8ee; --border-strong: #d3dae3;
-    --text: #1a2230; --text-2: #4a5666; --muted: #7a8798;
-    --accent: #2563eb; --accent-hover: #1d4fd7; --accent-soft: #eff4ff;
-    --ok: #15803d; --ok-soft: #ecfdf3; --ok-border: #bbf7d0;
-    --warn: #b45309; --warn-soft: #fffbeb; --warn-border: #fde68a;
-    --err: #b91c1c; --err-soft: #fef2f2; --err-border: #fecaca;
-    --radius: 8px; --radius-sm: 6px;
-    --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
-    --shadow-md: 0 4px 16px rgba(16, 24, 40, .10);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1218; --panel: #161b24; --panel-2: #1d232e; --panel-3: #232b38;
-      --border: #2a323f; --border-strong: #3a4453;
-      --text: #e7edf4; --text-2: #b8c3d1; --muted: #8794a6;
-      --accent: #5b9cff; --accent-hover: #7cb0ff; --accent-soft: rgba(91, 156, 255, .12);
-      --ok: #4ade80; --ok-soft: rgba(74, 222, 128, .10); --ok-border: rgba(74, 222, 128, .35);
-      --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .10); --warn-border: rgba(251, 191, 36, .35);
-      --err: #f87171; --err-soft: rgba(248, 113, 113, .10); --err-border: rgba(248, 113, 113, .35);
-      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .30);
-      --shadow-md: 0 4px 16px rgba(0, 0, 0, .40);
-    }
-  }
+  @import url("/ui/tokens.css");
+
+  /* 本页只留组件样式；色板 / 字阶 / 圆角全部来自 tokens.css。 */
+
   * { box-sizing: border-box; }
   /* button 的 display:inline-flex 会盖掉 UA 的 [hidden]{display:none}，
      「停止」按钮在会话未开始时一直可见（真机 2026-11-08 抓到）。 */
@@ -47,9 +33,9 @@
   }
   header .logo {
     width: 26px; height: 26px; border-radius: 7px; flex: none;
-    background: linear-gradient(135deg, var(--accent), #4f8cff);
+    background: var(--accent-solid);
     display: grid; place-items: center; font-size: 14px;
-    box-shadow: 0 2px 6px rgba(37, 99, 235, .32);
+    box-shadow: var(--shadow-sm);
   }
   header .spacer { flex: 1; }
   select, input[type=text], textarea {
@@ -69,8 +55,8 @@
   }
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   button:disabled { opacity: .5; cursor: not-allowed; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  button.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--accent-solid-hover); border-color: var(--accent-solid-hover); color: var(--on-accent); }
   button.small { padding: 3px 9px; font-size: 12px; }
 
   .chip {
@@ -454,16 +440,18 @@
   </div>
 </div>
 
-<script src="/ui/common.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const TOKEN = localStorage.getItem("zkai_admin_token") || "";
+/* 令牌改成**每次读取**，不再在加载时快照成常量（2026-11-10）。
+   原来 `const TOKEN = localStorage.getItem(...)`：在别处（控制台的「🔑 令牌」
+   按钮）换了令牌之后，这个页面仍然拿旧值发请求 → 401，而且 ZKUI.promptLogin
+   保存后是 location.reload()，只有整页刷新才生效。函数式取值就没有这个时间差。 */
+const token = () => ZKUI.token();
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
+/* HTML 转义走共享外壳（2026-11-10）。这一页的 Markdown 渲染强依赖
+   「先 esc 再解析」这个前提，转义规则只有一份才不会在某一页被改松。 */
+const esc = ZKUI.esc;
 function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -579,7 +567,7 @@ async function api(path, opts = {}) {
     ...opts,
     headers: {
       "Content-Type": "application/json",
-      "X-Admin-Token": TOKEN,
+      "X-Admin-Token": token(),
       ...(opts.headers || {}),
     },
   });
@@ -609,6 +597,9 @@ const state = {
   streamSessionId: null,    // 正在跟随的会话（重连时校验，防止追错会话）
   approvalPollTimer: null,  // SSE 彻底失联后的低频轮询
   pendingApprovals: new Map(),  // approval_id -> seq of rendered card
+  //: session_id -> task_id。会话与任务空间在后端一对一绑定，界面靠这个索引
+  //: 把「这个会话落在哪个空间」显示出来（2026-11-10，见 loadSessions 注释）。
+  spaceBySession: {},
   autoScroll: true,
   executors: [],       // 可派的外部执行体（@ 面板）
   segs: [],            // 每段的覆盖项：[{role, model, effort, context_window}]
@@ -667,9 +658,15 @@ function renderSessionList(sessions) {
   for (const s of sessions) {
     const div = document.createElement("div");
     div.className = "session" + (s.id === state.current ? " active" : "");
+    // 任务空间是会话的属性，不是另一个主角：这里把它作为会话行的一个小标记，
+    // 让「这个会话有独立工作区」一眼可见，不必切到「任务空间」页去猜。
+    const taskId = state.spaceBySession[s.id];
+    const spaceTag = taskId
+      ? `<span class="small muted" title="这个会话的独立工作区：${esc(taskId)}">📁</span>`
+      : "";
     div.innerHTML = `
       <div class="t">${esc(s.title || "（未命名任务）")}</div>
-      <div class="meta">${statusChip(s.status)}
+      <div class="meta">${statusChip(s.status)}${spaceTag}
         <span class="small muted">${esc(s.model)} · ${fmtTime(s.updated_at)}</span></div>
       <button class="del" title="删除">🗑</button>`;
     div.onclick = () => openSession(s.id);
@@ -856,10 +853,20 @@ async function connectEvents(sessionId) {
   state.streamSessionId = sessionId;
   try {
     const res = await fetch(`/zkadmin/agent/sessions/${sessionId}/events`, {
-      headers: { "X-Admin-Token": TOKEN, Accept: "text/event-stream" },
+      headers: { "X-Admin-Token": token(), Accept: "text/event-stream" },
       signal: ctrl.signal,
     });
-    if (!res.ok || !res.body) throw new Error(`事件流连接失败（HTTP ${res.status}）`);
+    if (!res.ok || !res.body) {
+      // 401 是**不可重试**的：令牌没了/换了，退避重连多少次都是 401。
+      // 原来这里只抛「事件流连接失败（HTTP 401）」，然后 scheduleStreamRetry
+      // 一路退避，而 promptLogin 永远不被调用 —— 手机锁屏后令牌过期就是死循环。
+      // 现在 401 直接弹登录框，并且不再排重试。
+      if (res.status === 401) {
+        ZKUI.promptLogin("任务台的会话需要管理令牌（与网关 .env 里的 ZKAI_ADMIN_TOKEN 相同）");
+        throw Object.assign(new Error("管理令牌缺失或无效"), { noRetry: true, isAuth: true });
+      }
+      throw new Error(`事件流连接失败（HTTP ${res.status}）`);
+    }
     state.streamAttempt = 0;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -885,6 +892,9 @@ async function connectEvents(sessionId) {
 }
 
 function scheduleStreamRetry(sessionId, err) {
+  // 鉴权失败不重试：退避重连对「令牌错了」这件事毫无作用，
+  // 只会在后台每 1/2/4/8/16 秒打一次 401（手机上是持续的耗电与流量）。
+  if (err && (err.noRetry || err.isAuth)) return;
   if (state.streamSessionId !== sessionId) return;
   const attempt = (state.streamAttempt || 0) + 1;
   state.streamAttempt = attempt;
@@ -1340,7 +1350,19 @@ $("settingsModal").addEventListener("click", (e) => {
 // ---------------------------------------------------------------- actions
 async function loadSessions() {
   try {
-    const data = await api("/zkadmin/agent/sessions");
+    // 会话与任务空间在后端是**一对一绑定**的（service._enter_task_space 用
+    // session_id 建空间），但界面上原来完全看不出这层关系：左边是会话题，
+    // 另一个一级导航是任务空间卡片，用户得自己猜哪张卡属于哪个会话。
+    // 这里用 taskspaces 列表按 session_id 建索引，把 task_id 挂到会话上，
+    // 会话列表与详情里就能显示「这个会话落在哪个空间」并一键跳过去。
+    const [data, spaces] = await Promise.all([
+      api("/zkadmin/agent/sessions"),
+      api("/zkadmin/agent/taskspaces").catch(() => ({ taskspaces: [] })),
+    ]);
+    state.spaceBySession = {};
+    for (const sp of (spaces.taskspaces || [])) {
+      if (sp.session_id) state.spaceBySession[sp.session_id] = sp.task_id;
+    }
     renderSessionList(data.sessions);
   } catch (err) { toast(err.message); }
 }

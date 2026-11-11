@@ -202,6 +202,7 @@ class CredentialHealthTracker:
                 retry_after=info.retry_after,
                 consecutive_rate_limits=credential.consecutive_rate_limits,
                 quota_exhausted=info.quota_exhausted,
+                quota_reset_at=info.quota_reset_at,
             )
             credential.status = CredentialStatus.COOLDOWN
             credential.cooldown_until = moment + duration if duration > 0 else None

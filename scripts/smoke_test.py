@@ -125,7 +125,7 @@ def main() -> int:
         # ------------------------------------------------------------------
         # 5. A 400 is the caller's fault: returned as-is, no key burned.
         # ------------------------------------------------------------------
-        before = client.get("/admin/credentials", headers=ADMIN)
+        before = client.get("/zkadmin/credentials", headers=ADMIN)
         failures_before = sum(c["failure_count"] for c in before.json()["data"])
         r = client.post(
             "/v1/chat/completions",
@@ -136,7 +136,7 @@ def main() -> int:
             r.status_code == 400,
             f"{r.status_code} type={r.json().get('error', {}).get('type')}",
         )
-        after = client.get("/admin/credentials", headers=ADMIN)
+        after = client.get("/zkadmin/credentials", headers=ADMIN)
         failures_after = sum(c["failure_count"] for c in after.json()["data"])
         record(
             "400 does NOT rotate keys (no credential penalised)",
@@ -156,7 +156,7 @@ def main() -> int:
             r.status_code == 429,
             f"{r.status_code} type={r.json().get('error', {}).get('type')}",
         )
-        after = client.get("/admin/credentials", headers=ADMIN)
+        after = client.get("/zkadmin/credentials", headers=ADMIN)
         states = {c["id"]: c["status"] for c in after.json()["data"]}
         cooled = sorted(k for k, v in states.items() if v == "cooldown")
         record(
@@ -168,27 +168,27 @@ def main() -> int:
         # ------------------------------------------------------------------
         # 7. Admin surface
         # ------------------------------------------------------------------
-        r = client.get("/admin/router/preview", params={"model": "zk-vision"}, headers=ADMIN)
+        r = client.get("/zkadmin/router/preview", params={"model": "zk-vision"}, headers=ADMIN)
         preview = r.json()
         record(
-            "GET /admin/router/preview",
+            "GET /zkadmin/router/preview",
             r.status_code == 200 and preview.get("plan"),
             f"{r.status_code} order={' -> '.join(p['model'] for p in preview.get('plan', []))}"
             f" strategy={preview.get('strategy')}",
         )
-        r = client.get("/admin/stats", headers=ADMIN)
+        r = client.get("/zkadmin/stats", headers=ADMIN)
         stats = r.json()
         record(
-            "GET /admin/stats",
+            "GET /zkadmin/stats",
             r.status_code == 200 and stats.get("pool", {}).get("total") == 3,
             f"{r.status_code} keys={stats.get('pool', {}).get('total')} "
             f"requests={stats.get('pool', {}).get('requests')}",
         )
-        r = client.get("/admin/credentials", headers={"X-Admin-Token": "wrong"})
+        r = client.get("/zkadmin/credentials", headers={"X-Admin-Token": "wrong"})
         record("admin requires a valid token", r.status_code in {401, 403}, f"{r.status_code}")
-        r = client.get("/admin/health", headers=ADMIN)
+        r = client.get("/zkadmin/health", headers=ADMIN)
         record(
-            "GET /admin/health",
+            "GET /zkadmin/health",
             r.status_code == 200 and r.json().get("database", {}).get("ok") is True,
             f"{r.status_code} providers_available="
             f"{r.json().get('summary', {}).get('providers_available')}",
@@ -197,7 +197,7 @@ def main() -> int:
         # ------------------------------------------------------------------
         # 8. Persistence: usage accounting landed in SQLite
         # ------------------------------------------------------------------
-        r = client.get("/admin/stats", params={"recent": 10}, headers=ADMIN)
+        r = client.get("/zkadmin/stats", params={"recent": 10}, headers=ADMIN)
         rows = r.json().get("recent_requests", [])
         statuses = {row["status"] for row in rows}
         record(
@@ -207,9 +207,9 @@ def main() -> int:
             and sum(1 for row in rows if row["status"] == "success") >= 2,
             f"{len(rows)} recent rows, statuses={sorted(statuses)}",
         )
-        r = client.get("/admin/models", headers=ADMIN)
+        r = client.get("/zkadmin/models", headers=ADMIN)
         record(
-            "GET /admin/models",
+            "GET /zkadmin/models",
             r.status_code == 200 and len(r.json().get("data", [])) >= 5,
             f"{r.status_code} models={len(r.json().get('data', []))}",
         )

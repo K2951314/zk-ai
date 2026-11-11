@@ -105,6 +105,15 @@ async def stats(events: EventsDep, days: int = Query(default=7, ge=1, le=90)) ->
 
 @router.get("/rules")
 async def list_rules(events: EventsDep) -> dict[str, Any]:
+    """诊断入口：``config/events.yaml`` 里的规则现在解析成了什么。
+
+    ⚠ 前端零调用（事件流页面只读 ``/stats``，它的响应已带 ``warnings``）。
+    保留是因为它是**排障时唯一能回答「为什么这条事件没被派出去」的端点**——
+    ``scripts/check_config.py`` 也查规则，但它查的是静态文件，这里查的是
+    **加载后**的结果（规则被丢弃、规则名拼错、``to`` 指向不存在的角色）。
+    别为了「消灭孤儿端点」把它并进 /stats：``describe()`` 的输出比 warnings
+    长得多，日常轮询不需要背这份体量。
+    """
     ruleset = events.rules()
     return {"rules": ruleset.describe(), "warnings": ruleset.warnings}
 

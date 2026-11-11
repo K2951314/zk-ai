@@ -75,7 +75,12 @@ def _observed_for(
 def _executor_row(
     item: dict[str, Any], observed: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    """执行体：模型清单来自 live/配置，价格只能给实测或「订阅内」。"""
+    """执行体：模型清单来自 live/配置，价格优先用桌面端兑换率。
+
+    ``rate`` 是 WorkBuddy/CodeBuddy 桌面端缓存里的 ``credits`` 倍率
+    （``x0.29`` = 按 0.29 倍计费），这是外部 CLI 唯一的**真实价格口径**。
+    有它就不要再标「订阅内 / 未知」——那是在有价目表的情况下说瞎话。
+    """
     tool = str(item.get("tool") or "")
     tier = str(item.get("cost_tier") or "")
     models: list[dict[str, Any]] = []
@@ -83,8 +88,15 @@ def _executor_row(
         model_id = str(model.get("id") or "")
         if not model_id:
             continue
+        rate = model.get("rate")
         seen = _observed_for(observed, tool, model_id)
-        if seen is not None:
+        if rate is not None:
+            source = "tariff"
+            note = (
+                "不计费（兑换率 0）" if rate == 0
+                else f"兑换率 ×{float(rate):.2f}（桌面端 credits，一次对话的积分倍率）"
+            )
+        elif seen is not None:
             source = "observed"
             note = (
                 f"实测 {seen['costed_calls']}/{seen['calls']} 次拿到自报成本"
@@ -93,7 +105,7 @@ def _executor_row(
             )
         elif tier == "free":
             source = "subscription"
-            note = "免费额度/订阅内，单价未知；额度耗尽会被限流"
+            note = "配置标为免费档，但拿不到兑换率；额度耗尽会被限流"
         else:
             source = "unknown"
             note = "没有价目表，也还没有实测记录"
@@ -101,7 +113,13 @@ def _executor_row(
             {
                 "id": model_id,
                 "free": bool(model.get("free")),
+                # probed=True = 真发过请求验证可用；False = 只从清单里看到的
+                "probed": bool(model.get("probed")),
                 "price_source": source,
+                "rate": rate,
+                "tools": model.get("tools"),
+                "images": model.get("images"),
+                "max_input_tokens": model.get("max_input_tokens"),
                 "input_per_mtok": None,
                 "output_per_mtok": None,
                 "observed": seen,
@@ -145,7 +163,7 @@ def build(
         },
         "notes": [
             "网关模型的价格是配置里的真实牌价（USD/百万 token）。",
-            "外部工具没有价目表：有实测记录的显示实测均价，"
-            "没有的标「订阅内」或「未知」，不会用 0 元冒充免费。",
+            "外部 CLI 的兑换率来自 WorkBuddy/CodeBuddy 桌面端缓存（credits 倍率），"
+            "这是它们唯一的价格口径；拿不到就如实标「未知」，已不用的配置标签不再冒充。",
         ],
     }

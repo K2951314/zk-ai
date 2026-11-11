@@ -1,0 +1,123 @@
+/* ==========================================================================
+   ZK-AI 控制台 · 唯一设计 token 源（2026-11-11）
+
+   这是全站色彩 / 字阶 / 圆角 / 阴影的唯一可改处。五个页面（控制台 +
+   四个 iframe 独立页）都通过 @import 引用它，各自只保留本页组件样式。
+
+   为什么用 @import 而不是再插一个 <link>：
+     tests/test_console_zh.py 的 _html() 只内联「第一个 stylesheet link」和
+     「第一个 script src」，新增 link 会让守卫看到的合成页面内容整体偏移。
+     @import 不动 DOM，五页一致，且 /ui/tokens.css 走同源 no-store 缓存头。
+
+   改色规则：只改这里的 :root 值，不要在任何页面里再写 --bg / --accent /
+   --surface 等全局 token。下面「兼容别名」是为四个历史独立页留的过渡层，
+   它们指向变量而不是色值，所以暗色模式自动跟随，不会分叉出第二套色板。
+   ========================================================================== */
+  :root {
+    /* 底色三档：页面 / 沉一档（分组底、表头）/ 沉二档（代码块、次级分区） */
+    --bg: #faf9f6;
+    --bg-sunk: #f3f3ef;
+    --bg-muted: #e9ede9;
+    --surface: #ffffff;
+    --surface-2: #fdfdfb;
+    --raised: #ffffff;
+    --sidebar: #fdfdfb;
+    --field: #eef1ed;
+    /* 文字四档：正文 / 次正文 / 辅助 / 最弱（占位、禁用） */
+    --ink: #202a30;
+    --ink-2: #303c42;
+    --ink-3: #59656b;
+    --ink-4: #657176;
+    --text: var(--ink);
+    --text-2: var(--ink-2);
+    --muted: var(--ink-3);
+    /* 线条三档：分隔 / 强分隔（表头、输入框边）/ 弱分隔（卡片内嵌块） */
+    --line: #dfe4e1;
+    --line-strong: #d1d9d5;
+    --line-soft: #e9ede9;
+    --border: var(--line);
+    --border-strong: var(--line-strong);
+    /* 主色：深青 */
+    --accent: #176b75;
+    --accent-hover: #145f68;
+    --accent-ink: #145f68;
+    --accent-soft: rgba(23, 107, 117, .08);
+    --accent-softer: rgba(23, 107, 117, .05);
+    --accent-border: rgba(23, 107, 117, .28);
+    /* 语义色：红=坏 / 琥珀=需注意 / 绿=好 / 灰=禁用 */
+    --err: #b3402a;   --err-soft: rgba(179, 64, 42, .08);  --err-border: rgba(179, 64, 42, .25);
+    --warn: #b8873a;  --warn-soft: rgba(184, 135, 58, .09); --warn-border: rgba(184, 135, 58, .28);
+    --ok: #2f7d5c;    --ok-soft: rgba(47, 125, 92, .09);   --ok-border: rgba(47, 125, 92, .25);
+    --neutral: #6b7684; --neutral-soft: rgba(107, 118, 132, .09); --neutral-border: rgba(107, 118, 132, .22);
+    /* 排行色：前三名与其余（池子/模型页里用来标「谁是首选」） */
+    --rank-1: #b3402a; --rank-2: #a3642f; --rank-3: #96702e; --rank-rest: #6b7684;
+    /* 圆角刻度（参考站 six-step） */
+    --radius: 8px;          /* 控件 */
+    --radius-sm: 6px;
+    --radius-tile: 10px;    /* 小组件 */
+    --radius-card: 12px;    /* 卡片 */
+    --radius-panel: 14px;   /* 大面板 */
+    /* 阴影克制：浅色模式下几乎只用一道 1px 边，阴影只给浮层 */
+    --shadow-sm: 0 1px 2px rgba(32, 42, 48, .04);
+    --shadow-md: 0 3px 12px rgba(32, 42, 48, .08);
+    --shadow-lg: 0 12px 32px rgba(32, 42, 48, .16);
+    /* 字阶（上面注释里的九档） */
+    --fs-9: 9px; --fs-10: 10.5px; --fs-11: 11px; --fs-12: 12px;
+    --fs-13: 13px; --fs-14: 14.5px; --fs-15: 15px; --fs-20: 20px; --fs-26: 26px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+            "Cascadia Mono", "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+            "Hiragino Sans GB", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+  }
+  :root[data-theme="dark"] {
+    --bg: #13191c;
+    --bg-sunk: #182024;
+    --bg-muted: #202a2f;
+    --surface: #1a2226;
+    --surface-2: #1d272b;
+    --raised: #202a2f;
+    --sidebar: #161e21;
+    --field: rgba(255, 255, 255, .06);
+    --ink: #e7eceb;
+    --ink-2: #d2dada;
+    --ink-3: #a5b0b3;
+    --ink-4: #89979d;
+    --line: rgba(255, 255, 255, .08);
+    --line-strong: rgba(255, 255, 255, .12);
+    --line-soft: rgba(255, 255, 255, .06);
+    --accent: #12ccd8;
+    --accent-hover: #2ce2e8;
+    --accent-ink: #2ce2e8;
+    --accent-soft: rgba(18, 204, 216, .12);
+    --accent-softer: rgba(18, 204, 216, .06);
+    --accent-border: rgba(18, 204, 216, .32);
+    --err: #d86a52;  --err-soft: rgba(216, 106, 82, .12);  --err-border: rgba(216, 106, 82, .32);
+    --warn: #d3b26a; --warn-soft: rgba(211, 178, 106, .12); --warn-border: rgba(211, 178, 106, .32);
+    --ok: #5fc79a;   --ok-soft: rgba(95, 199, 154, .12);   --ok-border: rgba(95, 199, 154, .32);
+    --neutral: #7b869a; --neutral-soft: rgba(123, 134, 154, .12); --neutral-border: rgba(123, 134, 154, .28);
+    --rank-1: #d86a52; --rank-2: #d18a5e; --rank-3: #d3b26a; --rank-rest: #7b869a;
+    --shadow-sm: none;
+    --shadow-md: 0 6px 18px rgba(0, 0, 0, .35);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, .45);
+  }
+
+/* 兼容别名：agent / models / taskspaces 历史上叫 --panel*，events 叫 --danger。
+   别名指向已有变量，不复制色值；暗色下解析到 :root[data-theme=dark] 的值。 */
+:root {
+  --panel: var(--surface);
+  --panel-2: var(--bg-sunk);
+  --panel-3: var(--bg-muted);
+  --danger: var(--err);
+  --accent-strong: var(--accent-hover);
+  /* --accent 在暗色下是亮青，只配当文字 / 链接色；按钮底色必须用
+     --accent-solid（浅色深青、暗色仍是深青），文字配 --on-accent。
+     否则暗色会出现「亮青底 + 白字」这种约 1.8:1 的不可读按钮。 */
+  --accent-solid: #176b75;
+  --accent-solid-hover: #0f545c;
+  --on-accent: #ffffff;
+}
+:root[data-theme="dark"] {
+  --accent-solid: #0f545c;
+  --accent-solid-hover: #0b424a;
+  --on-accent: #12ccd8;
+}

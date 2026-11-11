@@ -106,7 +106,7 @@ def _check_stale_files(warnings: list[str]) -> None:
     if stale:
         warnings.append(
             f"配置文件在加载后被外部改过：{'、'.join(stale)}——"
-            "先 POST /admin/config/reload，否则控制台保存会把它覆盖回去"
+            "先 POST /zkadmin/config/reload，否则控制台保存会把它覆盖回去"
         )
 
 

@@ -5,27 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>任务空间 · ZK-AI</title>
 <style>
-  :root {
-    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f5;
-    --border: #e3e8ee; --border-strong: #d3dae3;
-    --text: #1a2230; --text-2: #4a5666; --muted: #7a8798;
-    --accent: #2563eb; --accent-soft: #eff4ff;
-    --ok: #15803d; --ok-soft: #ecfdf3;
-    --warn: #b45309; --warn-soft: #fffbeb;
-    --err: #b91c1c; --err-soft: #fef2f2;
-    --radius: 10px; --radius-sm: 6px;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1218; --panel: #161b24; --panel-2: #1d232e;
-      --border: #2a323f; --border-strong: #3a4453;
-      --text: #e7edf4; --text-2: #b8c3d1; --muted: #8794a6;
-      --accent: #5b9cff; --accent-soft: rgba(91, 156, 255, .12);
-      --ok: #4ade80; --ok-soft: rgba(74, 222, 128, .10);
-      --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .10);
-      --err: #f87171; --err-soft: rgba(248, 113, 113, .10);
-    }
-  }
+  @import url("/ui/tokens.css");
+
+  /* 本页只留组件样式；色板 / 字阶 / 圆角全部来自 tokens.css。 */
+
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -114,13 +97,16 @@
 </main>
 <script src="/ui/common.js"></script>
 <script>
+// 主题跟控制台走（父文档 data-theme → 本机存储 → 系统偏好）。
+// common.js 在这里加载，主题必须在首次绘制前写上 <html>，否则暗色下闪白。
+var themeApplied = (document.documentElement.dataset.theme = ZKUI.theme());
+
 const listEl = document.getElementById("list");
 
-function esc(value) {
-  return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
-  });
-}
+/* HTML 转义走共享外壳（2026-11-10）。原来这页有一份自己的实现，
+   和 models.html 逐字相同、和 events.html 略有出入——同一个网关四份转义规则
+   是 XSS 面，也是「改一处漏三处」的根源。 */
+var esc = ZKUI.esc;
 
 function timeText(stamp) {
   if (!stamp) return "—";

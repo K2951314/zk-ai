@@ -38,8 +38,8 @@ def _client() -> httpx.AsyncClient:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path",
-    ["/ui", "/ui/agent", "/ui/report", "/ui/events", "/ui/taskspaces", "/ui/models",
-     "/ui/console.css", "/ui/console.js"],
+    ["/ui", "/ui/agent", "/ui/events", "/ui/taskspaces", "/ui/models",
+     "/ui/console.css", "/ui/console.js", "/ui/common.js"],
 )
 async def test_console_pages_disable_caching(path: str) -> None:
     """每个页面/脚本都带 no-store，刷新就一定拿到磁盘上的最新版本。"""
@@ -50,11 +50,19 @@ async def test_console_pages_disable_caching(path: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_console_unknown_asset_still_404() -> None:
-    """加缓存头不能顺手把不存在的资源也放出来。"""
+async def test_console_asset_routing_is_explicit() -> None:
+    """白名单只放该放的资源：未知路径 404，唯一 token 源 200 且禁缓存。
+
+    ``tokens.css`` 是五个页面 @import 的公共样式，一旦漏进白名单，
+    整站会静默退回浏览器默认样式——页面能开，但色板全丢。
+    """
     async with _client() as client:
         resp = await client.get("/ui/not-a-real-asset")
+        tokens = await client.get("/ui/tokens.css")
     assert resp.status_code == 404
+    assert tokens.status_code == 200
+    assert "--accent-solid" in tokens.text
+    assert "no-store" in tokens.headers.get("cache-control", "")
 
 
 # --------------------------------------------------------------------------- #

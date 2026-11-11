@@ -105,7 +105,7 @@ _SILENT_AFTER = 90.0
 RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_restart.request"
 STOP_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_stop.request"
 START_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_start.request"
-#: 网关一键重启（控制台 /admin/gateway/restart 写，托盘心跳接手）。
+#: 网关一键重启（控制台 /zkadmin/gateway/restart 写，托盘心跳接手）。
 GATEWAY_RESTART_REQUEST = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "gateway_restart.request"
 _ALIVE_MARKER = Path(os.environ.get("ZKAI_DATA_DIR", "data")) / "burner_alive"
 _HEARTBEAT_EVERY = 3.0
@@ -565,7 +565,7 @@ class TrayLauncher:
             try:
                 if self._mode == "burner":
                     self._consume_requests()
-                    # 写心跳标记，让网关 /admin/burner/running 能判断消耗器是否活着
+                    # 写心跳标记，让网关 /zkadmin/burner/running 能判断消耗器是否活着
                     if self._child.alive():
                         with contextlib.suppress(OSError):
                             _ALIVE_MARKER.write_text(

@@ -478,7 +478,10 @@ class Scheduler:
         )
 
     def _normalize_throttle(
-        self, info: ErrorInfo, credential: CredentialRuntime | None
+        self,
+        info: ErrorInfo,
+        credential: CredentialRuntime | None,
+        candidate: RoutingCandidate | None = None,
     ) -> ErrorInfo:
         """Rewrite a shared-bucket 429 into "fail over", not "sweep sibling keys".
 
@@ -503,6 +506,14 @@ class Scheduler:
         The object is mutated in place on purpose - it is the same instance the
         pool just used for reporting.
         """
+        # 供应商的「额度几点重置」搭这趟便车穿到凭据层（本函数是所有 429 的
+        # 必经之路）。放在最前面：`scope == credential` 提前 return 的分支
+        # 同样要用到它——ModelScope 两把 Key 共用同一个日额度池，各自的冷却
+        # 正是 `credential` 作用域。
+        if candidate is not None and info.quota_exhausted and not info.quota_reset_at:
+            info.quota_reset_at = str(
+                (candidate.provider.options or {}).get("quota_reset_at") or ""
+            )
         if info.error_class is not ErrorClass.THROTTLE or credential is None:
             return info
         scope = self.pool.effective_throttle_scope(credential.id, info.throttle_kind.value)
@@ -733,7 +744,7 @@ class Scheduler:
                     except Exception as exc:
                         finished_wall = time.time()
                         info = self.classifier.classify(exc)
-                        info = self._normalize_throttle(info, credential)
+                        info = self._normalize_throttle(info, credential, candidate)
                         errors.append(info)
                         self.pool.report_failure(credential.id, info)
                         attempts.append(
@@ -962,7 +973,7 @@ class Scheduler:
                         raise
                     except Exception as exc:
                         info = self.classifier.classify(exc)
-                        info = self._normalize_throttle(info, credential)
+                        info = self._normalize_throttle(info, credential, candidate)
                         errors.append(info)
                         self.pool.report_failure(credential.id, info)
                         _record(
@@ -1029,6 +1040,10 @@ class Scheduler:
                     except Exception as exc:
                         stream_error = True
                         info = self.classifier.classify(exc)
+                        # 中途断流的 429 同样要走归一化：ModelScope 的额度耗尽
+                        # 可能发生在第一个 chunk 之后（长生成撞上限），不走这条
+                        # 就会退回「固定 1800s 长休」而错过当天的重置时刻。
+                        info = self._normalize_throttle(info, credential, candidate)
                         errors.append(info)
                         self.pool.report_failure(credential.id, info)
                         logger.error(

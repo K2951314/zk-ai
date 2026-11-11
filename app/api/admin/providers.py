@@ -977,6 +977,57 @@ async def delete_credential(
     }
 
 
+def _credential_owner(container: ContainerDep, credential_id: str) -> tuple[str | None, Any]:
+    """Find which provider owns *credential_id* (the pool only knows the runtime).
+
+    ``config.providers`` is the authoritative in-memory list a write-back needs:
+    the runtime carries ``provider_id`` too, but after a provider rename the
+    config entry is the one whose ``credentials`` we must edit.
+    """
+    for provider in container.config.providers.values():
+        for credential in provider.credentials:
+            if credential.id == credential_id:
+                return provider.id, credential
+    runtime = container.pool.get(credential_id)
+    provider_id = runtime.provider_id if runtime is not None else None
+    return provider_id, None
+
+
+def _persist_credential_enabled(
+    container: ContainerDep, credential_id: str, enabled: bool
+) -> str | None:
+    """写回 ``providers.yaml`` 的 ``enabled`` 字段；返回被写入的文件名（没写则 None）。
+
+    为什么必须有（2026-11-10 实测事故）：ModelScope 两把 Key 在
+    ``providers.yaml`` 里写着 ``enabled: false``（2026-10-24 余额耗尽时改的），
+    而控制台的「启用」只调 ``set_credential_enabled`` 写数据库、**不回写 YAML**。
+    于是控制台点一次能用，下一次 ``register_provider``（重启或热重载）重新读
+    YAML，``CredentialRuntime.from_config`` 又按 ``config.enabled=False`` 把状态
+    建回 DISABLED —— 运营者的观感就是「每次都要我手动启用一次，太不智能」。
+
+    文件是唯一真相源是本项目的既有约定（models/aliases 编辑早就写回 YAML），
+    凭据的 enabled 此前是个例外，现在补齐。
+    """
+    provider_id, credential = _credential_owner(container, credential_id)
+    if provider_id is None:
+        return None
+    path = _source_file(container, "providers")
+    if path is None:
+        # 模板目录（只有 *.example.yaml）：DB 覆盖是唯一能持久的地方，不报错。
+        return None
+    try:
+        update_credential_in_provider(path, provider_id, credential_id, {"enabled": enabled})
+    except KeyError:
+        # 文件里没有这条（只存在于控制台新建、尚未落盘的情况）——不阻断操作。
+        return None
+    except Exception as exc:  # 陈旧检测等
+        raise _file_write_failed(exc) from exc
+    if credential is not None:
+        credential.enabled = enabled
+    container.refresh_config_watch()
+    return path.name
+
+
 @router.post("/credentials/{credential_id}/enable", summary="启用凭据")
 async def enable_credential(credential_id: str, container: ContainerDep) -> dict[str, Any]:
     transition = container.pool.enable(credential_id)
@@ -986,11 +1037,13 @@ async def enable_credential(credential_id: str, container: ContainerDep) -> dict
             detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
     await container.config_repository.set_credential_enabled(credential_id, True)
+    synced = _persist_credential_enabled(container, credential_id, True)
     return {
         "credential_id": credential_id,
         "status": transition.current.value,
         "previous_status": transition.previous.value,
         "reason": transition.reason,
+        "synced": synced,
     }
 
 
@@ -1007,11 +1060,13 @@ async def disable_credential(
             detail={"error": {"message": f"凭据 '{credential_id}' 不存在"}},
         )
     await container.config_repository.set_credential_enabled(credential_id, False, reason)
+    synced = _persist_credential_enabled(container, credential_id, False)
     return {
         "credential_id": credential_id,
         "status": transition.current.value,
         "previous_status": transition.previous.value,
         "reason": transition.reason,
+        "synced": synced,
     }
 
 
