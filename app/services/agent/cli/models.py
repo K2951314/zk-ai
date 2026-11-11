@@ -547,7 +547,14 @@ async def probe_models(candidates: list[str], *, force: bool = False) -> dict[st
         # 让进程内缓存与磁盘一致，避免同一个 TTL 窗口里清单又抖回去。
         snap = verified_snapshot()
         if snap["results"]:
-            _PROBE_CACHE = (time.time(), dict(snap["results"]))
+            merged = dict(snap["results"])
+            _PROBE_CACHE = (time.time(), merged)
+            # 返回的也必须是合并后的结论：否则磁盘没抖，接口第一次返回
+            # 仍把限流/超时的模型标成不可用——`/executors/{role}/models`
+            # 和「刷新实测」看到的就还是旧抖动。
+            results = {
+                model_id: merged[model_id] for model_id in candidates if model_id in merged
+            }
     return results
 
 
@@ -680,19 +687,20 @@ def cached_models(tool: str, command: str) -> list[str]:
     不能在高频列表接口里等）。
     """
     key = f"{tool}:{command}"
-    cached = _CACHE.get(key)
-    if cached and time.time() - cached[0] < _TTL:
-        return list(cached[1])
     if tool in {"codebuddy", "workbuddy"}:
         # 进程内实测缓存优先；冷了读落盘快照——网关重启后不该又退回
         # cli_tools.yaml 里那份 9 个模型的手工快照（运营者看到的就是那个）。
         hot = [d["id"] for d in available_model_details(tool, command) if d.get("probed")]
         ids = hot or list(verified_snapshot()["ids"])
-    else:
-        ids = []
-    if ids:
-        _CACHE[key] = (time.time(), ids)
-    return ids
+        if ids:
+            _CACHE[key] = (time.time(), ids)
+            return ids
+        # 没有实测结论就明确为空：桌面缓存是候选集，不是可用清单。
+        return []
+    cached = _CACHE.get(key)
+    if cached and time.time() - cached[0] < _TTL:
+        return list(cached[1])
+    return []
 
 
 def cached_model_details(tool: str, command: str) -> list[dict]:

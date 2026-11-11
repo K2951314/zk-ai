@@ -379,3 +379,65 @@ def test_rate_limit_keeps_verified_conclusion_but_is_surfaced(tmp_path, monkeypa
     snap = model_discovery.verified_snapshot()
     assert snap["ids"] == ["free-tier"], "限流不应把已验证模型踢出清单"
     assert "429" in snap["transient"]["free-tier"], "要如实透出当前限流状态"
+
+
+# --------------------------------------------------------------------------- #
+# 「刷新实测」之后：桌面目录 / 一次瞬时失败都不能覆盖已验证结论
+# --------------------------------------------------------------------------- #
+def test_refresh_discovery_cannot_hide_verified_models(tmp_path, monkeypatch) -> None:
+    """`/model-inventory?refresh=true` 先 `discover_models()` 再探测。
+
+    旧代码里 `discover_models()` 会把桌面缓存**整份**塞进 `_CACHE`，随后
+    `cached_models()` 直接读它——于是刷新一次，运营者看到的就从 36 个
+    实测可用变回 65 个候选（含视频/补全模型），「越刷新越不对」。
+    `discover_models()` 可以给全量候选，但 `cached_models()` 只认已验证清单。
+    """
+    _write_cache(tmp_path, {"models": [
+        {"id": "hy4free", "credits": "x0.00", "maxInputTokens": 960000},
+        {"id": "kling-video-v3", "credits": "x0.30"},
+    ]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({
+        "hy4free": (True, ""),
+        "kling-video-v3": (False, "HTTP 400 Backend [maas] is not supported"),
+    })
+    live = model_discovery.discover_models("codebuddy", "codebuddy")
+    assert "hy4free" in live and "kling-video-v3" in live, "候选集可以全量给"
+    assert model_discovery.cached_models("codebuddy", "codebuddy") == ["hy4free"], (
+        "可用清单不能退回桌面目录，否则刷新后候选模型全回来了"
+    )
+
+
+def test_refresh_probe_uses_merged_snapshot_for_transient_failure(tmp_path, monkeypatch) -> None:
+    """刷新时一次限流/超时，不能在同一响应里把模型标成不可用。
+
+    2026-11-11 实测 hy4free 每日额度被打满回 429、kimi-k2.8-preview
+    回 ReadTimeout。`_write_snapshot()` 会保留历史结论，但 `probe_models()`
+    原来仍返回本次的失败结果，`discover_model_details()` 据此把模型标
+    ``probed=False``——磁盘结论对了，接口第一次返回仍是错的。
+    """
+    _write_cache(tmp_path, {"models": [{"id": "flaky", "credits": "x0.10"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery._write_snapshot({"flaky": (True, "")})
+    monkeypatch.setattr(model_discovery, "_wb_proxy_key", lambda: "k")
+
+    async def timeout_probe(client: object, model_id: str, key: str) -> tuple[str, bool, str]:
+        del client, key
+        return model_id, False, "ReadTimeout"
+
+    monkeypatch.setattr(model_discovery, "_probe_one", timeout_probe)
+    got = asyncio.run(model_discovery.discover_model_details("codebuddy", "codebuddy"))
+    usable = [d for d in got if d.get("probed")]
+    assert [d["id"] for d in usable] == ["flaky"], "本次没测成不能覆盖已验证结论"
+    assert usable[0]["probe_error"] == "暂态：ReadTimeout", "当前没测成的状态要如实保留"
+
+
+def test_unverified_desktop_catalog_is_not_an_available_list(tmp_path, monkeypatch) -> None:
+    """探测拿不到、也没有落盘结论时，桌面目录不能冒充可用清单。"""
+    _write_cache(tmp_path, {"models": [{"id": "kling-video-v3", "credits": "x0.30"}]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model_discovery.discover_models("codebuddy", "codebuddy")
+    assert model_discovery.cached_models("codebuddy", "codebuddy") == []
