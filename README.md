@@ -689,7 +689,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 59 个测试模块，1360 个用例，全部 Mock
+├── tests/                # conftest + 59 个测试模块，1362 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -697,7 +697,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 117 个文件约 33,172 行，`tests/` 59 个测试模块 1360 个用例（约 23,879 行），
+规模：`app/` 117 个文件约 33,173 行，`tests/` 59 个测试模块 1362 个用例（约 23,955 行），
 `scripts/` 22 个文件约 6,511 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-11：新增三个测试模块（CLI 模型清单「只有实测算数」、
@@ -728,6 +728,13 @@ AK/SK 放在 `~/.codeartsdoer/installers/.env`（CLI 与网关都不读）、fol
 `codearts models` 实测的 11 个 id；另修 `--manual_approval` 无头挂死（90s
 实测）、effort 旋钮未暴露，并更正「CLI 输出 GBK」的误判（实为 UTF-8）。
 补 2 条回归（均经变异验证），用例 1358 → 1360。
+2026-11-12 午后续：修「@ 委派丢工作区」——`agent.html` 的多段委派 payload
+只带 `items`，后端回落 `agent_workspace=.`（ZK-AI 项目根），再叠任务空间，
+把刀具项目任务派进了错误目录。前端补 `payload.workspace = state.workspace`
+（续接会话仍由后端优先用会话已存的 workspace），补前端静态守卫 + 后端
+契约 2 条回归（均经变异验证），浏览器真机验抓到 body 里的 workspace，
+用例 1360 → 1362。另用单变量 A/B 实证「降档」对码道 300s 超时无效：
+同任务 max（43+ 轮工具）与默认档（31 轮）都超时，max + 极窄任务 49.8s 通过。
 上一轮 2026-11-10 删 `/ui/report` 跳转壳与其路由，`_UI_PAGES` 自动少一页、
 三个 parametrize 各少一例（1314 → 1311），新增守卫又补回 2 例 → 1313。
 再上一次是 2026-11-08 晚（手机远控 M1，新增 `tests/test_ui_pages.py`），
@@ -1426,7 +1433,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1360 个用例，全部通过，零网络、零真实配额。**
+**1362 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

@@ -1086,6 +1086,65 @@ async def test_start_delegations_runs_items_in_order(tmp_path: Path, monkeypatch
     await harness.container.shutdown()
 
 
+async def test_start_delegations_honours_explicit_workspace(tmp_path: Path, monkeypatch) -> None:
+    """显式 workspace 要一路传到会话记录与执行体 cwd（@ 委派的后端契约）。
+
+    2026-11-12：前端补上透传后，这里钉住「传了就必须生效」——否则前端修好、
+    后端哪天把字段丢了，任务又会悄悄跑回网关项目根。
+    """
+    import sys
+
+    import yaml
+
+    from app.services.agent.cli.base import CliResult
+
+    ws = tmp_path / "tooling"
+    ws.mkdir()
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "cli_tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {
+                    "stub": {
+                        "enabled": True,
+                        "command": sys.executable,
+                        "backend": "official",
+                        "model": "m",
+                        "cost_tier": "free",
+                        "timeout": 60,
+                        "approval_mode": "plan",
+                    }
+                },
+                "roles": {"cli-a": {"tool": "stub", "hint": "A"}},
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config.settings.config_dir = str(cfg_dir)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    seen: list[Path] = []
+
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False):
+        seen.append(Path(cwd))
+        return CliResult(ok=True, output="done", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    created = await service.start_delegations(
+        items=[{"role": "cli-a", "task": "查一下"}],
+        workspace=str(ws),
+    )
+    sid = created["session"]["id"]
+    assert Path(created["session"]["workspace"]) == ws.resolve()
+    await wait_for_status(service, sid, {"done", "failed"})
+    assert seen and seen[0].is_relative_to(ws.resolve()), seen
+    await harness.container.shutdown()
+
+
 async def test_start_delegations_stops_at_first_failure(tmp_path: Path, monkeypatch) -> None:
     """前一段失败就不再烧后面的额度。"""
     import sys

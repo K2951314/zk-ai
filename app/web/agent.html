@@ -1428,6 +1428,11 @@ $("composer").onsubmit = async (e) => {
       const active = state.session && (state.session.status === "running" ||
                                        state.session.status === "waiting_approval");
       const payload = { items };
+      // @ 委派和普通会话一样要带上选中的工作区：后端 DelegationPayload 一直
+      // 支持 workspace，漏传就会回落到网关项目根（2026-11-12 实测把刀具任务
+      // 派进了 ZK-AI 项目）。续接已有会话时后端优先用会话已存的 workspace，
+      // 这里传了也不冲突。
+      if (state.workspace) payload.workspace = state.workspace;
       if (state.current && !active) payload.session_id = state.current;   // 同一轮对话里继续追加
       const created = await api("/zkadmin/agent/delegations", {
         method: "POST", body: JSON.stringify(payload),

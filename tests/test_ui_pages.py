@@ -66,6 +66,23 @@ def test_taskspaces_no_inline_onclick_with_task_id() -> None:
     assert 'data-act="detail"' in html, "动作按钮应改为事件委托 + data-task"
 
 
+def test_agent_delegation_payload_carries_workspace() -> None:
+    """@ 执行体直跑必须把界面选中的工作区一起提交。
+
+    2026-11-12 实测：payload 只有 ``{ items }``，后端 ``_resolve_workspace``
+    回落到网关项目根，把「修刀具 PDF 跳转」的任务派进了 ZK-AI 项目；
+    CLI 全库检索不到 RCMT0803M0 后正确拒绝修改，但白跑 300s 超时。
+    后端 ``DelegationPayload.workspace`` 一直支持，缺的就是前端这一行。
+    """
+    html = (_WEB / "agent.html").read_text(encoding="utf-8")
+    start = html.index("const payload = { items };")
+    end = html.index('api("/zkadmin/agent/delegations"', start)
+    block = html[start:end]
+    assert "payload.workspace = state.workspace" in block, (
+        "@ 委派又漏了 workspace——后端会回落到网关项目根"
+    )
+
+
 def test_pages_stay_same_origin_only() -> None:
     """前端不许引外部资源（密钥红线之外的第二条同源纪律）。"""
     for page in ("agent.html", "events.html", "taskspaces.html", "models.html"):
