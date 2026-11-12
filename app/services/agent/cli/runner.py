@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -30,13 +32,96 @@ from app.services.agent.cli.registry import CliToolConfig
 
 #: 单路输出最多读多少字节（超出即丢弃剩余，进程照常等死）
 _MAX_STREAM_BYTES = 1_000_000
+#: 超时/取消时回显的「已产生输出」长度上限（failure_output 会截到 1000 字，
+#: 留 800 给正文，别让日志把失败原因挤掉）
+_PARTIAL_OUTPUT_CHARS = 800
+#: watchdog 轮询间隔
+_WATCHDOG_INTERVAL = 1.0
+#: ``--print-logs`` 等 INFO/DEBUG 日志行：只用于进度展示，不参与失败分类
+_LOG_LEVEL_RE = re.compile(r"^\s*(INFO|DEBUG|TRACE)\s+\d{4}-", re.IGNORECASE)
 
 
-async def _read_limited(stream: asyncio.StreamReader | None) -> str:
-    """限量读一路输出；进程写不停也只收前 _MAX_STREAM_BYTES。"""
+def summarize_cli_line(line: str) -> str | None:
+    """把 CLI 实时日志压成一句人话；非进度行返回 None。
+
+    码道 26.11.1 的 ``--print-logs`` stderr 实测 **1786 行 / 42s**，全推会
+    刷屏，日志里还带 URL 与代理地址。只挑「模型请求 / 工具调用 / 轮次 /
+    检索」四类。纯函数，便于单测，也便于将来换 CLI 时只改这里。
+    """
+    text = line.strip()
+    if not text:
+        return None
+    low = text.lower()
+    if "chat/completions" in low or ("inferhub-provider" in low and "model-id" in low):
+        return "正在请求模型…"
+    if (
+        "tool_request" in low
+        or "tool execute start" in low
+        or "toolexecutebefore" in low
+    ):
+        matched = re.search(r"tool[=:]([A-Za-z0-9_-]+)", text)
+        return f"调用工具 {matched.group(1)}…" if matched else "调用工具…"
+    if "step_finish" in low:
+        return "模型完成一轮推理"
+    if "step_start" in low:
+        return "模型开始一轮推理"
+    if "ripgrep start" in low:
+        return "检索代码…"
+    if '"type":"text"' in text or '"type": "text"' in text:
+        return "模型正在输出…"
+    return None
+
+
+def _diagnostic_stderr(stderr: str) -> str:
+    """剥掉 INFO/DEBUG 日志行，只留真正用于诊断的 stderr。
+
+    ``--print-logs`` 会把「使用环境变量CODEARTS_CLI_AK/SK授权CLI」这类
+    **正常**日志写进 stderr；不剥掉的话 ``fatal_output`` 会把成功的委派
+    误判成「未登录」（AUTH），``classify_failure`` 也可能被日志里的数字带偏。
+    """
+    return "\n".join(ln for ln in stderr.splitlines() if not _LOG_LEVEL_RE.match(ln))
+
+
+class _StreamSink:
+    """一路输出：累计字节（超时后仍可回显）+ 逐行回调（推 SSE）+ 心跳。"""
+
+    def __init__(
+        self,
+        *,
+        on_line: Callable[[str, str], None] | None,
+        name: str,
+        touch: Callable[[], None],
+    ) -> None:
+        self.chunks: list[bytes] = []
+        self._pending = b""
+        self._on_line = on_line
+        self._name = name
+        self._touch = touch
+
+    def feed(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+        self._touch()
+        if self._on_line is None:
+            return
+        self._pending += chunk
+        while b"\n" in self._pending:
+            raw, self._pending = self._pending.split(b"\n", 1)
+            self._on_line(self._name, raw.decode("utf-8", errors="replace").rstrip("\r"))
+
+    def flush(self) -> None:
+        if self._on_line is not None and self._pending:
+            self._on_line(self._name, self._pending.decode("utf-8", errors="replace").rstrip("\r"))
+            self._pending = b""
+
+    @property
+    def text(self) -> str:
+        return b"".join(self.chunks).decode("utf-8", errors="replace")
+
+
+async def _read_limited(stream: asyncio.StreamReader | None, sink: _StreamSink) -> str:
+    """限量读一路输出；边读边逐行回调，字节留着供超时/取消时回显。"""
     if stream is None:
         return ""
-    chunks: list[bytes] = []
     total = 0
     while True:
         try:
@@ -45,11 +130,12 @@ async def _read_limited(stream: asyncio.StreamReader | None) -> str:
             break
         if not chunk:
             break
-        chunks.append(chunk)
+        sink.feed(chunk)
         total += len(chunk)
         if total >= _MAX_STREAM_BYTES:
             break
-    return b"".join(chunks).decode("utf-8", errors="replace")
+    sink.flush()
+    return sink.text
 
 
 def _substitute(value: Any, task: str) -> Any:
@@ -120,11 +206,21 @@ async def run_delegation(
     task: str,
     cwd: Path,
     allow_bypass: bool = False,
+    on_line: Callable[[str, str], None] | None = None,
+    cancel: asyncio.Event | None = None,
+    idle_timeout: float | None = None,
 ) -> CliResult:
     """执行一次委派：MCP 走 HTTP，其余拉起子进程、等它结束、分类结果。
 
     ``allow_bypass`` 由服务层按任务空间边界判定后传入；这里只把执行体的
     ``approval_mode`` 提到 ``bypass``，具体映射由各适配器负责。
+
+    三个可选参数都是 2026-11-12 加的，默认全关，旧调用点/测试零改动：
+    - ``on_line(stream, line)``：每读到一行就回调，服务层挑摘要推 SSE；
+      纯本地管道 I/O，**不发任何额外上游请求、不额外消耗积分**。
+    - ``idle_timeout``：有输出心跳就不砍，静默超过这个秒数才判挂死；
+      ``None`` 表示只看总时长。总时长仍由 ``config.timeout`` 兜底。
+    - ``cancel``：被 set 时真正 ``kill`` 子进程（不再只是改会话状态）。
     """
     if allow_bypass and config.approval_mode != "bypass":
         config = replace(config, approval_mode="bypass")
@@ -147,6 +243,14 @@ async def run_delegation(
             failure=FailureKind.FAILED,
         )
     started = time.monotonic()
+    last_output = started
+    timed_out: str | None = None
+    cancelled = False
+
+    def _touch() -> None:
+        nonlocal last_output
+        last_output = time.monotonic()
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -171,42 +275,82 @@ async def run_delegation(
             output=failure_output(FailureKind.FAILED, f"进程拉起失败：{exc}"),
             failure=FailureKind.FAILED,
         )
+
+    out_sink = _StreamSink(on_line=on_line, name="stdout", touch=_touch)
+    err_sink = _StreamSink(on_line=on_line, name="stderr", touch=_touch)
+
+    async def _watchdog() -> None:
+        nonlocal timed_out, cancelled
+        idle = idle_timeout if idle_timeout and idle_timeout > 0 else None
+        while proc.returncode is None:
+            await asyncio.sleep(_WATCHDOG_INTERVAL)
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                proc.kill()
+                return
+            if idle is not None and (time.monotonic() - last_output) >= idle:
+                timed_out = f"空闲 {int(idle)}s 无任何输出，已强制终止"
+                proc.kill()
+                return
+
+    watchdog = asyncio.create_task(_watchdog())
+    stdout = stderr = ""
     try:
-        # 必须把 proc.wait() 和两路读流一起 await：只读到 EOF 时 asyncio 的
-        # 子进程回调可能还没跑，proc.returncode 仍是 None，原来那句
-        # `if code == 0` 就会把**成功的**委派判成失败（2026-10-25 实测：
-        # gemini 已经吐出完整 JSON，结果被标成【执行失败】，exit=None）。
-        stdout, stderr, _ = await asyncio.wait_for(
-            asyncio.gather(
-                _read_limited(proc.stdout),
-                _read_limited(proc.stderr),
-                proc.wait(),
-            ),
-            timeout=config.timeout,
-        )
-    except TimeoutError:
-        proc.kill()
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        elapsed = time.monotonic() - started
-        return CliResult(
-            ok=False,
-            output=failure_output(
-                FailureKind.FAILED,
-                f"超过超时上限 {int(config.timeout)}s 未结束，已强制终止",
-            ),
-            failure=FailureKind.FAILED,
-            elapsed=elapsed,
-        )
+        try:
+            # 必须把 proc.wait() 和两路读流一起 await：只读到 EOF 时 asyncio 的
+            # 子进程回调可能还没跑，proc.returncode 仍是 None，原来那句
+            # `if code == 0` 就会把**成功的**委派判成失败（2026-10-25 实测）。
+            stdout, stderr, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    _read_limited(proc.stdout, out_sink),
+                    _read_limited(proc.stderr, err_sink),
+                    proc.wait(),
+                ),
+                timeout=config.timeout,
+            )
+        except TimeoutError:
+            # watchdog 可能已经因取消/静默先 kill 了进程，它的原因更准确，别覆盖。
+            if timed_out is None:
+                timed_out = f"超过超时上限 {int(config.timeout)}s 未结束，已强制终止"
+            proc.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=5)
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog
+
+    # wait_for 超时会 cancel gather，但 sink 里已积累的字节还在——旧实现把
+    # 它们全丢了，运营者只看到一句「超时」，白烧的额度连线索都没有。
+    stdout = stdout or out_sink.text
+    stderr = stderr or err_sink.text
     elapsed = time.monotonic() - started
     code = proc.returncode
-    combined = f"{stdout}\n{stderr}"
+    diagnostic_stderr = _diagnostic_stderr(stderr)
+    combined = f"{stdout}\n{diagnostic_stderr}"
+
+    if timed_out or cancelled:
+        partial = (out_sink.text + "\n" + err_sink.text).strip()
+        tail = partial[-_PARTIAL_OUTPUT_CHARS:] if partial else ""
+        detail = timed_out or "任务被取消，已终止执行体进程"
+        if tail:
+            detail += f"\n\n--- 已产生的输出（末尾 {len(tail)} 字符）---\n{tail}"
+        return CliResult(
+            ok=False,
+            output=failure_output(FailureKind.FAILED, detail),
+            failure=FailureKind.FAILED,
+            elapsed=elapsed,
+            exit_code=code,
+        )
+
     # 失败也可能已经烧了 token（超时/被拦之前已经在推理），所以用量在两条路径都抽。
     tokens_in, tokens_out, cost_usd = adapter.parse_usage(stdout, stderr)
     if code == 0:
         # 个别 CLI 用退出码 0 表达登录失败（CodeBuddy 2.176.0 实测），
         # 不拦就会被记成「成功」并把登录提示当成答案回给父模型。
-        fatal = adapter.fatal_output(stdout, stderr)
+        # stderr 要剥掉 INFO 日志：码道 --print-logs 会写「使用环境变量
+        # CODEARTS_CLI_AK/SK授权CLI」，只按变量名匹配会把成功误判成未登录。
+        fatal = adapter.fatal_output(stdout, diagnostic_stderr)
         if fatal is not None:
             return CliResult(
                 ok=False,

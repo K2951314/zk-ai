@@ -689,7 +689,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 59 个测试模块，1362 个用例，全部 Mock
+├── tests/                # conftest + 59 个测试模块，1370 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -697,7 +697,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 117 个文件约 33,173 行，`tests/` 59 个测试模块 1362 个用例（约 23,955 行），
+规模：`app/` 117 个文件约 33,368 行，`tests/` 59 个测试模块 1370 个用例（约 24,099 行），
 `scripts/` 22 个文件约 6,511 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-11：新增三个测试模块（CLI 模型清单「只有实测算数」、
@@ -735,6 +735,12 @@ AK/SK 放在 `~/.codeartsdoer/installers/.env`（CLI 与网关都不读）、fol
 契约 2 条回归（均经变异验证），浏览器真机验抓到 body 里的 workspace，
 用例 1360 → 1362。另用单变量 A/B 实证「降档」对码道 300s 超时无效：
 同任务 max（43+ 轮工具）与默认档（31 轮）都超时，max + 极窄任务 49.8s 通过。
+2026-11-12 下午续二：委派等待改成「进度可见、不白等」——CodeArtsAdapter
+加 `--print-logs`（实测 +8.3s 起、1786 行实时日志，纯本地输出、零额外
+请求/积分）；runner 边读边回调经 SSE 推 `cli_log`，前端折叠面板限行 120、
+textContent 防注入；超时/取消回显已产生的输出；总时长 900s 兜底 + 空闲
+180s（有心跳不砍）；「停止」真正 kill 子进程。真机验 + SSE 端到端收到
+5 条进度事件；8 条回归均经变异验证，用例 1362 → 1370。
 上一轮 2026-11-10 删 `/ui/report` 跳转壳与其路由，`_UI_PAGES` 自动少一页、
 三个 parametrize 各少一例（1314 → 1311），新增守卫又补回 2 例 → 1313。
 再上一次是 2026-11-08 晚（手机远控 M1，新增 `tests/test_ui_pages.py`），
@@ -1433,7 +1439,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1362 个用例，全部通过，零网络、零真实配额。**
+**1370 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

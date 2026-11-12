@@ -818,6 +818,31 @@ function addStepLine(text) {
   if (state.autoScroll) stream.scrollTop = stream.scrollHeight;
 }
 
+function appendCliLog(text, streamName) {
+  // 执行体实时进度：CLI 本地 stderr 转发，不额外消耗额度。只放折叠面板、
+  // 不写进 transcript，避免把上千行 INFO 日志存进会话历史。
+  let box = $("cliLog");
+  if (!box) {
+    box = document.createElement("details");
+    box.id = "cliLog";
+    box.style.cssText = "margin:8px 0;border:1px solid var(--border, currentColor);border-radius:6px;font-size:12px;opacity:.85";
+    const summary = document.createElement("summary");
+    summary.textContent = "执行体实时日志（本地转发，不额外消耗额度）";
+    const pre = document.createElement("pre");
+    pre.style.cssText = "max-height:180px;overflow:auto;margin:0;padding:6px 8px;white-space:pre-wrap;color:var(--muted, currentColor)";
+    box.append(summary, pre);
+    $("stream").appendChild(box);
+  }
+  const pre = box.querySelector("pre");
+  const row = document.createElement("div");
+  const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  row.textContent = `[${stamp}] ${streamName || "cli"} · ${text}`;
+  pre.appendChild(row);
+  while (pre.childElementCount > 120) pre.firstElementChild.remove();
+  pre.scrollTop = pre.scrollHeight;
+  if (state.autoScroll) $("stream").scrollTop = $("stream").scrollHeight;
+}
+
 function syncSettingsButtons() {
   const mode = state.current ? (state.session?.permission || "default") : state.permission;
   $("pickPermission").textContent = `权限：${permissionName(mode)}`;
@@ -953,7 +978,11 @@ function handleEvent(ev) {
     case "session_started":
       state.session && (state.session.status = "running");
       setHeader();
+      $("cliLog")?.remove();
       addStepLine(`任务启动 · 模型 ${ev.model} · 工作区 ${ev.workspace}`);
+      return;
+    case "cli_log":
+      appendCliLog(ev.content, ev.stream);
       return;
     case "step_start":
       addStepLine();

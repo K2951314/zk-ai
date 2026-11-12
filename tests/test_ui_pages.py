@@ -83,6 +83,19 @@ def test_agent_delegation_payload_carries_workspace() -> None:
     )
 
 
+def test_agent_streams_cli_log_safely() -> None:
+    """执行体实时日志要有 SSE 分支和折叠面板，且不能走 innerHTML。
+
+    ``--print-logs`` 的日志来自外部进程，内容不可信；用 textContent 防注入，
+    只放折叠面板、不落 transcript。
+    """
+    html = (_WEB / "agent.html").read_text(encoding="utf-8")
+    assert 'case "cli_log"' in html
+    assert "appendCliLog(ev.content, ev.stream)" in html
+    assert "function appendCliLog" in html
+    assert "row.textContent =" in html, "日志内容不能拼进 innerHTML"
+
+
 def test_pages_stay_same_origin_only() -> None:
     """前端不许引外部资源（密钥红线之外的第二条同源纪律）。"""
     for page in ("agent.html", "events.html", "taskspaces.html", "models.html"):

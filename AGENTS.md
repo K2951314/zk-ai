@@ -575,7 +575,8 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   `cli_tools.yaml` 的 `models`/`free_models`）；模型清单优先用 CLI 自己的口径
   （`GET /executors/{role}/models`），免费标记只能手工维护。
   改 Python 要重启网关；只改 yaml 不用（每次新任务重读花名册）。
-  ⚠ 「停止」只改状态，**不 kill 子进程**（`run_delegation` 没有取消句柄）。
+  ✅ 「停止」会 kill 子进程（`_Running.cancel_event` + runner watchdog，2026-11-12 修）；
+  实时日志走 `cli_log` SSE（本地转发，不额外耗额度），超时/取消回显已产生的输出。
 - **skill 不是接口，是提示包**：本机技能只在 `~/.agents/skills`、`~/.claude/skills`、
   `~/.codex/skills`、`~/.catpaw/skills` 四处（codebuddy/qoder/gemini 目录为空）。
   所以「用 skill」= 把活派给装了 skill 的 CLI，而不是给网关加工具。

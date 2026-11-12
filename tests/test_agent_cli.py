@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -320,6 +321,136 @@ async def test_runner_treats_auth_text_with_exit_zero_as_failure(monkeypatch):
     assert result.ok is False
     assert result.failure is FailureKind.AUTH
     assert "未登录" in result.output
+
+
+class _SlowReader:
+    """先吐一段，然后挂住——模拟「已经干了活但还没结束」的进程。"""
+
+    def __init__(self, first: bytes, done: asyncio.Event) -> None:
+        self.first = first
+        self._done = done
+
+    async def read(self, size: int) -> bytes:
+        if self.first:
+            data, self.first = self.first, b""
+            return data
+        await self._done.wait()  # kill 时唤醒，真实进程此时管道 EOF
+        return b""
+
+
+class _HangingProc:
+    def __init__(self, partial: bytes) -> None:
+        self._done = asyncio.Event()
+        self.stdout, self.stderr = (
+            _SlowReader(partial, self._done), _SlowReader(b"", self._done),
+        )
+        self.returncode: int | None = None
+        self.killed = False
+
+    async def wait(self) -> int:
+        await self._done.wait()
+        return self.returncode if self.returncode is not None else 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self._done.set()
+
+
+def _patch_exec(monkeypatch, proc):
+    async def fake_exec(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(runner, "resolve_command", lambda argv: argv)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_exec)
+
+
+async def test_runner_timeout_keeps_partial_output(monkeypatch):
+    """超时不再把已产生的输出丢光（2026-11-12 白烧额度的根因）。"""
+    cfg = replace(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"), timeout=0.2)
+    proc = _HangingProc("已经跑了三轮检索\n第四轮开始\n".encode())
+    _patch_exec(monkeypatch, proc)
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."))
+    assert result.ok is False
+    assert "超过超时上限" in result.output
+    assert "第四轮开始" in result.output, "已产生的输出必须回显给运营者"
+    assert proc.killed
+
+
+async def test_runner_streams_lines_to_callback(monkeypatch):
+    """on_line 是本地管道回调，零额外请求；成功结果不受影响。"""
+    cfg = _cli("codebuddy", "codebuddy", "glm-5.2", "plan")
+    proc = _FakeProc(b"line one\nline two\n")
+    _patch_exec(monkeypatch, proc)
+    seen: list[tuple[str, str]] = []
+    result = await runner.run_delegation(
+        cfg, task="x", cwd=Path("."),
+        on_line=lambda stream, line: seen.append((stream, line)),
+    )
+    assert result.ok is True
+    assert seen == [("stdout", "line one"), ("stdout", "line two")]
+
+
+async def test_runner_cancel_really_kills_the_process(monkeypatch):
+    """「停止」不再只改状态：cancel_event 被 set 后子进程要被 kill。"""
+    monkeypatch.setattr(runner, "_WATCHDOG_INTERVAL", 0.01)
+    cfg = replace(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"), timeout=30)
+    proc = _HangingProc(b"")
+    _patch_exec(monkeypatch, proc)
+    event = asyncio.Event()
+    event.set()
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."), cancel=event)
+    assert proc.killed
+    assert "任务被取消" in result.output
+
+
+async def test_runner_idle_timeout_kills_silent_process(monkeypatch):
+    """有输出心跳就不砍，静默超过阈值才判挂死。"""
+    monkeypatch.setattr(runner, "_WATCHDOG_INTERVAL", 0.01)
+    cfg = replace(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"), timeout=30)
+    proc = _HangingProc(b"")
+    _patch_exec(monkeypatch, proc)
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."), idle_timeout=0.05)
+    assert proc.killed
+    assert "空闲" in result.output
+
+
+def test_summarize_cli_line_keeps_only_progress_signals():
+    """1786 行 INFO 日志只有少数值得推给前端，且不能把凭证字样带出去。"""
+    assert runner.summarize_cli_line(
+        'INFO service=inferhub-provider "hc headers model-id=kimi-k3.1-pro"'
+    ) == "正在请求模型…"
+    assert runner.summarize_cli_line(
+        'INFO service=file-write-metadata-hook "ToolExecuteBefore triggered" tool=grep'
+    ) == "调用工具 grep…"
+    assert runner.summarize_cli_line('INFO service=grep-helper "ripgrep start"') == "检索代码…"
+    assert runner.summarize_cli_line('{"type":"step_finish"}') == "模型完成一轮推理"
+    assert runner.summarize_cli_line(
+        'INFO service=auth "使用环境变量CODEARTS_CLI_AK/SK授权CLI"'
+    ) is None
+    assert runner.summarize_cli_line("") is None
+
+
+def test_codearts_fatal_output_ignores_print_logs_noise():
+    """--print-logs 的正常日志里也有 CODEARTS_CLI_AK，不能误判成未登录。"""
+    adapter = CodeArtsAdapter(
+        _cli("codearts", "codearts", "huaweicloud-maas/GLM-5.2", "plan")
+    )
+    logs = (
+        'INFO  2026-11-12T14:32:15 service=auth "使用环境变量CODEARTS_CLI_AK/SK授权CLI"\n'
+        'INFO  2026-11-12T14:32:16 service=env-credential "从环境变量 CODEARTS_CLI_AK ****"'
+    )
+    assert adapter.fatal_output("OK", logs) is None
+    assert adapter.fatal_output(
+        "认证失败，没有设置环境变量 CODEARTS_CLI_AK/CODEARTS_CLI_SK", logs
+    ) is FailureKind.AUTH
+
+
+def test_codearts_build_command_enables_print_logs():
+    argv = CodeArtsAdapter(
+        _cli("codearts", "codearts", "huaweicloud-maas/GLM-5.2", "plan")
+    ).build_command("x", "/w")
+    assert argv[:3] == ["codearts", "run", "--print-logs"]
 
 
 # --------------------------------------------------------------------------- #

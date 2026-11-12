@@ -39,7 +39,7 @@ from app.services.agent import mcp_call, taskspace, usage_ledger
 from app.services.agent.cli import CliRegistry, load_cli_registry
 from app.services.agent.cli import delegate as cli_delegate
 from app.services.agent.cli.registry import EFFORT_LEVELS
-from app.services.agent.cli.runner import run_delegation
+from app.services.agent.cli.runner import run_delegation, summarize_cli_line
 from app.services.agent.confirm import SessionApprovals
 from app.services.agent.model_catalog import describe_channels, load_catalog
 from app.services.agent.prompts import build_system_prompt
@@ -57,6 +57,12 @@ from app.services.agent.tools import (
 from app.services.request_service import RequestService
 
 logger = get_logger("services.agent")
+
+#: 执行体实时日志推 SSE 的节流（秒）。码道 --print-logs 实测 1786 行/42s，
+#: 不节流会把页面刷爆；摘要行由 summarize_cli_line 先过滤。
+_CLI_LOG_THROTTLE = 2.0
+#: 有输出心跳就不砍，静默这么久才判定挂死；总时长仍由 cli_tools.yaml 兜底。
+_CLI_IDLE_TIMEOUT = 180.0
 
 _ACTIVE_STATUSES = frozenset({"running", "waiting_approval"})
 #: followup 允许从哪些状态继续
@@ -84,6 +90,8 @@ class _Running:
     approvals: SessionApprovals = field(default_factory=SessionApprovals)
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
     cancelled: bool = False
+    #: 「停止」不只是改状态：set 之后 runner 会真正 kill 掉子进程
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     #: 本会话启动时的外部执行体花名册快照；空册 = delegate_cli 不出现
     cli_registry: CliRegistry = field(default_factory=CliRegistry)
     # ---- 子任务派发 ----------------------------------------------------- #
@@ -369,6 +377,27 @@ class AgentService:
         job.add_done_callback(_BACKGROUND_TASKS.discard)
         return await self.session_detail(session_id)
 
+    def _cli_line_handler(self, run: _Running) -> Any:
+        """执行体实时日志 → 摘要 → 节流 → SSE ``cli_log`` 事件。
+
+        纯本地管道 I/O + 本地 SSE 推送，**不发任何额外上游请求、不额外消耗
+        积分**。日志只在前端显示，不落 transcript，避免把上千行 INFO 日志
+        写进会话历史。
+        """
+        last = [0.0]
+
+        def handle(stream: str, line: str) -> None:
+            summary = summarize_cli_line(line)
+            if summary is None:
+                return
+            now = time.monotonic()
+            if now - last[0] < _CLI_LOG_THROTTLE:
+                return
+            last[0] = now
+            self._emit(run, {"type": "cli_log", "content": summary, "stream": stream})
+
+        return handle
+
     async def _delegation(self, run: _Running, config: Any, task: str) -> None:
         """执行体直跑：一次 run_delegation + 两条消息 + SSE 事件。"""
         session_id = run.session_id
@@ -409,7 +438,10 @@ class AgentService:
             })
             self._emit(run, {"type": "step_start", "step": 1, "model": config.model})
             result = await run_delegation(
-                config, task=task, cwd=delegation_cwd, allow_bypass=allow_bypass
+                config, task=task, cwd=delegation_cwd, allow_bypass=allow_bypass,
+                on_line=self._cli_line_handler(run),
+                cancel=run.cancel_event,
+                idle_timeout=_CLI_IDLE_TIMEOUT,
             )
             # 记账：CLI 没有价目表，这条记录是「实测价格」的唯一来源。
             usage_ledger.record_delegation(
@@ -584,7 +616,10 @@ class AgentService:
                     break
                 self._emit(run, {"type": "step_start", "step": index, "model": config.model})
                 result = await run_delegation(
-                    config, task=task, cwd=batch_cwd, allow_bypass=allow_bypass
+                    config, task=task, cwd=batch_cwd, allow_bypass=allow_bypass,
+                    on_line=self._cli_line_handler(run),
+                    cancel=run.cancel_event,
+                    idle_timeout=_CLI_IDLE_TIMEOUT,
                 )
                 # 记账：批量里每一段单独记，才能看出「哪一段最贵」。
                 usage_ledger.record_delegation(
@@ -629,6 +664,9 @@ class AgentService:
                     "step": index,
                     "executor": payload,
                 })
+                if run.cancelled:
+                    status, error = "cancelled", "任务被取消"
+                    break
                 if not result.ok:
                     status, error = "failed", result.output[:300]
                     break
@@ -664,6 +702,7 @@ class AgentService:
                 await self.repo.update_status(session_id, "cancelled")
             return True
         run.cancelled = True
+        run.cancel_event.set()  # runner 的 watchdog 会 kill 子进程
         run.approvals.deny_all()  # 唤醒等审批的循环，让它走取消分支
         return True
 

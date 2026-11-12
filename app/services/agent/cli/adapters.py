@@ -398,7 +398,11 @@ class CodeArtsAdapter(CliAdapter):
 
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
-        argv = [cfg.command, "run"]
+        # --print-logs 把内部日志实时打到 stderr：2026-11-12 实测 +8.3s 起、
+        # 42s 任务共 1786 行；模型答案仍是一次性出现在 stdout（+39.6s）。
+        # 网关据此推进度、当空闲心跳。只是把本来写进文件的日志转到 stderr，
+        # **不新增任何上游请求、不额外消耗积分**。
+        argv = [cfg.command, "run", "--print-logs"]
         if cfg.model:
             argv += ["-m", cfg.model]
         if cfg.effort:
@@ -441,8 +445,16 @@ class CodeArtsAdapter(CliAdapter):
         CLI 输出 UTF-8，中文正常；锚点仍用 ASCII 的 ``CODEARTS_CLI_AK``，
         这样即便哪天终端/上游把中文弄成乱码（PowerShell 5.1 控制台按 GBK
         显示就是这样），钩子照样认得出来。
+        ⚠ ``--print-logs`` 会把「使用环境变量CODEARTS_CLI_AK/SK授权CLI」
+        写进 stderr，那是**正常**日志。先剥掉 INFO/DEBUG 行再判断，否则
+        每次成功委派都会被误判成未登录。
         """
-        text = f"{stdout}\n{stderr}".lower()
+        noise = ("INFO ", "DEBUG ", "TRACE ")
+        stderr_lines = [
+            ln for ln in stderr.splitlines() if not ln.lstrip().startswith(noise)
+        ]
+        text = f"{stdout}\n" + "\n".join(stderr_lines)
+        text = text.lower()
         if "codearts_cli_ak" in text or "认证失败" in text:
             return FailureKind.AUTH
         return None

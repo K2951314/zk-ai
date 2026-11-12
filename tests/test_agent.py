@@ -1006,7 +1006,7 @@ async def test_start_delegation_runs_the_cli_without_touching_the_model(
 
     calls: list[str] = []
 
-    async def fake_run(cfg, *, task, cwd, allow_bypass=False):
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
         calls.append(task)
         return CliResult(ok=True, output="hello from cli", elapsed=0.42)
 
@@ -1063,7 +1063,7 @@ async def test_start_delegations_runs_items_in_order(tmp_path: Path, monkeypatch
 
     order: list[tuple[str, str]] = []
 
-    async def fake_run(cfg, *, task, cwd, allow_bypass=False):
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
         order.append((cfg.model, task))
         return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
 
@@ -1129,7 +1129,7 @@ async def test_start_delegations_honours_explicit_workspace(tmp_path: Path, monk
 
     seen: list[Path] = []
 
-    async def fake_run(cfg, *, task, cwd, allow_bypass=False):
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
         seen.append(Path(cwd))
         return CliResult(ok=True, output="done", elapsed=0.1)
 
@@ -1175,7 +1175,7 @@ async def test_start_delegations_stops_at_first_failure(tmp_path: Path, monkeypa
 
     calls: list[str] = []
 
-    async def fake_run(cfg, *, task, cwd, allow_bypass=False):
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
         calls.append(task)
         return CliResult(ok=False, output="boom", elapsed=0.1)
 
@@ -1249,7 +1249,7 @@ async def test_followup_delegation_appends_to_the_same_session(
     # 新建会话的默认状态是 running（正常流程由 start() 拉起循环后改状态）
     await service.repo.update_status(sid, "done")
 
-    async def fake_run(cfg, *, task, cwd, allow_bypass=False):
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
         return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
 
     monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
