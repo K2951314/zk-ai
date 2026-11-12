@@ -239,7 +239,7 @@ tools:
       - huaweicloud-maas/openpangu-2.0-pro
       - huaweicloud-maas/speed
     cost_tier: free              # 积分制；积分不清欠费、月底/到期作废，见费用中心
-    timeout: 300
+    timeout: 900                 # 允许 10~1800；300s 不够跑多轮检索（2026-11-12 实测）
     approval_mode: plan          # 不传审批旗，走安装时写好的沙箱默认
     # effort: max                # 思考强度（--variant），视模型支持再开
     free_models: []
