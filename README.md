@@ -689,7 +689,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 59 个测试模块，1352 个用例，全部 Mock
+├── tests/                # conftest + 59 个测试模块，1360 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -697,7 +697,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 117 个文件约 33,035 行，`tests/` 59 个测试模块 1352 个用例（约 23,750 行），
+规模：`app/` 117 个文件约 33,172 行，`tests/` 59 个测试模块 1360 个用例（约 23,879 行），
 `scripts/` 22 个文件约 6,511 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-11：新增三个测试模块（CLI 模型清单「只有实测算数」、
@@ -712,6 +712,22 @@ ZK-AI/
 Anthropic 兼容接口文档 / 下线公告补全 9 个目录 id 的预设（V4.1-Flash-1017 是
 1M + none/low/high/max，不再是 256K 猜测；arkts-spark 的 id 带点；下线模型
 带标），补 5 条回归，用例 1347 → 1352。
+同日晚间续三：市场验证新增第五种结论 `not_served`（目录有·接口不服务）——
+魔搭把开放权重的 Kimi-K3.1-Pro 列进目录却回 400「no provider supported」，
+别再混进泛泛的「报错」；补 1 条回归（经变异验证），用例 1352 → 1353。
+同日晚间续四：接入码道 CodeArts CLI 执行体（华为免费档，积分制）——
+新增 CodeArtsAdapter（`codearts run -m provider/model --variant 强度`，
+Windows 走原生 exe + 适配器补齐官方包装器的环境变量，AK/SK 经 .env 继承），
+base 补「退出码 0 但认证失败」的识别（按 ASCII 变量名匹配，兼容终端转码）；
+cli_tools 双配置加 codearts 工具与 cli-codearts 角色；补 5 条回归，
+端到端实跑验证（未授权 → 正确分类 AUTH），用例 1353 → 1358。
+2026-11-12 续：修码道执行体显示「CLI 自配模型」——根因是三处位置/状态问题：
+AK/SK 放在 `~/.codeartsdoer/installers/.env`（CLI 与网关都不读）、folderTrust
+受限模式让无头 `run`/`models` 一律报「文件夹未被信任」、`models`/`model`
+配置留空。按官方 FAQ 放行目录信任、凭据同步进项目 `.env`、填入
+`codearts models` 实测的 11 个 id；另修 `--manual_approval` 无头挂死（90s
+实测）、effort 旋钮未暴露，并更正「CLI 输出 GBK」的误判（实为 UTF-8）。
+补 2 条回归（均经变异验证），用例 1358 → 1360。
 上一轮 2026-11-10 删 `/ui/report` 跳转壳与其路由，`_UI_PAGES` 自动少一页、
 三个 parametrize 各少一例（1314 → 1311），新增守卫又补回 2 例 → 1313。
 再上一次是 2026-11-08 晚（手机远控 M1，新增 `tests/test_ui_pages.py`），
@@ -1410,7 +1426,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1352 个用例，全部通过，零网络、零真实配额。**
+**1360 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

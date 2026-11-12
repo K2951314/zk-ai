@@ -11,15 +11,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
+from app.api.agent import _tool_knobs
 from app.services.agent.cli import launcher, runner
 from app.services.agent.cli.adapters import (
     ClaudeAdapter,
+    CodeArtsAdapter,
     CodeBuddyAdapter,
     CodexAdapter,
     GeminiAdapter,
@@ -261,6 +265,25 @@ def test_codebuddy_auth_text_is_detected_even_with_exit_zero():
     assert adapter.fatal_output("", "") is None
 
 
+def test_codearts_auth_failure_detected_even_with_exit_zero():
+    """CodeArts 26.11.1：未配 AK/SK 时退出码 0、只报一句认证失败（实测）。
+
+    CLI 输出其实是 **UTF-8**（2026-11-12 `codearts models` 里「智速模式」正常）；
+    PowerShell 5.1 控制台按 GBK 显示才像乱码，runner 的 UTF-8 解码是对的，
+    不要为这个去改 runner。锚点用 ASCII 的 ``CODEARTS_CLI_AK``，两种形态都认：
+    正常中文 + 控制台乱码（GBK 字节被 UTF-8 replace 解码）。
+    """
+    adapter = CodeArtsAdapter(
+        _cli("codearts", "codearts", "huaweicloud-maas/GLM-5.2", "plan")
+    )
+    raw = "认证失败，没有设置环境变量 CODEARTS_CLI_AK/CODEARTS_CLI_SK"
+    mojibake = raw.encode("gbk").decode("utf-8", errors="replace")
+    assert "CODEARTS_CLI_AK" in mojibake and "认证失败" not in mojibake, "字节链路前提"
+    assert adapter.fatal_output(raw, "") is FailureKind.AUTH
+    assert adapter.fatal_output(mojibake, "") is FailureKind.AUTH
+    assert adapter.fatal_output("GLM-5.2 的上下文是 1M，支持 function calling", "") is None
+
+
 class _FakeReader:
     def __init__(self, data: bytes) -> None:
         self._data, self._pos = data, 0
@@ -377,8 +400,89 @@ def test_effort_and_context_default_to_tool_defaults():
     """不填 = 不传参数，交给工具自己的默认档。"""
     argv = QoderAdapter(_cli("qoder", "qoder", "DeepSeek-Flash", "plan")).build_command("x", "/w")
     assert "--reasoning-effort" not in argv and "--context-window" not in argv
+
+
+def test_codearts_run_argv_plan_and_model_and_variant():
+    """codearts run 的无头形态（26.11.1 run --help + 2026-11-12 授权实测）。
+
+    -m 走 provider/model；--variant 是它自己的思考强度档；任务文本必须是
+    最后一个位置参数。plan **不传 --manual_approval**：实测它在
+    stdin=DEVNULL 下挂起等交互审批、90 秒都不返回，会把每次委派拖到超时。
+    """
+    cfg = replace(
+        _cli("codearts", "codearts", "huaweicloud-maas/GLM-5.2", "plan"),
+        effort="max",
+    )
+    argv = CodeArtsAdapter(cfg).build_command("分析这个目录", "/workspace")
+    assert argv[:2] == ["codearts", "run"]
+    assert argv[argv.index("-m") + 1] == "huaweicloud-maas/GLM-5.2"
+    assert argv[argv.index("--variant") + 1] == "max"
+    assert "--manual_approval" not in argv
+    assert "--auto_approval" not in argv and "--full_access" not in argv
+    assert argv[-1] == "分析这个目录"
+
+
+def test_codearts_default_mode_passes_no_approval_flag():
+    """default = 不传审批旗，用安装时写好的沙箱默认（bash sandbox + deny_all）。"""
+    argv = CodeArtsAdapter(_cli("codearts", "codearts", "", "default")).build_command("x", "/w")
+    assert "--manual_approval" not in argv
+    assert "--auto_approval" not in argv and "--full_access" not in argv
+
+
+def test_codearts_no_model_omits_dash_m():
+    """显式留空时不传 -m，让 CLI 用它自己的默认模型（speed 智速模式）。
+
+    现役配置已填 model，这条只守住「空 = 不硬塞 -m」这个契约。
+    """
+    argv = CodeArtsAdapter(_cli("codearts", "codearts", "", "plan")).build_command("x", "/w")
+    assert "-m" not in argv
+
+
+def test_codearts_build_env_replicates_vendor_wrapper():
+    """Windows 直跑 exe 时，官方 codearts.cmd 包装器设的环境变量由适配器补齐。
+
+    路径口径与包装器一致（~/.codeartsdoer）。少这批变量，CLI 可能把
+    KERNEL_DATA_DIR 落到别处（授权态/会话全丢）。
+    """
+    env = CodeArtsAdapter(_cli("codearts", "codearts", "", "plan")).build_env()
+    assert env is not None
+    home = os.path.expanduser("~")
+    assert env["KERNEL_DATA_DIR"] == os.path.join(home, ".codeartsdoer", "cli-data")
+    assert env["KERNEL_CONFIG_DIR"] == os.path.join(home, ".codeartsdoer")
+    assert env["SCENARIO"] == "codeartsdoer"
+    assert env["OPENCODE_MODE"] == "tui"
+    # AK/SK 不在适配器里拼——它们经网关进程环境（.env）自然继承给子进程
+    assert "CODEARTS_CLI_AK" not in env and "CODEARTS_CLI_SK" not in env
     argv = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan")).build_command("x", "/w")
     assert "--effort" not in argv and "--autocompact" not in argv
+
+
+def test_codearts_template_ships_the_real_model_catalogue():
+    """控制台显示「CLI 自配模型」的根因：models 与 model 都为空。
+
+    2026-11-12 授权后 `codearts models` 实测列出 11 个 provider/model id。
+    /executors 的取数顺序是「实测缓存 → tool.models → [tool.model]」，
+    三者全空时前端 renderExecBar 退化成单选项「CLI 自配模型」。清单可以随
+    官方目录更新，但**不能退回空**，也不能让 model 落到清单外。
+    """
+    path = Path(__file__).resolve().parents[1] / "config" / "cli_tools.example.yaml"
+    codearts = yaml.safe_load(path.read_text(encoding="utf-8"))["tools"]["codearts"]
+    assert codearts["model"], "model 留空 = 前端显示「CLI 自配模型」"
+    assert codearts["model"] in codearts["models"]
+    assert len(codearts["models"]) == 11
+    assert all(m.startswith("huaweicloud-maas/") for m in codearts["models"])
+    assert "huaweicloud-maas/kimi-k3.1-pro" in codearts["models"]
+
+
+def test_codearts_executor_exposes_only_the_effort_knob():
+    """码道 26.11.1 只有 --variant（思考强度），没有上下文参数。
+
+    之前 knobs 只给 codebuddy/qoder 开，配置写了 effort 面板也不显示。
+    """
+    assert _tool_knobs("codearts") == ["effort"]
+    assert _tool_knobs("codebuddy") == ["effort", "context_window"]
+    assert _tool_knobs("qoder") == ["effort", "context_window"]
+    assert _tool_knobs("gemini") == []
 
 
 def test_codebuddy_argv_uses_json_output_and_plan():

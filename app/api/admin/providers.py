@@ -218,8 +218,22 @@ async def _verify_one_model(
     }
 
 
+#: 「目录列了但接口不服务」的上游说法。2026-11-12 魔搭实测：开放权重模型
+#: （Kimi-K3.1-Pro）上架进 ``/v1/models`` 目录，推理却返回 400
+#: ``has no provider supported``——名单 ≠ 服务部署。这是「名单有但不能调」
+#: 的第三种形态（前两种：403 套餐无权限、目录压根没有），必须和普通报错
+#: 分开，否则运营者只看到一个泛泛的「报错」，不知道该换供应商还是等部署。
+_NOT_SERVED_MARKERS = (
+    "no provider supported",
+    "no available provider",
+    "not served",
+    "model is not available",
+    "not available for inference",
+)
+
+
 def _probe_verdict(info: Any) -> str:
-    """把 ErrorInfo 收敛成运营者看得懂的四种结论。"""
+    """把 ErrorInfo 收敛成运营者看得懂的五种结论。"""
     msg = (info.message or "").lower()
     if info.http_status == 404 or "not found" in msg or "function id" in msg:
         return "not_found"
@@ -229,6 +243,8 @@ def _probe_verdict(info: Any) -> str:
         return "rate_limited"
     if info.error_type == "timeout":
         return "timeout"
+    if any(marker in msg for marker in _NOT_SERVED_MARKERS):
+        return "not_served"
     return "error"
 
 

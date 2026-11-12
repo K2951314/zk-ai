@@ -188,6 +188,62 @@ tools:
     models: [Sonus]
     free_models: []
 
+  # -------------------------------------------------------------------------
+  # 码道 CodeArts CLI（华为云，命令名 codearts，26.11.1 实测）—— 免费档（积分制）
+  # 无头形态：codearts run [message..]；-m provider/model 指定模型
+  #   （授权后先跑 `codearts models` 拿清单，形如 huaweicloud-maas/GLM-5.2）
+  # --variant 是它自己的思考强度档（high/max/minimal，provider-specific）
+  # 审批三档：--manual_approval / --auto_approval / --full_access（26.11.1）；
+  #   ⚠ 2026-11-12 实测 --manual_approval 在无头（stdin=DEVNULL）下挂起等
+  #   交互审批、90s 不返回 → plan/default 都**不传旗**，走安装时写好的沙箱
+  #   默认（bash_mode=sandbox、network_policy=deny_all）；full_access 一律不开。
+  # ⚠ 授权靠华为云 AK/SK 环境变量（CODEARTS_CLI_AK / CODEARTS_CLI_SK），
+  #   在 https://codearts.huaweicloud.com/portal/settings/cli-auth 申请，
+  #   写进**项目根 .env** 后重启网关（子进程从网关进程环境继承）。
+  #   没有浏览器登录那条路；把 AK/SK 放到 ~/.codeartsdoer/installers/.env
+  #   **无效**——官方 codearts.cmd 不加载它，CLI 只认进程环境变量。
+  # ⚠ 首次无头运行还会撞「文件夹未被信任」exit 1：把
+  #   ~/.codeartsdoer/cli-data/settings.json 的 security.folderTrust.enabled
+  #   置 false（官方 FAQ；文件权限仍由 CLI 沙箱 + 审批档控制）。
+  # ⚠ 未授权时退出码是 0、只报认证失败（adapters 的 fatal_output 认它）；
+  #   CLI 输出是 UTF-8，PowerShell 控制台按 GBK 显示才像乱码。
+  # ⚠ Windows：which("codearts") 命中的是华为自己的 codearts.cmd 包装器
+  #   （非 npm shim，launcher 取不出入口会直接报错），command 必须给原生
+  #   exe 全路径：%USERPROFILE%\.codeartsdoer\installers\bin\codearts.exe
+  #   （包装器设的 KERNEL_*/OPENCODE_* 环境变量由适配器 build_env 补齐）。
+  #   Linux 上 PATH 里的 codearts 是 shell 脚本，可直接 exec，用命令名即可。
+  # ⚠ Windows 安装脚本是 UTF-8 无 BOM，PS 5.1 按 GBK 解析会报语法错：
+  #   `irm <install.ps1> | iex` 能容忍（注释乱码不改结构），或下载后转成
+  #   带 BOM 的 UTF-8 再跑。
+  # ⚠ 沙箱限制：bash 在沙箱里跑、network_policy=deny_all——git 查询类
+  #   操作在 CLI 模式下会失败，别派这类任务
+  # -------------------------------------------------------------------------
+  codearts:
+    enabled: true
+    command: codearts            # Linux；Windows 改成 exe 全路径（见上）
+    backend: official            # 用自家积分（注册/学生认证送 4000+），不指向网关
+    # 2026-11-12 授权后 `codearts models` 的真实目录（11 个，非猜测）。
+    # 官方上新/下线模型时同步这份清单；CLI 默认 model 是 speed（智速模式）。
+    # 清单为空且 model 也空时，控制台只会显示「CLI 自配模型」——别留空。
+    model: huaweicloud-maas/GLM-5.2
+    models:
+      - huaweicloud-maas/deepseek-v4.1-flash
+      - huaweicloud-maas/deepseek-v4.1-flash-1017
+      - huaweicloud-maas/GLM-5.2
+      - huaweicloud-maas/glm-5.2-sft-harmony
+      - huaweicloud-maas/glm-5.3
+      - huaweicloud-maas/glm-5.3-flash
+      - huaweicloud-maas/kimi-k3
+      - huaweicloud-maas/kimi-k3.1-pro
+      - huaweicloud-maas/openpangu-2.0-flash
+      - huaweicloud-maas/openpangu-2.0-pro
+      - huaweicloud-maas/speed
+    cost_tier: free              # 积分制；积分不清欠费、月底/到期作废，见费用中心
+    timeout: 300
+    approval_mode: plan          # 不传审批旗，走安装时写好的沙箱默认
+    # effort: max                # 思考强度（--variant），视模型支持再开
+    free_models: []
+
 # ---------------------------------------------------------------------------
 # 角色 -> 执行体映射（父 agent 派单时只看到角色名与能力描述）
 # 设计约束（与 app/services/agent/roles.py 内部角色同一套哲学）：
@@ -208,6 +264,9 @@ roles:
   cli-grinder-gem:
     tool: gemini                  # 第三条免费档，官方额度最干净
     hint: 机械改写、批量整理（Gemini 免费档）
+  cli-codearts:
+    tool: codearts                # 华为码道免费档（积分制，AK/SK 授权）
+    hint: 代码分析/问答（码道 CLI 执行）
   cli-skill:
     tool: codex                   # 需要本机 skill 的活（codex 自带 ~/.codex/skills）
     hint: 需要本机 skill 的任务（外部 CLI 执行）

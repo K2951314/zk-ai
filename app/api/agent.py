@@ -164,6 +164,20 @@ class DelegationPayload(BaseModel):
     workspace: str | None = Field(default=None, max_length=500)
 
 
+def _tool_knobs(tool_name: str) -> list[str]:
+    """控制台「设置每一段」里该执行体能调的旋钮。
+
+    codebuddy / qoder 暴露思考强度 + 上下文；codearts 26.11.1 只有
+    ``--variant``（思考强度，见 run --help），没有上下文参数；
+    其余（gemini 0.61 等）都没暴露。
+    """
+    if tool_name in {"codebuddy", "qoder"}:
+        return ["effort", "context_window"]
+    if tool_name == "codearts":
+        return ["effort"]
+    return []
+
+
 @router.get("/executors")
 async def list_executors(container: ContainerDep) -> dict[str, Any]:
     """可派的执行体花名册（控制台 @ / 面板的数据源）。"""
@@ -192,8 +206,8 @@ async def list_executors(container: ContainerDep) -> dict[str, Any]:
             "effort": tool.effort,
             "context_window": tool.context_window,
             "hint": rc.hint,
-            # 只有这两家 CLI 有思考/上下文旋钮；gemini 0.61 没有暴露
-            "knobs": ["effort", "context_window"] if tool.name in {"codebuddy", "qoder"} else [],
+            # 各 CLI 暴露的旋钮不同，见 _tool_knobs；别让面板显示并不存在的参数
+            "knobs": _tool_knobs(tool.name),
             "models_source": source,
             "models": [
                 {

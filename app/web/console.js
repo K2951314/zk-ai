@@ -1838,7 +1838,8 @@ async function openMarketModal(presetPid) {
   modal.innerHTML = `<div class="card wide">
     <h3>🧺 模型市场</h3>
     <div class="modal-sub">选一个供应商，点「探测」列出它的模型目录（目录不大时会**自动验证**一遍）——
-      <b>目录里有 ≠ 你账号能调</b>（实测：商汤列了 deepseek-v4.1-flash 但套餐没有；NVIDIA 列的 glm-5.3 直接挂死）。</div>
+      <b>目录里有 ≠ 你账号能调</b>（实测：商汤列了 deepseek-v4.1-flash 但套餐没有；NVIDIA 列的 glm-5.3 直接挂死；
+      魔搭把开放权重的 Kimi-K3.1-Pro 列进目录，推理却回「no provider supported」）。结论 pill 指向原因，别猜。</div>
     <div class="row-flex" style="margin-bottom:10px">
       <label class="small muted">供应商
         <select id="mk-provider">${providers.map(p => `<option value="${esc(p.id)}" ${p.id === first ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select>
@@ -1943,6 +1944,7 @@ async function openMarketModal(presetPid) {
         not_found: ["danger", "上游没有"],
         no_entitlement: ["danger", "套餐无权限"],
         rate_limited: ["amber", "限流中"],
+        not_served: ["amber", "目录有·不服务"],
         error: ["amber", "报错"],
       };
       const render = (arr) => arr.map((x, idx) => {

@@ -80,6 +80,13 @@ config/*.bak*
 .workbuddy-ai/
 # 任务空间：每次派活自动生成的独立目录（含产物、日志、进度），不进仓库
 .taskspaces/
+# 码道 CLI 在 workspace 根生成的项目级元数据（AGENTS.md / mem-exp-config.json
+# 等），不是源码；目录自带的 .gitignore 只挡了 npm 产物，这里整目录排除。
+# 2026-11-12 实测：漏这条时 `git add -A` 会把这两个文件一起提交。
+.codeartsdoer/
+# Claude Code 等工具在 workspace 根生成的临时目录（任务输出、git objects 副本），
+# 不是源码；2026-11-12 实测 43 个文件，漏这条时 git add -A 会整包带上。
+.tmp/
 # 诊断会话留下的临时调试脚本（自带 ruff/mypy 历史错误，去留未定，先排除出提交）
 scripts/probe_upstream_path.py
 

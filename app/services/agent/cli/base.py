@@ -65,6 +65,12 @@ _AUTH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"invalid api key",
         r"authentication failed",
         r"401",
+        # 2026-11-12 实测：CodeArts CLI 未配 AK/SK 时退出码 0、只报一句
+        # 「认证失败，没有设置环境变量 CODEARTS_CLI_AK/CODEARTS_CLI_SK」。
+        # CLI 输出是 UTF-8（PowerShell 控制台按 GBK 显示才像乱码），所以中文
+        # 与 ASCII 变量名都能匹配；保留后者是为了兼容终端转码后的形态。
+        r"codearts_cli_ak",
+        r"认证失败",
     )
 )
 

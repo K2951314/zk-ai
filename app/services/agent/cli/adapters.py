@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, ClassVar
 
 from app.services.agent.cli.base import MAX_OUTPUT, CliAdapter, FailureKind, classify_failure
@@ -349,6 +350,104 @@ def _sum_token_stats(stats: object) -> tuple[int | None, int | None]:
     return total_in, total_out
 
 
+class CodeArtsAdapter(CliAdapter):
+    """CodeArts CLI / 码道（华为云，命令名 codearts，26.11.1 的 run --help 实测）。
+
+    无头形态：``codearts run [message..]``——位置参数直接收任务文本；
+    ``-m provider/model`` 指定模型（``codearts models`` 拿清单，如
+    ``huaweicloud-maas/GLM-5.2``）；``--variant`` 是它自己的思考强度档
+    （provider-specific，官方示例 high/max/minimal）。
+
+    审批三档（26.11.1 实测词表）：``--manual_approval`` / ``--auto_approval``
+    / ``--full_access``。统一权限的映射：
+      plan    -> 不传旗，走安装时写好的沙箱默认（bash_mode=sandbox、
+                 network_policy=deny_all，install.ps1 落盘的两个 config.json）
+      default -> 不传旗，同上
+      bypass  -> 不映射（仍是沙箱默认）：``--full_access`` 等于绕过 zkai
+                 的两阶段审批卡；注册表不让配置写 bypass，服务层动态提升的
+                 ``allow_bypass`` 在这条执行体上同样不生效。
+    ⚠ 2026-11-12 授权后实测：**``--manual_approval`` 在无头（stdin=DEVNULL）
+    下会挂起等交互审批，90 秒都不返回**；不传旗 / ``--auto_approval`` 都秒回。
+    所以 plan 不能再用它——沙箱默认本身就是最保守的可运行档，别为了「看起来
+    更安全」把执行体挂死。
+
+    授权与别家不同：**基于华为云 AK/SK 环境变量**（CODEARTS_CLI_AK / SK，
+    在 codearts.huaweicloud.com/portal/settings/cli-auth 申请），没有
+    「浏览器登录」那条路。未配置时**退出码是 0**、只在输出里报认证失败
+    （2026-11-12 实测）——所以 fatal_output 必须认它，否则被记成成功。
+
+    两个 2026-11-12 实测的「位置」坑（环境侧，代码改不了）：
+    - 把 AK/SK 存到 ``~/.codeartsdoer/installers/.env`` **没用**：官方
+      ``codearts.cmd`` 只设 KERNEL_*/OPENCODE_* 后直接跑 exe，从不加载它；
+      CLI 只认进程环境变量。必须写进项目根 ``.env``，网关启动时加载、
+      再由 ``run_delegation`` 的 ``{**os.environ, **extra}`` 继承给子进程。
+    - 首次无头运行还会撞「文件夹未被信任」：``~/.codeartsdoer/cli-data/
+      settings.json`` 的 ``security.folderTrust.enabled`` 默认 true，
+      交互 TUI 才能点「信任」，无头一律 exit 1。按官方 FAQ 置 false 即可
+      （文件权限仍由 CLI 沙箱 + 审批档控制）。
+    CLI 输出是 **UTF-8**（PowerShell 5.1 控制台按 GBK 显示才看着像乱码），
+    runner 的 ``decode("utf-8", errors="replace")`` 是对的，不要改。
+
+    Windows 注意：which("codearts") 命中的是华为自己的 codearts.cmd 包装器
+    （非 npm shim，launcher 取不出入口，直接报 LauncherError）。所以 Windows
+    上 command 要给原生 exe 全路径（~/.codeartsdoer/installers/bin/codearts.exe），
+    包装器设的那批 KERNEL_*/OPENCODE_* 环境变量由本适配器的 build_env 补齐
+    （照抄 codearts.cmd，含 NODE_TLS_REJECT_UNAUTHORIZED=0——官方包装器
+    替用户处理代理/证书场景的原样设置）。
+    """
+
+    def build_command(self, task: str, cwd: str) -> list[str]:
+        cfg = self.config
+        argv = [cfg.command, "run"]
+        if cfg.model:
+            argv += ["-m", cfg.model]
+        if cfg.effort:
+            argv += ["--variant", cfg.effort]
+        # plan/default 都不传审批旗：--manual_approval 在无头下挂死（见类注释
+        # 的 2026-11-12 实测），沙箱默认本身就是最保守的可运行档。
+        # 也不映射 bypass -> --full_access：那等于绕开 zkai 的两阶段审批卡。
+        argv.append(task)
+        return argv
+
+    def build_env(self) -> dict[str, str] | None:
+        """补齐官方 codearts.cmd 包装器设置的环境变量（Windows 直跑 exe 时必需）。
+
+        路径口径与包装器一致：``~/.codeartsdoer``（expanduser 跨平台）。
+        """
+        home = os.path.expanduser("~")
+        root = os.path.join(home, ".codeartsdoer")
+        return {
+            "SCENARIO": "codeartsdoer",
+            "KERNEL_DATA_DIR": os.path.join(root, "cli-data"),
+            "KERNEL_STATE_DIR": os.path.join(root, "state"),
+            "KERNEL_CONFIG_DIR": root,
+            "OPENCODE_CHANNEL": "latest",
+            "OPENCODE_CONFIG": os.path.join(root, "codearts_cli.json"),
+            "OPENCODE_CONFIG_FILE": "codearts_cli.json,codearts_cli.jsonc",
+            "OPENCODE_MODE": "tui",
+            "PLUGIN_ENV": "hc",
+            "NODE_TLS_REJECT_UNAUTHORIZED": "0",
+            "OPENCODE_DISABLE_MODELS_FETCH": "1",
+            "OPENCODE_DISABLE_AUTOUPDATE": "true",
+            "OPENCODE_ALWAYS_NOTIFY_UPDATE": "false",
+            "CODEARTS_DISABLE_AUTO_UPDATE": "true",
+            "CODEAGENT_USE_MESSAGE_FEEDBACK": "false",
+            "OMO_SEND_ANONYMOUS_TELEMETRY": "0",
+        }
+
+    def fatal_output(self, stdout: str, stderr: str) -> FailureKind | None:
+        """未配 AK/SK 时退出码 0、只报一句认证失败（2026-11-12 实测）。
+
+        CLI 输出 UTF-8，中文正常；锚点仍用 ASCII 的 ``CODEARTS_CLI_AK``，
+        这样即便哪天终端/上游把中文弄成乱码（PowerShell 5.1 控制台按 GBK
+        显示就是这样），钩子照样认得出来。
+        """
+        text = f"{stdout}\n{stderr}".lower()
+        if "codearts_cli_ak" in text or "认证失败" in text:
+            return FailureKind.AUTH
+        return None
+
+
 class McpAdapter(CliAdapter):
     """MCP 执行体：不拉子进程，由 runner 直接发 HTTP JSON-RPC。
 
@@ -390,4 +489,5 @@ ADAPTERS: dict[str, type[CliAdapter]] = {
     "qoder": QoderAdapter,
     "codebuddy": CodeBuddyAdapter,
     "gemini": GeminiAdapter,
+    "codearts": CodeArtsAdapter,
 }

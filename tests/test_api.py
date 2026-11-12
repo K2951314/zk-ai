@@ -1963,6 +1963,31 @@ async def test_verify_catches_an_upstream_not_found(api) -> None:
     assert r.json()["results"][0]["verdict"] == "not_found"
 
 
+async def test_verify_catches_a_model_listed_but_not_served(api) -> None:
+    """魔搭 2026-11-12 实测：Kimi-K3.1-Pro 在 /v1/models 目录里，推理却返回
+    400 "has no provider supported"——开放权重上架 ≠ 推理服务部署。
+
+    这是「名单有但不能调」的第三种形态（前两种：403 套餐无权限、目录压根没有），
+    运营者已三次撞上。必须和普通「报错」分开：结论要能直接告诉他该换供应商
+    （K3.1 Pro 的 API 在月之暗面官方和 OpenRouter，魔搭只有权重）。
+    """
+    client, harness = api
+    harness.adapter.queue(Behavior(
+        status=400,
+        error_message="Model id : moonshotai/Kimi-K3.1-Pro , has no provider supported",
+    ))
+    r = await client.post(
+        "/zkadmin/providers/fake/models/verify",
+        json={"models": ["moonshotai/Kimi-K3.1-Pro"], "timeout_seconds": 5},
+        headers=BURNER_HEADERS,
+    )
+    assert r.status_code == 200
+    got = r.json()["results"][0]
+    assert got["ok"] is False
+    assert got["verdict"] == "not_served", got
+    assert "no provider supported" in got["message"]
+
+
 async def test_verify_rejects_unknown_provider(api) -> None:
     client, _harness = api
     r = await client.post(
