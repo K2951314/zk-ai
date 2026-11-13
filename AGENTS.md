@@ -668,6 +668,33 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 - 上游 429 正文里的「多少秒后再来」没有解析（只认 `Retry-After` 头）。加「从自由文本
   猜秒数」有误判风险，**刻意不做**。
 
+## 华为云 MaaS（HW）：目录通、推理 403，不能当第二供应商（2026-11-13 实测）
+
+服务器上 `HW` 供应商开着、`deepseek-v4.1-flash-1017` 也部署在它上面，看起来是
+「给 `zk-auto` 加一条与 sensenova 独立的腿」的现成方案。**实测否决**：
+
+| 检查 | 结果 |
+|---|---|
+| `GET https://api.modelarts-maas.com/openai/v1/models` | **200**，9 个模型在列 |
+| `POST deepseek-v4.1-flash-1017` | **403**（无权限） |
+| `POST deepseek-v3` / `DeepSeek-V3` | 404 |
+
+- `hw-01` 是 `enabled: false`，**这是对的**，别去打开——和 NVIDIA 那条一样是
+  **账号级没开通**，改配置解决不了（要走华为云侧申请模型权限）。
+- 又一例「目录里有 ≠ 能调用」：这是本项目第 **四** 次栽在同一件事上
+  （商汤 `deepseek-v4.1-flash` 403、NVIDIA `glm-5.3` 挂死、魔搭 `qwen38-flash-next`
+  400、HW `deepseek-v4.1-flash-1017` 403）。**任何清单都不能当权限用。**
+- ⚠ 连带暴露一个体检盲区（已修）：`scripts/check_config.py` 的 `_live_deployments`
+  只看 `dep.enabled` + `provider.enabled`，**不看凭据**。于是「供应商开着、唯一
+  Key 被禁」的部署被算成可达，体检报「0 警告」，而 `ds` 别名链的**第一条腿**
+  正是它——真机要等第一次请求撞 403 才暴露。现在 `_provider_has_credentials`
+  把「凭据全被禁」也算不可达（`requires_credential=False` 的 Ollama 类不误杀），
+  回归测试 `tests/test_check_config_reachability.py` 六例 + 变异验证。
+  服务器上跑新版体检立刻抓出：`deepseek-v4.1-flash-1017（不可达）`。
+
+**结论：`zk-auto` 目前没有独立于 sensenova 的第二供应商腿。** 要加只有两条路——
+HW 去开模型权限，或接一个真能调的新供应商。别拿「目录 200」当可用证据。
+
 ## 当前状态（持续整理：2026-10-07）
 
 - **`.env` 是运营配置，不是测试夹具**：绝不用 `read_text()` 读写它（CRLF 会被悄悄

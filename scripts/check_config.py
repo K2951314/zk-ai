@@ -33,16 +33,35 @@ logger = logging.getLogger("check_config")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _provider_has_credentials(config: AppConfig, provider_id: str) -> bool:
+    """该供应商还有没有**启用**的凭据（不需要 Key 的供应商恒为 True）。"""
+    provider = config.providers.get(provider_id)
+    if provider is None or not provider.enabled:
+        return False
+    if not provider.requires_credential:
+        return True
+    return any(cred.enabled for cred in provider.credentials)
+
+
 def _live_deployments(config: AppConfig, model_id: str) -> list[DeploymentConfig]:
-    """该模型真正可达的部署：部署自身启用，且它所属的供应商也启用。"""
+    """该模型真正可达的部署：部署启用、供应商启用、且**凭据没被全禁**。
+
+    最后一条是 2026-11-13 补的：原来只看 ``dep.enabled`` 和 ``provider.enabled``，
+    于是「供应商开着、唯一那个 Key 是 ``enabled: false``」的部署被算成可达，
+    体检报「0 警告」而运行时静默跳过。服务器上的 ``HW`` 正是这个形状
+    （``hw-01 enabled=False`` 却让 ``deepseek-v4.1-flash-1017`` 显示为可用）。
+    **「配置里有」不等于「能调用」**——同 §已知坑 的三反例表。
+    """
     model = config.models.get(model_id)
     if model is None or not model.enabled:
         return []
     live: list[DeploymentConfig] = []
     for dep in model.deployments:
-        provider = config.providers.get(dep.provider_id)
-        if dep.enabled and provider is not None and provider.enabled:
-            live.append(dep)
+        if not dep.enabled:
+            continue
+        if not _provider_has_credentials(config, dep.provider_id):
+            continue
+        live.append(dep)
     return live
 
 
