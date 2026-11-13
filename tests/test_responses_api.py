@@ -16,6 +16,7 @@ agent loop cannot live without:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -287,6 +288,44 @@ async def test_non_streaming_output_carries_function_call(responses_api) -> None
 # --------------------------------------------------------------------------- #
 # Streaming grammar
 # --------------------------------------------------------------------------- #
+async def test_silent_upstream_emits_keepalive_pings(responses_api, monkeypatch) -> None:
+    """上游静默时也要发字节，且这条路径此前**连断连检测都没有**（2026-11-13 补）。
+
+    断言分两半：ping 注释行真的出现；解析出来的 Responses 事件序列一个都没变。
+    """
+    import app.api.responses as responses_mod
+
+    monkeypatch.setattr(responses_mod, "keepalive_interval", lambda _v: 0.05)
+    client, adapter, _harness = responses_api
+    adapter.chunk_script = [
+        _chunk(role="assistant"),
+        _chunk(content="part0 "),
+        _chunk(finish_reason="stop", usage=Usage.build(10, 5)),
+    ]
+
+    calls = {"n": 0}
+    original = adapter.stream
+
+    async def slow_stream(request, ctx):
+        async for chunk in original(request, ctx):
+            if calls["n"]:
+                await asyncio.sleep(0.25)  # 静默，远大于 0.05s 心跳
+            calls["n"] += 1
+            yield chunk
+
+    adapter.stream = slow_stream  # type: ignore[method-assign]
+    response = await client.post(
+        "/v1/responses",
+        json={"model": "fake-model", "input": "hello", "stream": True, **CODEX_HEAD},
+    )
+    assert response.status_code == 200
+    assert ": ping" in response.text, "静默期间必须发心跳注释行"
+    events = parse_sse(response.text)
+    names = [name for name, _data in events]
+    assert names[0] == "response.created"
+    assert "response.completed" in names
+
+
 async def test_streaming_announces_items_before_deltas(responses_api) -> None:
     """The Codex regression: no delta may precede its ``output_item.added``."""
     client, adapter, _harness = responses_api

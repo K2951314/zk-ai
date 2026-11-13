@@ -29,6 +29,8 @@ class PendingApproval:
     approved: bool = False
     remember: bool = False
     resolved: bool = False
+    #: 只给「按角色记免打扰」的工具用（目前是 delegate_cli）；其余为空串。
+    role: str = ""
 
 
 class SessionApprovals:
@@ -38,11 +40,32 @@ class SessionApprovals:
         self.pending: dict[str, PendingApproval] = {}
         self.always_allow: set[str] = set()
 
-    def skipped(self, tool: str) -> bool:
-        return tool in self.always_allow
+    def skipped(self, tool: str, *, role: str = "") -> bool:
+        """这个工具（+ 可选角色）是否已在本会话被放行。
+
+        ``role`` 只对 ``delegate_cli`` 有意义：按角色分别记忆，
+        避免「放行一次免费档」变成「放行所有角色含收费 + bypass 档」。
+        """
+        return self._key(tool, role) in self.always_allow
+
+    @staticmethod
+    def _key(tool: str, role: str) -> str:
+        """免打扰的记忆键。
+
+        只有 ``delegate_cli`` 带角色；``write_file`` / ``run_command``
+        仍按工具名记——它们的风险形状不随参数变化，拆细只会让审批变吵。
+        MCP 工具同理带 ``tool`` 名（不同 MCP 工具风险不同）。
+        """
+        return f"{tool}:{role}" if role else tool
 
     def register(
-        self, tool: str, args: dict[str, Any], preview: str, display: dict[str, Any] | None
+        self,
+        tool: str,
+        args: dict[str, Any],
+        preview: str,
+        display: dict[str, Any] | None,
+        *,
+        role: str = "",
     ) -> PendingApproval:
         approval = PendingApproval(
             id=f"apr_{uuid.uuid4().hex[:12]}",
@@ -50,6 +73,7 @@ class SessionApprovals:
             args=args,
             preview=preview,
             display=display,
+            role=role,
         )
         self.pending[approval.id] = approval
         return approval
@@ -65,7 +89,7 @@ class SessionApprovals:
         approval.approved = approved
         approval.remember = approved and remember
         if approval.remember:
-            self.always_allow.add(approval.tool)
+            self.always_allow.add(self._key(approval.tool, approval.role))
         approval.resolved = True
         approval.event.set()
         return approval

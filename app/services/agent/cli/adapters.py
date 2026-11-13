@@ -10,7 +10,7 @@ import json
 import os
 from typing import Any, ClassVar
 
-from app.services.agent.cli.base import MAX_OUTPUT, CliAdapter, FailureKind, classify_failure
+from app.services.agent.cli.base import CliAdapter, FailureKind, classify_failure, clip_output
 
 #: 走本机网关时的默认端点与占位 key（网关 /v1/* 当前不校验 key）
 _DEFAULT_GATEWAY_URL = "http://127.0.0.1:8317/v1"
@@ -48,7 +48,8 @@ class QwenAdapter(CliAdapter):
 class ClaudeAdapter(CliAdapter):
     """Claude Code（命令名 claude）。
 
-    无头形态：``claude -p <task>``（``-p`` 是布尔开关，任务走位置参数）。
+    无头形态：``claude -p <task> --output-format json``（``-p`` 是布尔开关，
+    任务走位置参数）。
 
     - ``model`` 留空 = **不传 ``--model``**，用它自己配置的模型。本机是 CC Switch
       选定的那个，走 ``127.0.0.1:15721`` 的本地代理。**别硬塞网关别名**：``-p``
@@ -57,6 +58,12 @@ class ClaudeAdapter(CliAdapter):
     - ``approval_mode: bypass`` → ``--dangerously-skip-permissions``。Claude Code
       没有无头可用的只读档（``--permission-mode plan`` 同样被客户端判非法），
       所以要用它只能开 bypass——配置里显式写，且只给用户自己 @ 的执行体。
+    - ``--output-format json``（2026-11-13 起）：此前只读裸 stdout，于是
+      ``parse_usage`` 恒为 None、用量账本对 claude 永远是空的，而它是收费档里
+      最贵的一条。实测 json 里带 ``result`` / ``is_error`` / ``usage``
+      （input_tokens、output_tokens）/ ``total_cost_usd`` / ``session_id``——
+      这就是「这次到底花了多少」的唯一客观口径。解析失败回落裸文本（见
+      ``parse_output``），不会因为格式变化把整次委派判失败。
     """
 
     def build_command(self, task: str, cwd: str) -> list[str]:
@@ -64,10 +71,69 @@ class ClaudeAdapter(CliAdapter):
         argv = [cfg.command]
         if cfg.approval_mode == "bypass":
             argv.append("--dangerously-skip-permissions")
-        argv += ["-p", task]
+        argv += ["-p", task, "--output-format", "json"]
         if cfg.model:
             argv += ["--model", cfg.model]
         return argv
+
+    def parse_output(self, stdout: str, stderr: str) -> str:
+        """从 json 结果里取 ``result``；格式不认识就回落裸文本。
+
+        注意 ``is_error`` 不在这里判——退出码非 0 的路径由 runner 分类；
+        退出码 0 但 ``is_error=true`` 的情况由 ``fatal_output`` 兜（与 CodeBuddy
+        同一个位置，避免两处各判一次、结论漂移）。
+        """
+        payload = _json_object(stdout)
+        if payload is None:
+            return super().parse_output(stdout, stderr)
+        body = str(payload.get("result") or payload.get("content") or "").strip()
+        if not body:
+            return super().parse_output(stdout, stderr)
+        notes: list[str] = []
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            tin = usage.get("input_tokens")
+            tout = usage.get("output_tokens")
+            if isinstance(tin, int) or isinstance(tout, int):
+                notes.append(f"上游自报 token：入 {tin} / 出 {tout}")
+        cost = payload.get("total_cost_usd")
+        if isinstance(cost, (int, float)):
+            notes.append(f"自报成本 ${cost:.4f}")
+        if notes:
+            body += "（" + "；".join(notes) + "）"
+        return clip_output(body)
+
+    def parse_usage(
+        self, stdout: str, stderr: str
+    ) -> tuple[int | None, int | None, float | None]:
+        payload = _json_object(stdout)
+        if payload is None:
+            return None, None, None
+        tin = tout = None
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            if isinstance(usage.get("input_tokens"), int):
+                tin = usage["input_tokens"]
+            if isinstance(usage.get("output_tokens"), int):
+                tout = usage["output_tokens"]
+        cost = payload.get("total_cost_usd")
+        cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+        return tin, tout, cost_usd
+
+    def fatal_output(self, stdout: str, stderr: str) -> FailureKind | None:
+        """退出码 0 但 json 自报 ``is_error: true`` = 失败（2026-11-13）。"""
+        payload = _json_object(stdout)
+        if payload is not None and payload.get("is_error") is True:
+            return FailureKind.FAILED
+        return None
+
+    def session_ref(self, stdout: str) -> str:
+        """``--output-format json`` 里的 ``session_id``，续接时用得上。"""
+        payload = _json_object(stdout)
+        if payload is None:
+            return ""
+        value = payload.get("session_id")
+        return value if isinstance(value, str) else ""
 
 
 class CodexAdapter(CliAdapter):
@@ -192,13 +258,9 @@ class CodeBuddyAdapter(CliAdapter):
         cost = payload.get("total_cost_usd")
         if isinstance(cost, (int, float)):
             notes.append(f"自报成本 ${cost:.4f}")
-        if payload.get("is_error") is True:
-            notes.append("上游标记 is_error=true")
         if notes:
             body += "（" + "；".join(notes) + "）"
-        if len(body) > MAX_OUTPUT:
-            body = body[:MAX_OUTPUT] + f"\n…(输出已截断，共 {len(body)} 字符)"
-        return body
+        return clip_output(body)
 
 
     def parse_usage(self, stdout: str, stderr: str) -> tuple[int | None, int | None, float | None]:
@@ -223,15 +285,23 @@ class CodeBuddyAdapter(CliAdapter):
         return tokens_in, tokens_out, cost_usd
 
     def fatal_output(self, stdout: str, stderr: str) -> FailureKind | None:
-        """未登录时 codebuddy 退出码 0、只吐一行纯文本（2.176.0 实测）。
+        """退出码 0 但输出其实是失败的两种形态（都在真机上实测过）。
 
-        2026-10-26：控制台把这种委派显示成「成功」，正文却是登录提示。
-        这里只认它自己的登录原文，不用通用分类——正常回答里也可能出现
-        "401" 之类字样，不能一律当失败。
+        1. 未登录：2.176.0 只吐一行 ``Authentication required. Please use /login``，
+           2026-10-26 控制台把它显示成「成功」、正文却是登录提示。
+           这里只认它自己的登录原文，不用通用分类——正常回答里也可能出现
+           "401" 之类字样，不能一律当失败。
+        2. **上游自己判了失败**：``--output-format json`` 的 result 事件带
+           ``is_error: true``。2026-11-13 前只是往正文尾巴上挂一句备注，
+           runner 按退出码 0 记成成功——父模型会把错误信息当答案用。
+           ``is_error`` 是上游的**结论字段**，不是正文的一部分。
         """
         text = f"{stdout}\n{stderr}".lower()
         if "authentication required" in text or "please use /login" in text:
             return classify_failure(text)
+        payload = _codebuddy_result_event((stdout or "").strip())
+        if payload is not None and payload.get("is_error") is True:
+            return FailureKind.FAILED
         return None
 
 
@@ -292,9 +362,23 @@ class GeminiAdapter(CliAdapter):
         tokens_in, tokens_out = _sum_token_stats(data.get("stats"))
         if tokens_in is not None or tokens_out is not None:
             body += f"（上游自报 token：入 {tokens_in} / 出 {tokens_out}）"
-        if len(body) > MAX_OUTPUT:
-            body = body[:MAX_OUTPUT] + f"\n…(输出已截断，共 {len(body)} 字符)"
-        return body
+        return clip_output(body)
+
+
+def _json_object(text: str) -> dict[str, Any] | None:
+    """把 stdout 里的单个 JSON 对象解出来；不是 JSON 就返回 None。
+
+    只接「整段就是一个对象」的形态（claude 的 ``--output-format json`` 正是）。
+    事件数组/JSONL 各有专门的解析器，不要混用。
+    """
+    raw = (text or "").strip()
+    if not raw or raw[0] != "{":
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _codebuddy_result_event(text: str) -> dict[str, Any] | None:

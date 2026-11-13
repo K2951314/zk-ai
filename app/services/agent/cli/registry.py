@@ -45,6 +45,17 @@ _TIMEOUT_MIN = 10
 _TIMEOUT_MAX = 1800
 _TIMEOUT_DEFAULT = 300
 
+#: 「静默多久判挂死」允许区间（秒）。**默认 0 = 不判空闲**，只看总时长。
+#:
+#: 2026-11-13 修正：以前是全局写死 180s（service._CLI_IDLE_TIMEOUT）。可 Claude /
+#: Codex / Gemini / CodeBuddy / Qoder 都是「结束才一次性吐输出」的无头形态——
+#: 没有中间日志，180 秒静默是**常态**而不是异常，于是 300s 的超时上限被 180s
+#: 的空闲判死提前截断，实测 claude 经 CC Switch 就要 130s。空闲判死只对
+#: 「持续打日志」的执行体（目前只有码道 --print-logs）有意义，必须逐执行体配。
+_IDLE_MIN = 30
+_IDLE_MAX = 1800
+_IDLE_DEFAULT = 0.0
+
 #: 思考强度档位（CodeBuddy 的 --effort 取值；Qoder 的 max 已实测接受）。
 #: 不同 CLI 支持的档位可能更少，写超集由各适配器按工具映射。
 EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
@@ -73,6 +84,15 @@ class CliToolConfig:
     #: 上下文窗口（0 = 用工具默认）。注意：这是**告诉 CLI 按多大管理**，
     #: 不会把模型窗口变大；Qoder 留空时自己按 128K 算
     context_window: int = 0
+    #: 静默多久判挂死（秒，0 = 不判空闲，只看 timeout 总时长）。
+    #: 只给「持续打进度日志」的执行体开；会静默推理的执行体开了就是误杀。
+    idle_timeout: float = _IDLE_DEFAULT
+    #: 每天最多派几次（0 = 不限）。**事前**拦截：额度是事后才知道超了，
+    #: 等于没有额度管理（Gemini 免费档实测 40 分钟打空）。
+    daily_calls: int = 0
+    #: 每天最多花多少美元（0 = 不限）。只累加执行体自报的成本——
+    #: 没自报的调用不计 0，否则熔断永远不触发。
+    daily_cost_usd: float = 0.0
     #: 控制台「执行体」面板里可选的模型清单（空 = 只认 model 那一个）
     models: list[str] = field(default_factory=list)
     #: models 里哪些按免费档展示（只是标签，真正的计费以工具自报为准）
@@ -189,6 +209,20 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
     except (TypeError, ValueError):
         context_window = 0
     context_window = max(0, min(_CONTEXT_WINDOW_MAX, context_window))
+    try:
+        idle_timeout = float(raw.get("idle_timeout") or 0)
+    except (TypeError, ValueError):
+        idle_timeout = 0.0
+    if idle_timeout > 0:
+        idle_timeout = max(_IDLE_MIN, min(_IDLE_MAX, idle_timeout))
+    try:
+        daily_calls = max(0, int(raw.get("daily_calls") or 0))
+    except (TypeError, ValueError):
+        daily_calls = 0
+    try:
+        daily_cost_usd = max(0.0, float(raw.get("daily_cost_usd") or 0))
+    except (TypeError, ValueError):
+        daily_cost_usd = 0.0
 
     def _str_list(key: str) -> list[str]:
         value = raw.get(key)
@@ -231,6 +265,9 @@ def _parse_tool(name: str, raw: Any, warnings: list[str]) -> CliToolConfig | Non
         api_key=str(raw.get("api_key") or "").strip(),
         effort=effort,
         context_window=context_window,
+        idle_timeout=idle_timeout,
+        daily_calls=daily_calls,
+        daily_cost_usd=daily_cost_usd,
         models=_str_list("models"),
         free_models=_str_list("free_models"),
         mcp_url=mcp_url,

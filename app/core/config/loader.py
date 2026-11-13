@@ -48,6 +48,10 @@ _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     "admin.enabled": ("admin", "admin_enabled"),
     "admin.token": ("admin", "admin_token"),
     "request.timeout": ("request", "request_timeout"),
+    #: 流式空闲心跳的基准（秒）：客户端能忍多久收不到字节。
+    #: 网关按它的一半发 SSE 注释行 `: ping`，把「上游在长时间思考」和
+    #: 「连接已死」区分开（2026-11-13，之前这个字段是死配置）。0 = 关闭心跳。
+    "request.stream_idle_timeout": ("request", "stream_idle_timeout"),
     "request.default_max_tokens": ("request", "default_max_tokens"),
     # 2026-09-28：补上桥接。AGENTS.md 记着 ZKAI_MAX_REQUEST_BODY /
     # ZKAI_MAX_INPUT_TOKENS 没有桥接的坑——改 config.yaml 静默无效，用户只能

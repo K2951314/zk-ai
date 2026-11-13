@@ -770,7 +770,8 @@ function appendMessageRow(m) {
     ? `<div class="routing">⚡ ${esc(d.executor.role)} · ${esc(d.executor.model)} ·
        ${d.executor.cost_tier === "free" ? "免费档" : esc(d.executor.cost_tier)} ·
        思考 ${esc(d.executor.effort || "默认")} · ${fmtCtx(d.executor.context_window)} ·
-       ${d.executor.elapsed ?? "?"}s${d.executor.total > 1 ? ` · 第 ${d.executor.index}/${d.executor.total} 段` : ""}</div>`
+       ${d.executor.elapsed ?? "?"}s${d.executor.total > 1 ? ` · 第 ${d.executor.index}/${d.executor.total} 段` : ""}
+       ${fmtUsage(d.executor)}</div>`
     : "";
   const thinking = d.thinking
     ? `<details><summary>💭 思考过程</summary><pre>${esc(d.thinking)}</pre></details>` : "";
@@ -779,11 +780,18 @@ function appendMessageRow(m) {
     <div class="md">${md(m.content)}</div>${toolCallChips(d.tool_calls)}${thinking}${ex}${routing}</div>`);
 }
 
+const APPROVAL_MODE_ZH = { plan: "只读/保守档", default: "默认档", bypass: "免审批档" };
+
 function renderApprovalCard(m) {
   const d = m.data || {};
+  // 各 CLI 的档位词表不齐（approval_mode: plan 在 claude 上根本不存在），
+  // 所以这里显示**实际生效**的那一档，避免运营者以为自己在批「只读」。
+  const mode = d.approval_mode
+    ? `<div class="routing">实际档位：${esc(APPROVAL_MODE_ZH[d.approval_mode] || d.approval_mode)}</div>`
+    : "";
   const row = addRow(`<div class="card" style="border-left:3px solid var(--warn)">
     <div class="who">⚠️ 请求批准：<b>${esc(d.tool)}</b></div>
-    <pre>${esc(m.content || "")}</pre>
+    <pre>${esc(m.content || "")}</pre>${mode}
     <div class="approval-actions">
       <button class="ok" data-act="approve">✓ 批准</button>
       <button class="no" data-act="deny">✕ 拒绝</button>
@@ -1162,6 +1170,19 @@ async function refreshModels(role) {
 function fmtCtx(n) {
   if (!n) return "默认上下文";
   return n >= 1000000 ? "1M" : `${Math.round(n / 1000)}K`;
+}
+
+// 执行体自报的用量：只显示拿到的（0 元 / 无 token 都算「没拿到」，
+// 不能写成「免费」——那是把「不知道」当成了结论）。
+function fmtUsage(e) {
+  const bits = [];
+  if (e.tokens_in != null || e.tokens_out != null) {
+    bits.push(`token 入 ${e.tokens_in ?? "?"} / 出 ${e.tokens_out ?? "?"}`);
+  }
+  if (e.cost_usd != null && e.cost_usd > 0) {
+    bits.push(`自报成本 $${Number(e.cost_usd).toFixed(4)}`);
+  }
+  return bits.length ? ` · ${bits.join(" · ")}` : "";
 }
 
 function selectOpts(values, current) {

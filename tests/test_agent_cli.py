@@ -32,8 +32,8 @@ from app.services.agent.cli.adapters import (
     QoderAdapter,
     QwenAdapter,
 )
-from app.services.agent.cli.base import FailureKind, classify_failure, failure_output
-from app.services.agent.cli.delegate import TOOL_NAME, build_schema, prepare
+from app.services.agent.cli.base import FailureKind, classify_failure, clip_output, failure_output
+from app.services.agent.cli.delegate import TOOL_NAME, build_schema, perform, prepare
 from app.services.agent.cli.models import parse_codebuddy_models, parse_qoder_models
 from app.services.agent.cli.registry import (
     CliRegistry,
@@ -296,8 +296,8 @@ class _FakeReader:
 
 
 class _FakeProc:
-    def __init__(self, out: bytes, code: int = 0) -> None:
-        self.stdout, self.stderr = _FakeReader(out), _FakeReader(b"")
+    def __init__(self, out: bytes, code: int = 0, err: bytes = b"") -> None:
+        self.stdout, self.stderr = _FakeReader(out), _FakeReader(err)
         self.returncode = code
 
     async def wait(self) -> int:
@@ -415,8 +415,86 @@ async def test_runner_idle_timeout_kills_silent_process(monkeypatch):
     assert "空闲" in result.output
 
 
+async def test_runner_classifies_timeout_as_timeout_not_generic_failure(monkeypatch):
+    """超时不能归成 FAILED：FAILED 的建议是「调整任务描述重试」，
+    对超时是反向建议（同任务重跑必然还超时，白烧一遍额度）。"""
+    cfg = replace(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"), timeout=0.2)
+    proc = _HangingProc(b"")
+    _patch_exec(monkeypatch, proc)
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."))
+    assert result.failure is FailureKind.TIMEOUT
+    assert "执行超时" in result.output
+    assert "重试一次" not in result.output
+    assert "可能在被杀之前已经改了文件" in result.output
+
+
+async def test_runner_classifies_cancellation_as_cancelled(monkeypatch):
+    """用户点「停止」不是执行体的错，不能让父模型自作主张重派。"""
+    monkeypatch.setattr(runner, "_WATCHDOG_INTERVAL", 0.01)
+    cfg = replace(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"), timeout=30)
+    proc = _HangingProc(b"")
+    _patch_exec(monkeypatch, proc)
+    event = asyncio.Event()
+    event.set()
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."), cancel=event)
+    assert result.failure is FailureKind.CANCELLED
+    assert "已取消" in result.output
+    assert "不要自动重试" in result.output
+
+
+async def test_runner_failure_keeps_the_tail_and_reports_the_exit_code(monkeypatch):
+    """真实诊断在末尾：3k 输出的最后一行才是 AssertionError。"""
+    cfg = _cli("codebuddy", "codebuddy", "glm-5.2", "plan")
+    noise = ("进度行 " * 400).encode()
+    tail = b"\nAssertionError: expected 3, got 4\n"
+    proc = _FakeProc(noise + tail, code=1)
+    _patch_exec(monkeypatch, proc)
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."), envelope=False)
+    assert result.ok is False
+    assert "AssertionError: expected 3, got 4" in result.output
+    assert "退出码 1" in result.output
+
+
+async def test_runner_failure_puts_stderr_before_stdout(monkeypatch):
+    """真诊断几乎都在 stderr。stdout 在前 + 头部截断 = 优先丢掉诊断、留下噪音。"""
+    cfg = _cli("codebuddy", "codebuddy", "glm-5.2", "plan")
+    proc = _FakeProc(
+        out=b"Starting...\nprogress 1/3\n",
+        err=b"Error: 429 quota exceeded for this key\n",
+        code=1,
+    )
+    _patch_exec(monkeypatch, proc)
+    result = await runner.run_delegation(cfg, task="x", cwd=Path("."), envelope=False)
+    assert result.failure is FailureKind.QUOTA
+    pos_err = result.output.index("quota exceeded")
+    pos_out = result.output.index("progress 1/3")
+    assert pos_err < pos_out, "stderr 必须排在 stdout 前面"
+
+
+def test_clip_output_keeps_head_and_tail():
+    """成功路径的长输出同样保尾：执行体的结论写在最后一段。"""
+    text = "开头" * 5000 + "结论：改完 3 个文件"
+    clipped = clip_output(text, limit=300)
+    assert clipped.startswith("开头")
+    assert clipped.endswith("结论：改完 3 个文件")
+    assert "中间省略" in clipped
+    assert len(clipped) < len(text)
+
+
+def test_envelope_is_skipped_for_mcp_backend(monkeypatch):
+    """MCP 的 task 是结构化入参（模板里的 {task}），塞信封等于污染入参。"""
+    from app.services.agent.cli.runner import _task_arguments
+
+    cfg = CliToolConfig(
+        name="editor", command="", backend="mcp", model="", cost_tier="free",
+        timeout=10, approval_mode="plan",
+        mcp_url="http://127.0.0.1:1/mcp", mcp_tool="do_thing",
+        mcp_args={"text": "{task}"},
+    )
+    assert _task_arguments(cfg, "纯正文") == {"text": "纯正文"}
+
+
 def test_summarize_cli_line_keeps_only_progress_signals():
-    """1786 行 INFO 日志只有少数值得推给前端，且不能把凭证字样带出去。"""
     assert runner.summarize_cli_line(
         'INFO service=inferhub-provider "hc headers model-id=kimi-k3.1-pro"'
     ) == "正在请求模型…"
@@ -673,10 +751,21 @@ def test_codebuddy_event_array_yields_only_the_result():
     assert "46281" in out and "$0.0000" in out
 
 
-def test_codebuddy_parse_output_marks_upstream_error():
+def test_codebuddy_is_error_true_is_a_failure_not_a_note():
+    """上游自报 is_error 是**结论字段**，不是正文的一部分（2026-11-13 修）。
+
+    旧实现只往正文尾巴挂一句「（上游标记 is_error=true）」，runner 仍按退出码 0
+    记成功——父模型会把错误正文当成答案用。现在由 fatal_output 判失败，
+    parse_output 里不该再出现这句话。
+    """
     adapter = CodeBuddyAdapter(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
-    out = adapter.parse_output(json.dumps({"result": "被拦了", "is_error": True}), "")
-    assert "is_error=true" in out
+    payload = json.dumps({"result": "被拦了", "is_error": True})
+    assert adapter.fatal_output(payload, "") is FailureKind.FAILED
+    assert "is_error" not in adapter.parse_output(payload, "")
+    # 正常结果不能误判
+    assert adapter.fatal_output(json.dumps({"result": "pong", "is_error": False}), "") is None
+    # 未登录仍然优先判 AUTH，不能降级成普通失败
+    assert adapter.fatal_output("Authentication required. Please use /login", "") is FailureKind.AUTH
 
 
 def test_codex_plan_mode_uses_read_only_sandbox():
@@ -696,12 +785,107 @@ def test_codex_default_mode_has_no_sandbox_flag():
 
 
 def test_claude_bypass_with_empty_model_omits_model_flag():
-    """空模型 -> 不传 --model（用 CC Switch 选定的那个）；bypass 才带跳过审批。"""
+    """空模型 -> 不传 --model（用 CC Switch 选定的那个）；bypass 才带跳过审批。
+
+    2026-11-13 起固定带 ``--output-format json``：这是拿成本/token 的唯一口径，
+    也正是它让 claude 的用量账本从「永远空白」变成有数字。
+    """
     argv = ClaudeAdapter(_cli("claude", "claude", "", "bypass")).build_command("评审方案", "/w")
     assert argv[0] == "claude"
     assert "--dangerously-skip-permissions" in argv
-    assert "-p" in argv and argv[-1] == "评审方案"
+    assert argv[argv.index("-p") + 1] == "评审方案"
+    assert argv[argv.index("--output-format") + 1] == "json"
     assert "--model" not in argv
+
+
+def _claude_json(result: str = "收到", *, is_error: bool = False) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "result": result,
+            "is_error": is_error,
+            "session_id": "46f23cb2-4f8b-408e-910c-0e3674542344",
+            "total_cost_usd": 0.24239,
+            "usage": {"input_tokens": 48463, "output_tokens": 3},
+            "modelUsage": {"claude-opus-5": {"inputTokens": 48463, "outputTokens": 3}},
+        }
+    )
+
+
+def test_claude_parses_json_result_and_usage():
+    """json 输出里既有正文也有成本口径（2026-11-13 本机实测的真实字段）。"""
+    adapter = ClaudeAdapter(_cli("claude", "claude", "", "bypass"))
+    out = adapter.parse_output(_claude_json(), "")
+    assert out.startswith("收到")
+    assert "入 48463" in out and "出 3" in out
+    assert "$0.2424" in out
+    assert adapter.parse_usage(_claude_json(), "") == (48463, 3, 0.24239)
+
+
+def test_claude_falls_back_to_raw_text_when_output_is_not_json():
+    """格式变化（或 --output-format 被去掉）不能把整次委派判失败。"""
+    adapter = ClaudeAdapter(_cli("claude", "claude", "", "bypass"))
+    assert adapter.parse_output("就是一段裸文本", "") == "就是一段裸文本"
+    assert adapter.parse_usage("就是一段裸文本", "") == (None, None, None)
+
+
+async def test_runner_envelope_reaches_the_cli(monkeypatch):
+    """信封要真的进 argv，而不是只在 prompting.py 里存在。"""
+    cfg = _cli("codebuddy", "codebuddy", "glm-5.2", "plan")
+    argv_seen: list[list[str]] = []
+
+    async def fake_exec(*args, **_kwargs):
+        argv_seen.append(list(args))
+        return _FakeProc(b"ok")
+
+    monkeypatch.setattr(runner, "resolve_command", lambda argv: argv)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_exec)
+    await runner.run_delegation(cfg, task="整理清单", cwd=Path("/w"))
+    joined = "\n".join(argv_seen[0])
+    assert "【工作目录】" in joined
+    assert "没有人能回答你的追问" in joined
+    assert joined.rstrip().endswith("整理清单")
+
+    # envelope=False 时回到裸任务（测试和「用户自带契约」场景用）
+    argv_seen.clear()
+    await runner.run_delegation(cfg, task="整理清单", cwd=Path("/w"), envelope=False)
+    assert not any("【工作目录】" in part for part in argv_seen[0])
+
+
+async def test_runner_parses_claude_json_end_to_end(monkeypatch):
+    """接线测试：json 解析必须真的接在 runner 上，而不是只有适配器自己会解。
+
+    否则 argv 里那行 --output-format json 被谁删掉，账本又会悄悄变回空白。
+    """
+    cfg = _cli("claude", "claude", "", "bypass")
+    argv_seen: list[list[str]] = []
+
+    async def fake_exec(*args, **_kwargs):
+        argv_seen.append(list(args))
+        return _FakeProc(_claude_json("收到").encode())
+
+    monkeypatch.setattr(runner, "resolve_command", lambda argv: argv)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_exec)
+    result = await runner.run_delegation(cfg, task="ping", cwd=Path("."))
+    assert result.ok is True
+    assert "--output-format" in argv_seen[0]
+    assert result.output.startswith("收到")
+    assert (result.tokens_in, result.tokens_out) == (48463, 3)
+    assert result.cost_usd == 0.24239
+    assert result.session_ref == "46f23cb2-4f8b-408e-910c-0e3674542344"
+
+
+def test_claude_is_error_true_is_a_failure_not_a_note():
+    adapter = ClaudeAdapter(_cli("claude", "claude", "", "bypass"))
+    assert adapter.fatal_output(_claude_json(is_error=True), "") is FailureKind.FAILED
+    assert adapter.fatal_output(_claude_json(), "") is None
+
+
+def test_claude_reports_the_session_id_for_resume():
+    adapter = ClaudeAdapter(_cli("claude", "claude", "", "bypass"))
+    ref = adapter.session_ref(_claude_json())
+    assert ref == "46f23cb2-4f8b-408e-910c-0e3674542344"
+    assert adapter.session_ref("裸文本") == ""
 
 
 def test_claude_explicit_model_and_plan_stay_minimal():
@@ -761,6 +945,87 @@ def test_schema_enum_follows_registry():
     assert "免费" in params["role"]["description"]
 
 
+def test_daily_call_cap_blocks_the_delegation_before_spawning(tmp_path: Path, monkeypatch):
+    """额度是事前拦，不是撞了 429 才回头解释。
+
+    Gemini 免费档实测 40 分钟就能打空，CodeBuddy 的免费池也会静默耗尽。
+    这里钉住：到上限后 run_delegation 根本没被调用。
+    """
+    from app.services.agent import usage_ledger
+
+    monkeypatch.setenv("ZKAI_DATA_DIR", str(tmp_path / "data"))
+    cfg = replace(
+        _cli("codebuddy", "codebuddy", "glm-5.2", "plan"), daily_calls=2
+    )
+    registry = CliRegistry(
+        tools={"codebuddy": cfg},
+        roles={"cli-grinder": RoleConfig(name="cli-grinder", tool="codebuddy", hint="磨活")},
+    )
+    for _ in range(2):
+        usage_ledger.record_delegation(
+            tool="codebuddy", model="glm-5.2", role="cli-grinder",
+            session_id="s", task_space="/w", ok=True, elapsed=1.0,
+        )
+
+    called: list[str] = []
+
+    async def fake_run(*_args, **_kwargs):
+        called.append("x")
+        raise AssertionError("到上限后不该再拉子进程")
+
+    import app.services.agent.cli.delegate as delegate_mod
+
+    monkeypatch.setattr(delegate_mod, "run_delegation", fake_run)
+    import asyncio
+
+    outcome = asyncio.run(
+        perform(registry, ToolBox(tmp_path), {"role": "cli-grinder", "task": "再来一件"})
+    )
+    assert outcome.ok is False
+    assert "上限" in outcome.output and "2 次" in outcome.output
+    assert called == []
+
+
+def test_daily_cap_of_zero_means_unlimited(tmp_path: Path, monkeypatch):
+    """0 = 不限（默认），不配就完全回到旧行为。"""
+    from app.services.agent import usage_ledger
+
+    monkeypatch.setenv("ZKAI_DATA_DIR", str(tmp_path / "data"))
+    cfg = replace(_cli("codebuddy", "codebuddy", "glm-5.2", "plan"))
+    assert cfg.daily_calls == 0 and cfg.daily_cost_usd == 0.0
+    for _ in range(5):
+        usage_ledger.record_delegation(
+            tool="codebuddy", model="m", role="r", session_id="s",
+            task_space="/w", ok=True, elapsed=1.0,
+        )
+    from app.services.agent.cli.delegate import budget_block
+
+    assert budget_block(cfg) == ""
+
+
+def test_daily_cost_cap_only_counts_self_reported_cost(tmp_path: Path, monkeypatch):
+    """没自报成本的调用不能按 0 摊平——那会让熔断永远不触发。"""
+    from app.services.agent import usage_ledger
+
+    monkeypatch.setenv("ZKAI_DATA_DIR", str(tmp_path / "data"))
+    cfg = replace(
+        _cli("claude", "claude", "", "bypass"), daily_cost_usd=0.5
+    )
+    usage_ledger.record_delegation(
+        tool="claude", model="m", role="r", session_id="s",
+        task_space="/w", ok=True, elapsed=1.0, cost_usd=None,
+    )
+    from app.services.agent.cli.delegate import budget_block
+
+    assert budget_block(cfg) == "", "没有自报成本的调用不算花费"
+
+    usage_ledger.record_delegation(
+        tool="claude", model="m", role="r", session_id="s",
+        task_space="/w", ok=True, elapsed=1.0, cost_usd=0.6,
+    )
+    assert "上限" in budget_block(cfg)
+
+
 def test_prepare_renders_preview(tmp_path: Path):
     tb = ToolBox(tmp_path)
     outcome = prepare(_reg(), tb, {"role": "cli-coder", "task": "写个函数"})
@@ -768,6 +1033,29 @@ def test_prepare_renders_preview(tmp_path: Path):
     preview = (outcome.display or {}).get("command", "")
     assert "委派给外部执行体 qwen" in preview
     assert "免费" in preview and "写个函数" in preview
+
+
+def test_preview_shows_the_escalated_command_when_bypass_is_allowed(tmp_path: Path):
+    """审批卡必须展示**真正将要执行**的命令（2026-11-13 修）。
+
+    提权原来只在 runner 里做，预览用未提权的配置渲染 —— 运营者批的是
+    「只读分析」，跑起来却是 --dangerously-skip-permissions。
+    预览与执行必须共用 delegate.escalated 这一份判定。
+    """
+    cfg = _cli("claude", "claude", "", "plan")
+    registry = CliRegistry(
+        tools={"claude": cfg},
+        roles={"cli-claude": RoleConfig(name="cli-claude", tool="claude", hint="评审")},
+    )
+    tb = ToolBox(tmp_path)
+
+    plain = prepare(registry, tb, {"role": "cli-claude", "task": "评审"})
+    assert "--dangerously-skip-permissions" not in (plain.display or {}).get("command", "")
+    assert (plain.display or {}).get("approval_mode") == "plan"
+
+    escalated = prepare(registry, tb, {"role": "cli-claude", "task": "评审"}, allow_bypass=True)
+    assert "--dangerously-skip-permissions" in (escalated.display or {}).get("command", "")
+    assert (escalated.display or {}).get("approval_mode") == "bypass"
 
 
 def test_prepare_rejects_unknown_role(tmp_path: Path):

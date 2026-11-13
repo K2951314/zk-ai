@@ -19,15 +19,16 @@ from pathlib import Path
 from typing import Any
 
 from app.services.agent.cli.base import (
-    MAX_OUTPUT,
     CliResult,
     FailureKind,
     build_adapter,
     classify_failure,
+    clip_output,
     failure_output,
 )
 from app.services.agent.cli.launcher import LauncherError, resolve_command
 from app.services.agent.cli.mcp_client import McpError, call_tool
+from app.services.agent.cli.prompting import build_task_prompt
 from app.services.agent.cli.registry import CliToolConfig
 
 #: 单路输出最多读多少字节（超出即丢弃剩余，进程照常等死）
@@ -179,10 +180,10 @@ async def _run_mcp(config: CliToolConfig, *, task: str, cwd: Path) -> CliResult:
         return CliResult(
             ok=False,
             output=failure_output(
-                FailureKind.FAILED,
+                FailureKind.TIMEOUT,
                 f"超过超时上限 {int(config.timeout)}s 未结束",
             ),
-            failure=FailureKind.FAILED,
+            failure=FailureKind.TIMEOUT,
             elapsed=time.monotonic() - started,
         )
     except McpError as exc:
@@ -194,10 +195,7 @@ async def _run_mcp(config: CliToolConfig, *, task: str, cwd: Path) -> CliResult:
             elapsed=time.monotonic() - started,
         )
     elapsed = time.monotonic() - started
-    text = output
-    if len(text) > MAX_OUTPUT:
-        text = text[:MAX_OUTPUT] + f"\n…(输出已截断，共 {len(text)} 字符)"
-    return CliResult(ok=True, output=text, elapsed=elapsed)
+    return CliResult(ok=True, output=clip_output(output), elapsed=elapsed)
 
 
 async def run_delegation(
@@ -209,6 +207,7 @@ async def run_delegation(
     on_line: Callable[[str, str], None] | None = None,
     cancel: asyncio.Event | None = None,
     idle_timeout: float | None = None,
+    envelope: bool = True,
 ) -> CliResult:
     """执行一次委派：MCP 走 HTTP，其余拉起子进程、等它结束、分类结果。
 
@@ -221,13 +220,21 @@ async def run_delegation(
     - ``idle_timeout``：有输出心跳就不砍，静默超过这个秒数才判挂死；
       ``None`` 表示只看总时长。总时长仍由 ``config.timeout`` 兜底。
     - ``cancel``：被 set 时真正 ``kill`` 子进程（不再只是改会话状态）。
+
+    ``envelope``（2026-11-13）：给子进程类执行体套上「工作目录 / 无头不可追问 /
+    交付契约」三行信封，默认开启；MCP 后端不受影响（见下）。测试里想断言
+    原始 argv 时传 ``envelope=False``。
     """
     if allow_bypass and config.approval_mode != "bypass":
         config = replace(config, approval_mode="bypass")
     if config.backend == "mcp":
         return await _run_mcp(config, task=task, cwd=cwd)
     adapter = build_adapter(config)
-    argv = adapter.build_command(task, str(cwd))
+    # 任务信封只给子进程类执行体：它们靠位置参数/--print 收一整段人话，
+    # 需要知道自己在哪、怎么交活、能不能追问。MCP 的 task 是**结构化入参**
+    # （模板里的 {task} 会被直接替换成某段待处理内容），塞信封等于污染入参。
+    prompt = build_task_prompt(task, cwd=str(cwd)) if envelope else task
+    argv = adapter.build_command(prompt, str(cwd))
     env = None
     extra = adapter.build_env()
     if extra is not None:
@@ -327,7 +334,15 @@ async def run_delegation(
     elapsed = time.monotonic() - started
     code = proc.returncode
     diagnostic_stderr = _diagnostic_stderr(stderr)
-    combined = f"{stdout}\n{diagnostic_stderr}"
+    # stderr 放前面：真正的原因（Traceback、限流正文）几乎都在 stderr，
+    # 而 stdout 常常是一堆跑到一半的进度行。2026-11-13 前是 stdout 在前，
+    # 再把整体头部截断——等于优先把诊断丢掉、把噪音留下。
+    combined = f"{diagnostic_stderr}\n{stdout}".strip()
+
+    # 失败也可能已经烧了 token（超时/被拦之前已经在推理），所以用量在两条路径都抽。
+    # 必须放在超时分支之前——那个分支也要如实记账。
+    tokens_in, tokens_out, cost_usd = adapter.parse_usage(stdout, stderr)
+    session_ref = adapter.session_ref(stdout)
 
     if timed_out or cancelled:
         partial = (out_sink.text + "\n" + err_sink.text).strip()
@@ -335,16 +350,21 @@ async def run_delegation(
         detail = timed_out or "任务被取消，已终止执行体进程"
         if tail:
             detail += f"\n\n--- 已产生的输出（末尾 {len(tail)} 字符）---\n{tail}"
+        # 超时与用户主动取消是两回事：前者要劝模型缩小范围，后者绝不能自动重试。
+        kind = FailureKind.CANCELLED if cancelled and not timed_out else FailureKind.TIMEOUT
         return CliResult(
             ok=False,
-            output=failure_output(FailureKind.FAILED, detail),
-            failure=FailureKind.FAILED,
+            output=failure_output(kind, detail),
+            failure=kind,
             elapsed=elapsed,
             exit_code=code,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+            session_ref=session_ref,
         )
 
     # 失败也可能已经烧了 token（超时/被拦之前已经在推理），所以用量在两条路径都抽。
-    tokens_in, tokens_out, cost_usd = adapter.parse_usage(stdout, stderr)
     if code == 0:
         # 个别 CLI 用退出码 0 表达登录失败（CodeBuddy 2.176.0 实测），
         # 不拦就会被记成「成功」并把登录提示当成答案回给父模型。
@@ -354,13 +374,14 @@ async def run_delegation(
         if fatal is not None:
             return CliResult(
                 ok=False,
-                output=failure_output(fatal, combined.strip()),
+                output=failure_output(fatal, f"退出码 {code}\n{combined}".strip()),
                 failure=fatal,
                 elapsed=elapsed,
                 exit_code=code,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost_usd=cost_usd,
+                session_ref=session_ref,
             )
         return CliResult(
             ok=True,
@@ -370,15 +391,18 @@ async def run_delegation(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost_usd=cost_usd,
+            session_ref=session_ref,
         )
     kind = classify_failure(combined)
+    detail = f"退出码 {code}\n{combined}" if combined else f"退出码 {code}，无输出"
     return CliResult(
         ok=False,
-        output=failure_output(kind, combined.strip() or f"退出码 {code}，无输出"),
+        output=failure_output(kind, detail),
         failure=kind,
         elapsed=elapsed,
         exit_code=code,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         cost_usd=cost_usd,
+        session_ref=session_ref,
     )

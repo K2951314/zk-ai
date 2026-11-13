@@ -10,6 +10,29 @@
 #   3. 两阶段审批：每次委派先渲染「派给谁、干什么」预览，批准后才执行
 #   4. 用量记账 + 日汇总阈值：事后可查可刹住（cli_usage 表，阶段 3 落地）
 
+# ⚠ approval_mode 在不同 CLI 上**语义并不一致**（2026-11-13 实测整理）。
+#   「plan 就是只读」不成立，它只是「尽量保守」：
+#   ---------------------------------------------------------------------
+#   我们的档 | qwen      | claude   | codex        | qoder      | codebuddy | gemini  | codearts
+#   plan    | 真只读    | 不支持，  | -s read-only | dont_ask   | plan      | plan    | 不传旗，
+#           |           | 只能bypass| （真沙箱）   |（未授权即拒）|          |（会写   | 走安装期
+#           |           |           |              |            |           | plans/）| 沙箱默认
+#   default | default   | 同 plan   | 无旗（默认） | 无头会等审批| default  | default | 与 plan
+#           |           |           |              | 挂住→超时   |           |         | 完全等价
+#   bypass  | 降级成    | --danger- | --dangerously| bypass_    | bypass    | yolo    | 不映射
+#           | default   | ously-skip| -bypass-...  | permissions| Permissions|        |（仍沙箱）
+#   ---------------------------------------------------------------------
+#   真正的安全边界是「任务空间租约 + 两阶段审批卡」，不是这一格。
+#   模型发起的 delegate_cli 一律不提权（2026-11-13 收紧）；只有用户亲自 @
+#   的直跑路径在 ZKAI_AGENT_PERMISSION_MODE=bypass 时才提。
+#
+# 三个 2026-11-13 新增的键（都可省略，省略即旧行为）：
+#   idle_timeout   静默多少秒判挂死（0=不判，默认 0）。只给「持续打进度日志」
+#                  的执行体配（目前只有码道的 --print-logs）。对「结束才一次性
+#                  吐输出」的 CLI 配这个 = 误杀（claude 经 CC Switch 实测 130s）。
+#   daily_calls    每天最多派几次（0=不限）。事前拦截，不是撞了 429 才解释。
+#   daily_cost_usd 每天最多花多少美元（0=不限）。只累加执行体自报的成本。
+
 tools:
   # -------------------------------------------------------------------------
   # Qwen Code —— 本机已装（npm 全局 @qwen-code/qwen-code，命令名是 qwen）

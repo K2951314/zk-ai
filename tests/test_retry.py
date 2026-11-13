@@ -624,3 +624,37 @@ async def test_a_cooling_pool_waits_instead_of_failing_fast(
         assert max(harness.sleeps) <= 10.0 + 0.001
     finally:
         await harness.container.shutdown()
+
+
+async def test_throttled_exhaustion_tells_the_client_when_to_come_back(provider_config, fake_adapter):
+    """上游 429 不带 Retry-After 时，用我们自己算的冷却时长兜底（2026-11-13）。
+
+    实测：商汤的 429 正文只有 "inference exceeds tpm/rpm limit"，**没有秒数、
+    也没有 Retry-After 头**。客户端因此只能碰运气重试——一碰就是整池再黑一次。
+    冷却多久是我们按策略算出来的确定值，不告诉客户端等于把已知信息浪费掉。
+    """
+    from app.core.errors import AllAttemptsFailedError
+    from app.models.request import ChatCompletionRequest
+
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("solo", priority=100)],
+        aliases=[make_alias("zk-solo", ["solo"])],
+    )
+    config.retry.max_credentials_per_deployment = 1
+    config.retry.max_retries_per_credential = 0
+    config.retry.max_total_attempts = 1
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    try:
+        # 429 且上游没带 Retry-After 头
+        fake_adapter.queue(Behavior(status=429, error_message="inference exceeds tpm/rpm limit"))
+        request = ChatCompletionRequest(
+            model="zk-solo", messages=[{"role": "user", "content": "x"}]
+        )
+        with pytest.raises(AllAttemptsFailedError) as excinfo:
+            await harness.service.chat(request, request_id="req-ra")
+        # 必须带一个「多久之后再来」，否则客户端只能瞎撞
+        assert excinfo.value.retry_after, "429 耗尽后必须给出重试时机"
+        assert excinfo.value.retry_after > 0
+    finally:
+        await harness.container.shutdown()

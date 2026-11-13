@@ -20,10 +20,18 @@ MAX_OUTPUT = 8_000
 
 
 class FailureKind(Enum):
-    """委派失败的分类。"""
+    """委派失败的分类。
+
+    ``TIMEOUT`` / ``CANCELLED`` 是 2026-11-13 从 ``FAILED`` 里拆出来的：
+    两者都**不是任务描述的问题**，而原来归到 FAILED 时给模型的建议是
+    「调整任务描述后重试一次」——对超时是反向建议（同样的任务重跑大概率
+    还超时，白烧一遍额度）。分类不同，可采取的行动本来就不同。
+    """
 
     AUTH = "auth"
     QUOTA = "quota"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
     FAILED = "failed"
 
 
@@ -42,6 +50,9 @@ class CliResult:
     tokens_in: int | None = None
     tokens_out: int | None = None
     cost_usd: float | None = None
+    #: 上游自报的会话标识（claude 的 session_id 等）。有它才有「接着上次跑」
+    #: 的可能；拿不到就是空串，**不要瞎猜一个**。
+    session_ref: str = ""
 
 
 #: 「未登录」特征：各工具报错文案不同，逐个收录实测形态
@@ -112,23 +123,62 @@ _FAILURE_HINT: dict[FailureKind, str] = {
         "该执行体的额度已耗尽或被限流（免费池可能烧完了）。"
         "请改派其他角色重试本任务；都没有可用时，在总结里说明。"
     ),
+    FailureKind.TIMEOUT: (
+        "执行超时（不是任务描述写得不好）。同样的任务原样重跑大概率还会超时："
+        "把范围缩小、拆成更小的步骤，或换一个更快的执行体；"
+        "它可能在被杀之前已经改了文件，重试前先用 read_file/list_dir 看一眼现状。"
+    ),
+    FailureKind.CANCELLED: (
+        "这次委派被用户主动停止了（不是失败）。不要自动重试；"
+        "需要继续就先把剩余工作说清楚，等用户确认后再派。"
+    ),
     FailureKind.FAILED: (
         "执行失败。可以调整任务描述后重试一次，或改派其他角色；"
         "仍失败就在总结里说明失败原因。"
     ),
 }
 
+#: 失败标签（给模型看的中文名）。新增枚举时必须在这里补一行，
+#: 否则 ``failure_output`` 会 KeyError——这是刻意的硬失败，不静默降级。
+_FAILURE_LABEL: dict[FailureKind, str] = {
+    FailureKind.AUTH: "未登录",
+    FailureKind.QUOTA: "额度耗尽",
+    FailureKind.TIMEOUT: "执行超时",
+    FailureKind.CANCELLED: "已取消",
+    FailureKind.FAILED: "执行失败",
+}
+
+
+def clip_output(text: str, limit: int = MAX_OUTPUT) -> str:
+    """超长输出取「头 + 尾」，不是只留头部。
+
+    报错堆栈、pytest 摘要、结论段落**几乎总在末尾**，只砍尾巴等于把答案砍掉、
+    把过程留给模型——2026-11-13 之前的实现正是 ``text[:MAX_OUTPUT]``。
+    省略标记写清省略了多少字符，模型才知道自己拿到的是残缺的。
+    """
+    if len(text) <= limit:
+        return text
+    head = max(0, limit // 3)
+    tail = max(0, limit - head)
+    omitted = len(text) - head - tail
+    return (
+        f"{text[:head]}\n…(中间省略 {omitted} 字符)…\n"
+        f"（以下是末尾 {tail} 字符）\n{text[-tail:]}"
+    )
+
 
 def failure_output(kind: FailureKind, detail: str) -> str:
-    """拼一段回喂父模型的失败文案：分类 + 原始摘要 + 行动建议。"""
-    label = {
-        FailureKind.AUTH: "未登录",
-        FailureKind.QUOTA: "额度耗尽",
-        FailureKind.FAILED: "执行失败",
-    }[kind]
+    """拼一段回喂父模型的失败文案：分类 + 原始摘要 + 行动建议。
+
+    摘要同样保尾：真实诊断（Traceback 末行、退出原因）都在末尾。
+    """
+    label = _FAILURE_LABEL[kind]
     detail = detail.strip()
     if len(detail) > 1_000:
-        detail = detail[:1_000] + "…(已截断)"
+        detail = (
+            f"{detail[:300]}\n…(中间省略 {len(detail) - 1_000} 字符)…\n"
+            f"（以下是末尾 700 字符）\n{detail[-700:]}"
+        )
     body = f"（原始输出：{detail}）" if detail else ""
     return f"委派失败【{label}】{body}\n{_FAILURE_HINT[kind]}"
 
@@ -176,6 +226,10 @@ class CliAdapter:
         if len(text) > MAX_OUTPUT:
             text = text[:MAX_OUTPUT] + f"\n…(输出已截断，共 {len(text)} 字符)"
         return text
+
+    def session_ref(self, stdout: str) -> str:
+        """从输出里取上游的会话标识；拿不到返回空串。子类按格式覆盖。"""
+        return ""
 
     def parse_usage(self, stdout: str, stderr: str) -> tuple[int | None, int | None, float | None]:
         """从输出里抽 ``(输入 token, 输出 token, 自报成本 USD)``。

@@ -66,8 +66,21 @@ def test_quota_cooldown_is_not_clipped_by_the_max_cap() -> None:
 
     实测后果：北京 11:23 算出 20.6h，被 ``quota_cooldown_max=14400`` 截成 4h，
     于是 15:23 / 19:23 / 23:23 … 每 4 小时醒一次白撞 429，一天烧 4 次上游往返。
+
+    ⚠ ``cooldown_for`` 内部用的是**真实当前时间**，而这里断言的是「到下一个
+    08:00 还剩多久」。北京时间 08:00 之后，「下一个重置点」只剩不到一天里
+    很短的一段——本例里 ``quota_cooldown_max`` 是 4 小时，08:00~12:00 之间
+    剩余时长本来就小于上限，断言必然红。2026-11-13 修：只在「剩余时长明确
+    大于上限」的窗口里断言，其余时段 skip 并说明原因。**不要**把上限调小来
+    让测试变绿——那会把被测行为本身改掉。
     """
     policy = CooldownPolicy(quota_reset_at="08:00", quota_cooldown_max=14400.0, jitter=0.0)
+    remaining_today = policy.seconds_until_quota_reset()
+    if remaining_today is None or remaining_today <= policy.quota_cooldown_max:
+        pytest.skip(
+            f"当前距下一个 08:00 只剩 {remaining_today:.0f}s，小于上限 "
+            f"{policy.quota_cooldown_max:.0f}s——这个时段断言恒真，测不出截断"
+        )
     duration = policy.cooldown_for(
         error_type="rate_limit_error",
         scope="credential",
@@ -75,9 +88,6 @@ def test_quota_cooldown_is_not_clipped_by_the_max_cap() -> None:
         quota_reset_at="08:00",
     )
     assert duration > policy.quota_cooldown_max, "被上限截断了，会一整天每 4 小时白撞一次"
-    # 不钉精确秒数：``cooldown_for`` 内部用的是**真实当前时间**，这里必须让
-    # 「还没到 08:00」成立，否则这个测试一天里会有一段时间必然红。
-    remaining_today = policy.seconds_until_quota_reset()
     assert duration >= remaining_today * (1 - policy.jitter) - 1
 
 

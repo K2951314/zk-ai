@@ -36,6 +36,9 @@ logger = get_logger("api.chat")
 router = APIRouter(tags=["chat"], dependencies=[Depends(require_client_auth)])
 
 SSE_DONE = "data: [DONE]\n\n"
+#: 流式空闲心跳（SSE 注释行）。客户端按规范忽略 `:` 开头的行，
+#: 所以它只解决「长时间零字节被判死」，不改变任何数据语义。
+SSE_PING = ": ping\n\n"
 
 
 _REASONING_KEYS = ("reasoning_content", "reasoning", "content_recovered_from_reasoning")
@@ -72,6 +75,19 @@ def _chunk_payload(
     if strip_reasoning:
         _strip_reasoning_fields(payload)
     return payload
+
+
+def keepalive_interval(idle_timeout: float) -> float | None:
+    """按客户端空闲判定的一半计算心跳间隔；None = 不发心跳。
+
+    ``stream_idle_timeout`` 是「客户端能忍多久没有字节」。心跳必须在它**之前**
+    到达，取一半留一倍余量（120s → 每 60s 一次 ping）。
+
+    0 或负数 = 关闭心跳（回到旧行为），便于以后排查「心跳是否影响某个客户端」。
+    """
+    if idle_timeout is None or idle_timeout <= 0:
+        return None
+    return max(5.0, idle_timeout / 2.0)
 
 
 def retry_after_headers(exc: ZKAIError) -> dict[str, str]:
@@ -188,48 +204,69 @@ async def _stream_response(
         "x-accel-buffering": "no",
     }
 
+    ping_every = keepalive_interval(container.settings.stream_idle_timeout)
+
     async def event_stream() -> AsyncIterator[str]:
         watcher = asyncio.create_task(_watch_disconnect(request))
+        # 在飞的那个 anext 必须**跨心跳保持同一个 task**：
+        # 每轮重新 ensure_future 会让上一轮还在跑的 generator 被第二次驱动
+        # （``anext(): asynchronous generator is already running``）。
+        pending: asyncio.Future[Any] | None = None
         try:
             event = first_event
             while True:
-                if event is None:
-                    break
-                if event.type == "chunk" and event.chunk is not None:
-                    payload_json = json.dumps(
-                        _chunk_payload(
-                            event.chunk,
-                            include_usage=include_usage,
-                            strip_reasoning=strip_reasoning,
-                        ),
-                        ensure_ascii=False,
-                    )
-                    yield f"data: {payload_json}\n\n"
-                elif event.type == "meta" and event.meta is not None:
-                    # SSE comment: invisible to OpenAI SDK parsers by design.
-                    yield f": zkai-meta {json.dumps(event.meta.model_dump(), ensure_ascii=False)}\n\n"
-                elif event.type == "error" and event.error is not None:
-                    yield f"data: {json.dumps(event.error, ensure_ascii=False)}\n\n"
-                elif event.type == "end":
-                    break
-
+                # event 为 None = 心跳把上一格发完了，该去等下一个。
+                if event is not None:
+                    if event.type == "chunk" and event.chunk is not None:
+                        payload_json = json.dumps(
+                            _chunk_payload(
+                                event.chunk,
+                                include_usage=include_usage,
+                                strip_reasoning=strip_reasoning,
+                            ),
+                            ensure_ascii=False,
+                        )
+                        yield f"data: {payload_json}\n\n"
+                    elif event.type == "meta" and event.meta is not None:
+                        # SSE comment: invisible to OpenAI SDK parsers by design.
+                        yield f": zkai-meta {json.dumps(event.meta.model_dump(), ensure_ascii=False)}\n\n"
+                    elif event.type == "error" and event.error is not None:
+                        yield f"data: {json.dumps(event.error, ensure_ascii=False)}\n\n"
+                    elif event.type == "end":
+                        break
+                    # 这一格已发完：置空，绝不重复发（心跳不能推动数据）。
+                    event = None
                 # ``anext`` returns an Awaitable, not a Coroutine, so wrap it with
                 # ensure_future (create_task would reject it).
-                next_task: asyncio.Future[Any] = asyncio.ensure_future(anext(iterator))
+                if pending is None:
+                    pending = asyncio.ensure_future(anext(iterator))
+                # timeout 只表示「该发心跳了」：不取消 pending，上游照常推进。
+                # 没有它的时候，上游静默多久，客户端就多久收不到一个字节。
                 done, _ = await asyncio.wait(
-                    {next_task, watcher}, return_when=asyncio.FIRST_COMPLETED
+                    {pending, watcher},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=ping_every,
                 )
-                if next_task not in done:
-                    # Client vanished: cancel upstream and stop producing.
-                    next_task.cancel()
-                    logger.info("client disconnected during stream %s", request_id)
-                    break
+                if pending not in done:
+                    if watcher.done():
+                        # Client vanished: cancel upstream and stop producing.
+                        pending.cancel()
+                        pending = None
+                        logger.info("client disconnected during stream %s", request_id)
+                        break
+                    # 只是静默：SSE 注释行保活，循环继续等**同一个** pending。
+                    if ping_every is not None:
+                        yield SSE_PING
+                    continue
+                finished, pending = pending, None
                 try:
-                    event = next_task.result()
+                    event = finished.result()
                 except StopAsyncIteration:
                     break
             yield SSE_DONE
         finally:
+            if pending is not None:
+                pending.cancel()
             watcher.cancel()
             await _aclose(generator)
 

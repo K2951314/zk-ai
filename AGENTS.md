@@ -35,6 +35,10 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   （坑：`max_tokens=1` 会误杀所有推理模型，实测 16/39）。
   另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
   （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
+  第五份 `docs/排查过程详述.md`（2026-11-13 拆出）：「已知坑」里七条最长的
+  **逐项排除过程**（.env 的 `\r\r\n`、reload 漏冷却策略、413 双闸、Codex 截图丢失、
+  `~/.codex/config.toml` 外科 patch、token 低估 2.67 倍、uv trampoline）。
+  AGENTS.md 里保留结论与索引，**排查同类问题时才翻这份**。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
   中间态及时删——堆到 18 个时已经分不清哪个能回滚。
   ⚠ 纯 `.bak`（不带日期）是 `config_writer.atomic_write` 的**滚动备份，功能性，别删**。
@@ -166,29 +170,6 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
     `last_error`，改好后自动接上。`ZKAI_WATCH_CONFIG` / `ZKAI_WATCH_CONFIG_INTERVAL` 可控。
     `/health` 暴露 `config_watch`，控制台状态行显示「配置自动生效（已自动 reload N 次）」。
     纯标准库 stat 轮询（不引 watchdog/inotify），监听名单 = loader 真正读过的文件（不是 glob）。
-- **`reload_config()` 曾经漏更新冷却策略，`cooldown:` 段改了不生效**（2026-10-13 运营者
-  报「商汤只试一个 Key 就跳 NVIDIA」时挖出来）：`build_container` 一次性构造
-  `CooldownPolicy` 塞进 `pool.policy`，而 `reload_config()` 重建 router / 别名 /
-  凭据注册 / rate_limiter，**唯独不重建它**。于是 `cooldown.throttle_scopes` 属于
-  「改完 YAML 自动生效」承诺里的一个洞——必须整进程重启才生效。实测后果：
-  运营者 2026-10-08 把 `throughput` 从 `account` 改成 `credential`，日志里**仍**是
-  `429 (throughput) has account-wide cooldown -> failing over instead of rotating keys`，
-  行为一模一样；DB 佐证 09-30/10-01/10-05 各有 1151/1776/500 次请求**只试了 1 个
-  商汤 Key 就换供应商**，其余 8 把健康 Key 一次都没被试。
-  已修（`reload_config` 里两行）：`self.pool.policy = CooldownPolicy.from_mapping(...)`
-  且 `self.pool.tracker.policy = self.pool.policy`——**tracker 那个也必须跟着换**，
-  它才是真正算冷却时长的对象，只换 pool.policy 会让「字段对、行为不变」。
-  回归测试 `tests/test_config_watch.py` 的 `test_editing_the_cooldown_section_reaches_the_pool`
-  （钉字段 + 钉 tracker 同一个对象）与 `test_a_cooldown_edit_changes_the_failover_decision`
-  （钉 `_normalize_throttle` 的真实决策），已用变异法验证鉴别力。
-  ⚠ **凡 reload 时重建了一部分派生对象，就要问「还有谁持有旧配置的切片」**——
-  这次漏的是 CooldownPolicy，同类候选：RetryPolicy、RateLimiter 的规则表。
-  2026-10-24 同型又抓到两处并已修：①pool 的 `credential_affinity` 三参数
-  只在建池时读一次（reload 现经 `pool.apply_affinity_config` 补读，测试
-  `test_editing_the_affinity_section_reaches_the_pool` 钉住）；②scheduler
-  部署粘性的 TTL/容量是构造期快照（已改成**现场读池子**——快照必然在热重载
-  后变陈旧；顺带修掉了 getattr 猜错属性名恒回落魔数 64 的旧账）。教训的两半：
-  **配置段要有人补读，派生副本不如活读**。
 - **`config.yaml` 的 `deploy:` 段不参与热加载**（2026-10-26 实测）：`reload_config`
   只重建 router / 别名 / 凭据 / 冷却策略，`load_app_config(self.settings)` 返回的
   新 Settings **没有写回 container**，所以改 `deploy.public_base_url` / `exposure`
@@ -377,58 +358,6 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   6 部署时 DeepSeek/Qwen 根本进不了计划，坏渠道烧光 `max_total_attempts` 就整体失败
   （已改 8）。**NVIDIA `max_retries` 会让挂起重试翻倍墙钟**（60s 超时→120s+/次），
   已设 0——挂起交给上层冷却+换渠道，别盲目重试
-- **`estimated_input_tokens()` 曾低估 2.67 倍，`context_fits` 因此空转（2026-09-25
-  修）**：日志记 269,162 est，上游实报 719,090 prompt_tokens（中文负载低估 4.0 倍）。
-  根因两条：①只累加 `message.text()`，**完全无视 `tool_calls.function.arguments`**
-  ——真实 Codex 会话 1274 个 call 共 746,953 字符全部漏算；②`tools` 用
-  `len(str(self.tools))`，Python dict 字面量比 JSON 短（单引号、`True`/`None`），
-  31 个工具的 schema 被系统性低估。已修（`app/models/request.py`），回归测试
-  `tests/test_token_estimator.py`（13 例，含图片 token 与「不许重复 //4」）。
-  **注意 `context_fits` 还留着 10% 余量**，那是给分词器误差的；低估 2.67 倍时
-  它反而帮倒忙，将来若接「估算值校准」要先想清楚这 10% 怎么处理。
-  **2026-09-25 又补了图片 token**：图发自上游后（见下条）这部分是真实成本，
-  实测 25 张真实截图 ≈ 34,699 tokens。**两个 part-type 集合别混**：
-  Responses 侧是 `input_image/output_image/image`，chat 侧是
-  `image_url/image/input_image`——翻译后 type 会变，估算器按像素算 token
-  （解 PNG IHDR / JPEG SOF / GIF / WebP 头），**不能按 base64 长度**（实测
-  每千字符 3,193~114,970 px，差 36 倍），且图片 token **不参与最后那个 //4**
-  （否则 34,699 会被压成 8,676）。
-- **413 有两道闸，别混为一谈（2026-09-25 梳理）**：字节闸（`app/main.py` 中间件，
-  `ZKAI_MAX_REQUEST_BODY_MB`，默认 10MB）与 token 闸（`RequestService._guard_input_size`，
-  `ZKAI_MAX_INPUT_TOKENS`，默认 0 关闭）。坑有四个：
-  ①**字节闸只看 `content-length` 首部**，chunked 上传不带这个头 → `declared=0` →
-     整个闸失效（Codex 的 `responses_retry` 带这个头，所以它撞的是"太宽"不是"太松"）；
-  ②**字节闸的 413 早退分支以前不写日志**（跳过中间件末尾统一的 `logger.info`），
-     本机 53,402 行 gateway.log 实测 `-> 413` 命中 0 次——客户端只看到一句
-     「请求体过大」，网关侧查无实据。已补 WARNING（`test_api.py::
-     test_oversized_body_leaves_a_log_trace` 守住，已验证原始代码上它会失败）；
-  ③**两个字段都没有 YAML 桥接**（全仓 grep `ZKAI_MAX_REQUEST_BODY`/`ZKAI_MAX_INPUT_TOKENS`
-     零命中），改 `config.yaml` 是静默无效——这正是"Codex 让你改 .env 而不是 config.yaml"的原因；
-  ④**调大字节阈值的方向是反的**：10MB ≈ 290 万 est tokens，而现役最大上游窗口只有 1M
-     （K3/GLM-5.3/StepFun），实测击穿点 body 4.99MB / 1.25M est tokens 时 0 个部署幸存
-     ——放过去只会吃上游 400/429。要放行先有 token 闸兜着。
-  token 闸挂在 `RequestService.chat` + `stream`（三条对外路径的收敛点，含流式——
-  **流式不经过 `chat()`**，只挂一处会漏掉最大的那批），报错复用既有
-  `ContextLengthExceededError`（413 + `context_length_exceeded`，`tests/test_errors.py`
-  钉住它不换 Key 不故障转移），文案指出最大几段 + 怎么调。
-- **Codex 截图的两种丢法，与 2026-09-25 的修复**：`app/models/request.py` 的
-  `_flatten_text` 只认 `input_text/output_text/text/refusal`，`input_image` 被吞。
-  实测同会话 `json.dumps(input)` 14,862,637 B 而 `chat.model_dump_json()` 仅
-  2,983,328 B（**比值 4.98**），base64 图片 11,390,912 B 占 76.6%。
-  顺带纠正一个流传的误判：本机 Codex 会话的**文本**工具输出中位数仅 445 字符、
-  最大 9,282 字符，**没有任何文本巨物**；942KB 以上的全是 view_image 的 base64。
-  所以「别再 cat 整份文件」打错了靶子。两种丢法都不是好事：
-  ①**裸 `input_image` item**（真实 rollout 里 24/25 张是这种，直接躺在 input
-     数组）被 `if kind and kind != "message": continue` **整条丢弃**——连
-     "这里有过图"都不留；②混在 `function_call_output` 里的图变成**空字符串
-     tool 消息**——发到上游等于撒谎「这个工具没返回内容」，模型据此判断会答错。
-  **已修**（`_translate_input` 三处都转成 `image_url` content part），开关
-  `ZKAI_FORWARD_IMAGES`（默认 true），关掉则回落一行占位文本。
-  **代价必须一起校准**：图发自上游后上游流量从 2.8MB 涨到 29MB（**10 倍**），
-  10MB 字节闸直接被触发——所以同时给估算器补了图片 token（见下面那条），
-  否则 token 闸对图片失明（实测只报 50 tokens）。
-  **`/v1/messages` 路径本来就没这个 bug**（`_image_part` 早已实现），不用改。
-  测试 `tests/test_token_estimator.py` 5 例；真实 E2E 验过图片确实到上游。
 - **数据库并发串行化（2026-09-19）**：`:memory:`/池化 aiosqlite 是单连接，两个
   AsyncSession 在同一连接上事务互相踩——实测表现为 UPDATE 静默丢失、空事务
   COMMIT 报错。`Database.session()` 已加进程级 asyncio.Lock 把事务串行化；
@@ -443,20 +372,6 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   https://pypi.tuna.tsinghua.edu.cn/simple`**：PyPI 直连和走 10808 代理都能挂死，
   镜像几秒完成；代价是它会把 `uv.lock` 里的 URL 改成镜像域（哈希不变，纯 URL churn），
   同步完 `git checkout -- uv.lock` 复原
-- **`uv trampoline failed to spawn Python child process` = uv 托管的解释器被删了**
-  （2026-10-26 实测）：`.venv\Scripts\python.exe` 是 uv 生成的跳板，它记死
-  `pyvenv.cfg` 里那个绝对路径（本例 `%APPDATA%\uv\python\cpython-3.13.5-…`，被
-  C 盘清理删掉，同目录只剩 3.11），目录没了就报 `os error 2`——**不是 .venv 坏了，
-  是宿主解释器没了**。修复：`uv sync`（会删掉重建并回落到系统 Python，实测
-  `D:\软件\Python\3.13.2`）；要跑门禁再加 `--extra dev`。**dev 依赖是
-  `optional-dependencies`，plain `uv sync` 不装 pytest/ruff/mypy**——README §20
-  的 `uv run pytest` 在全新环境会直接报找不到。
-  `start_gateway.cmd` 的自动重建原本排在 `first_run.py` 之后，环境一坏第一步就失败、
-  被误判成「.env 没填」，又用同一个坏 python 打中文提示 → 只看到两条一模一样的
-  trampoline 报错 + pause，自愈永远走不到。已调序，`test_start_msg.py::test_
-  gateway_launcher_repairs_a_broken_venv_before_using_it` 钉住（变异验证过）。
-  ⚠ 这类「用坏掉的解释器打印坏掉的解释器的报错」在本脚本里仍有残留（`venv-broken`
-  等提示本身要靠 python），所以自愈时看到的是 uv 自己的英文输出，属预期。
 - **导入迁移包前必须先停网关**（2026-09-21 为这条流过血）：换机包覆盖 `data/zkai.db`
   时，若同目录还留着上一代的 `-wal`/`-shm`，下次开库会把别人的 WAL 帧回放到新库上 →
   `database disk image is malformed`，且**不是警告是真损坏**（本机 `requests`/
@@ -464,51 +379,16 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   Skill 引擎的 `import` 会先备份 side-car 再删除；但最稳的做法是先从托盘退出网关再导入。
   验证损坏库要用 sqlite3 backup API 取一致快照再 `PRAGMA integrity_check`——直接 `cp`
   正在写的库必然报假阳性
-- **`~/.codex/config.toml` 归 ChatGPT app 所有，只能外科手术式 patch**（2026-09-22）：
-  整文件重写会毁掉 app 的 mcp_servers/plugins/projects/desktop 段落（真实文件上百行）。
-  `chatgpt_service.patch_text` 只增改我们的键：顶层键只可能在第一个 `[section]` 前动，
-  provider 表只在其表体内动；`apply_config` 读文件必须 `newline=""`（`read_text()` 会把
-  CRLF 归一化成 LF，悄悄改掉 app 的换行风格）；`auth.json` **永远不写**（运营决策）。
-  改 `env_key`/`ZKAI_API_TOKEN` 后记得桌面版要重启才读到新环境变量；**换机后这一步要
-  手工做**——一键换机 Skill 只搬文件，不碰 `~/.codex/config.toml` 和用户级环境变量
-  （`.migrate/manifest.toml` 有标注）。`POST /admin/chatgpt/sync-env` 或控制台面板
-  「🔧 同步令牌」可以代劳，但不会自动触发。
-  桌面版报 `Missing environment variable: X` = 用户级环境变量缺 X：诊断看
-  `GET /admin/chatgpt` 的 `env_key_visible`/`env_key_matches_gateway`（陈旧令牌会 401），
-  一键修复 `POST /admin/chatgpt/sync-env`，然后重启桌面版。
-  **客户端 `model` 写错（如 'zk'）桌面版每条消息 404**：`PUT /admin/chatgpt/client`
-  在 zk-ai 模式下按 `config.known_names()`（全部模型+别名，即路由器准入口径）
-  硬拦截未知模型并附可用清单（09-23 从警告升级为 400）；路由器的
-  `ModelNotFoundError` 文案会带相近名（前缀优先 + difflib 兜底）。
-  配置目录可用 `ZKAI_CODEX_HOME` 覆盖（多开用户 / 测试隔离），默认 `~/.codex`。
+
+以下几条的**逐项排除过程**已拆到 `docs/排查过程详述.md`（结论仍以本文件为准）：
+
+- **`reload_config()` 曾经漏更新冷却策略，`cooldown:` 段改了不生效**
+- **`estimated_input_tokens()` 曾低估 2.67 倍，`context_fits` 因此空转**
+- **413 有两道闸，别混为一谈**
+- **Codex 截图的两种丢法，与 2026-09-25 的修复**
+- **`uv trampoline failed to spawn Python child process` = uv 托管的解释器被删了**
+- **`~/.codex/config.toml` 归 ChatGPT app 所有，只能外科手术式 patch**
 - **`.env` 的值尾部混进 `\r` → 网关 bind 失败，报错却写成 `getaddrinfo failed`**
-  （2026-09-24 换机后实测，排查绕了远路）：那份 `.env` 的**每一行**换行都是
-  `\r\r\n`（多一个回车，共 115 行），于是 `ZKAI_HOST=0.0.0.0\r\r`。
-  `str.splitlines()` 只吃掉作行尾的那个 CR，**值里剩的一个 CR 会一路传下去**：
-  托盘进程环境 `ZKAI_HOST='0.0.0.0\r'` → uvicorn argv `--host '0.0.0.0\r'` →
-  `socket.bind((host, port))` 走 `getaddrinfo` 解析 → `OSError [Errno 11001]
-  getaddrinfo failed` → uvicorn `logger.error(exc)` + `sys.exit(3)`。
-  **别把这个 errno 当 DNS 问题**：Windows 上 11001 是「解析地址/服务失败」，
-  bind 解析 host 时抛的也是它。实测复现：`bind(('0.0.0.0\r', 8317))` 与
-  `bind(('8317', 8317))` 都是这个错，而 `bind(('0.0.0.0', 8317))` 正常。
-  **判定三连**（照顺序看，30 秒定案）：
-  ① 日志里**有没有 `Uvicorn running on http://...`**——它只在 bind 成功后才打印，
-     失败的那次永远没有；且报错紧跟在 `Application startup complete` 之后、
-     `Waiting for application shutdown` 之前的**同一秒**（DNS 故障不可能这么快）。
-  ② `python -c "raw=open('.env','rb').read(); print(raw.count(b'\r\r'), raw.count(b'\r\n'))"`
-     ——两个数相等就是全文件 `\r\r\n`，写个开头为 `\r\r\n` 的替换即可（改前先备份，
-     改后逐行比对确认内容零差异）。
-  ③ 值含不可见字符时直接读进程环境块（PEB，`ReadProcessMemory`）比猜快：
-     本机就是这么看到 `'0.0.0.0\r'` 的。
-  **别再被 `shadowed by pre-existing process environment` 警告带偏**：它点名
-  `ZKAI_HOST`/`ZKAI_PORT` 时，真相往往是**文件里的值带 `\r` 导致两边不等**，
-  不是「环境变量冲突」。`ZKAI_HOST`/`ZKAI_PORT` 在 HKCU/Machine 里查不到是**正常的**
-  （只有迁移脚本会写 `ZKAI_API_TOKEN`），别去删不存在的变量。现已拆成两条：
-  `malformed_env_names()` 报 ERROR 并指「去修文件」，`shadowed_env_names()` 只报真冲突。
-  `tray_launcher._env_or_default` 取值也已 `.strip()` 兜底。
-  **回归测试** `tests/test_config.py`（malformed 与真冲突互不误报）、
-  `tests/test_tray_launcher.py`（argv 里不许带控制字符，且要过 `getaddrinfo`）。
-  换机前值得先验一遍 `.env` 换行——现在启动日志会替你把关
 
 ## 外部 CLI 执行体：免费档（2026-10-25）
 
@@ -620,6 +500,44 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   `.qoder/.models/*/catalog-*` 是加密文件（头 `QMC`），别去解它。面板下拉走
   live 发现（`source: live`），静态 `models` 只是未登录时的兜底。
 
+### 2026-11-13 委派层对标 Claude Code / Codex 后的九条（都是实测）
+
+这层此前只做到「把一段字符串 argv 传进子进程、再把 stdout **头部** 8000 字返回」。
+九条都配了变异验证过的回归测试（`test_agent_cli.py` / `test_agent_prompting.py` /
+`test_agent.py`）。别再退回旧写法：
+
+- **审批卡必须展示真正要执行的命令**：提权原来只在 runner 里做、预览用未提权的
+  config 渲染 → 批的是「只读」，跑起来是 `--dangerously-skip-permissions`。
+  已抽 `delegate.escalated()` 让**预览与执行共用同一判定**，`approval_mode` 进审批
+  消息。同时**模型发起的 `delegate_cli` 一律不提权**——`agent_permission_mode: bypass`
+  的语义只是「任务空间内不弹审批卡」，不是「把外部 CLI 的沙箱也关掉」。
+- **任务信封**（`cli/prompting.py::build_task_prompt`）：**在哪**（绝对路径，任务
+  空间不是工作区根）、**交什么**（结论写最后一段、落盘进 `outputs/` 并列出路径）、
+  **能不能问**（不能，按假设继续并列出假设——这句最省额度）。MCP 后端**不套信封**
+  （task 是结构化入参），`envelope=False` 可回退。
+- **段间交接**（`with_context`）：多段 @ 此前只共享目录不共享上下文，「先让 A 查、再
+  让 B 审」的 B 在审空气。现在上一段结论（截 2000 字）注入下一段。别拼整段历史——
+  一次委派光 CLI 脚手架就 3.6 万 prompt tokens。
+- **截断一律保尾**（`clip_output` / `failure_output`）：堆栈、pytest 摘要、结论都在
+  末尾。失败详情改成 **stderr 在前**（诊断在 stderr，stdout 多是进度噪音）+ 退出码。
+- **超时 / 取消不能归成 FAILED**（新增 `FailureKind.TIMEOUT` / `CANCELLED`）：FAILED
+  的建议是「调整任务描述后重试」，对超时是**反向建议**。现在明说「可能已改文件，重试前先看」。
+- **`idle_timeout` 改成逐执行体配置**（默认 0 = 不判空闲）：原来全局写死 180s，而
+  claude/codex/gemini/codebuddy/qoder 都是「结束才一次性吐输出」，静默是常态 →
+  300s timeout 被 180s 空闲判死提前截断（claude 实测 130s）。现役只有 codearts 配 180。
+- **claude 走 `--output-format json`**（字段 `result`/`is_error`/`usage`/`total_cost_usd`
+  /`session_id`）：收费档最贵的一条，此前账本对它永远空白。`session_ref` 落
+  `state.json` 的 `handoff_session`，为 `--resume` 留口。codebuddy 的 `is_error: true`
+  也从「挂备注」改成 `fatal_output` 判失败——上游的结论字段不是正文的一部分。
+- **预算闸 `daily_calls` / `daily_cost_usd`**（0 = 不限）：额度是**事前**拦，不是撞了
+  429 才解释（Gemini 免费档实测 40 分钟打空）。成本只累加**自报**的行——没自报的算 0
+  会让熔断永不触发。
+- **免打扰按「工具:角色」记**（`SessionApprovals._key`）：放行免费档不该等于放行
+  `cli-claude`（收费 + bypass）。`write_file`/`run_command` 仍按工具名。
+- **产物清单**：任务空间承诺「产物落 outputs/」却从没人读过——控制台永远「（暂无）」。
+  现在三条派单路径都列 `outputs/` 并写 `state.json` 的 artifacts / handoff_brief。
+
+
 
 ## 事件中台（2026-11-02，自动化调度）
 
@@ -710,6 +628,45 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 - 临时脚本统一放 `exports/_*.py`，跑完即删；不要把审计脚本留在工作区
 - **并发测试夹具要加锁**（2026-11-04）：`ask_batch` 的 `stub_post` 是多线程共写的 list，
   裸 `append` 撞出顺序错——单跑必绿、全量偶红，最能骗人的那种。已加 `threading.Lock`。
+
+## 入站断连：「总是在中途断开」的四个根因（2026-11-13 实测定位）
+
+背景：运营者反馈「ds harness / 其它 AI 工具调网关总是断开，只有 Claude Code 最好」。
+29 万行 gateway.log + `data/zkai.db` 交叉核对后，**不是路由层的问题**：
+`zk-auto` 6749 次请求只失败 1 次、`step-5-preview` 4452 次零失败。四处根因全部已修，
+都用真机验证过。
+
+- **① `/v1` 流式没有空闲心跳**（主因）。三条路径都写成
+  `asyncio.wait({next_task, watcher})`——**没有 timeout**，上游静默时循环挂住、
+  客户端一个字节都收不到，长静默后判连接失败。现在按 `request.stream_idle_timeout`
+  （默认 120s）**一半**发 SSE 注释行 `: ping`：SDK 与 ds harness 都按规范忽略 `:`
+  开头的行（零兼容风险），有数据流动时完全不发。
+  ⚠ `stream_idle_timeout` 此前**是死配置**（读进 Settings 但全仓零引用、无 YAML 桥接，
+  改 config.yaml 静默无效）——已补桥接，`test_config.py::test_stream_idle_timeout_is_bridged_from_yaml` 钉住。
+  ⚠ 两个坑都踩过：**在飞的 `anext` 必须跨心跳保持同一个 task**（每轮新建会报
+  `anext(): asynchronous generator is already running`）；**发完一格必须把 event
+  置空**（否则心跳会重发同一个 chunk，实测 part0 被吐 5 次）。
+- **② `max_credentials_per_deployment=3` 对单腿模型是致命的**。`kimi-k3` 只有一个
+  部署（sensenova，9 把 Key），截 3 把 = 6 把从未被试，连撞 3 次 429 整条请求就失败。
+  **让渡的前提是「还有别的腿可退」**，只剩一条时让渡 = 必然失败。已加
+  `_is_only_fallible_leg`：链上最后一条可用腿可扫完整个池。真机验证：修复前 429，
+  修复后 9 把全试、其中一把恢复、返回 200。
+- **③ 429 不带 `Retry-After`**。商汤的 429 正文只有 `inference exceeds tpm/rpm limit`，
+  既无秒数也无头，客户端只能瞎撞。现在 `_exhausted` 在「上游没给 + 是 throttle」时用
+  **我们自己算的冷却时长**兜底（确定值，不告诉客户端等于浪费）。真机：`Retry-After: 1` / `60`。
+- **④ `responses` 路径连断连检测都没有**。客户端走了，上游连接要跑到下一个 chunk
+  才回收。已补 watcher（与 chat / messages 同一套）。
+
+**三条流式路径现在结构一致**，改一条时另外两条要同步——不一致本身就是 bug 源。
+`keepalive_interval()` 与 `SSE_PING` 定义在 `app/api/chat.py`，另外两处 import 复用。
+
+### 还没做、别再拿它当「已修」
+
+- `latency_ms` 在流式路径记的是 `meta.latency_ms`（首块延迟），不是整条流的墙钟，
+  `client_disconnected` 显示 `latency_ms=0.0` 就是这个原因。改它会影响既有统计口径，
+  属新工作、不是 bug。
+- 上游 429 正文里的「多少秒后再来」没有解析（只认 `Retry-After` 头）。加「从自由文本
+  猜秒数」有误判风险，**刻意不做**。
 
 ## 当前状态（持续整理：2026-10-07）
 

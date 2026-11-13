@@ -272,6 +272,30 @@ async def test_remember_skips_second_approval(tmp_path):
     await harness.container.shutdown()
 
 
+def test_remember_covers_only_the_same_role():
+    """免打扰按角色记：放行 cli-a 之后，派 cli-b 仍然要问。
+
+    为什么重要：角色背后是不同的成本档与权限档（cli-claude 是收费 + bypass）。
+    按工具名记等于「批一次免费档 = 本会话放行所有执行体」，与审批卡上
+    那一行文字的意图不符。Claude Code 的 allowlist 也是到命令族粒度。
+    """
+    from app.services.agent.confirm import SessionApprovals
+
+    approvals = SessionApprovals()
+    pending = approvals.register(
+        "delegate_cli", {"role": "cli-a", "task": "x"}, "预览", None, role="cli-a"
+    )
+    approvals.resolve(pending.id, approved=True, remember=True)
+
+    assert approvals.skipped("delegate_cli", role="cli-a") is True
+    assert approvals.skipped("delegate_cli", role="cli-b") is False
+
+    # 其它危险工具仍按工具名记：粒度不拆细，免得审批变成噪音
+    other = approvals.register("write_file", {"path": "a"}, "diff", None)
+    approvals.resolve(other.id, approved=True, remember=True)
+    assert approvals.skipped("write_file") is True
+
+
 async def test_path_escape_rejected(tmp_path):
     adapter = AgentFakeAdapter(make_provider("fake", key_ids=("key-1",))).queue(
         tool_resp(("read_file", {"path": "../../.env"})),
@@ -1076,12 +1100,21 @@ async def test_start_delegations_runs_items_in_order(tmp_path: Path, monkeypatch
     assert created["session"]["title"].startswith("[2段]")
     row = await wait_for_status(service, sid, {"done", "failed"})
     assert row["status"] == "done", row["error"]
-    assert [task for _, task in order] == ["先查", "再审"]
+    # 第一段原样；第二段自动带上第一段的结论（2026-11-13 的段间交接）。
+    # 没有这一步，「先让 A 查、再让 B 审」里的 B 根本看不到 A 查到了什么。
+    assert order[0][1] == "先查"
+    assert order[1][1].startswith("# 上一段（cli-a）的结论")
+    assert "done:先查" in order[1][1]
+    assert order[1][1].endswith("# 你的任务\n再审")
     msgs = await service.repo.messages(sid)
     tasks = [m for m in msgs if m["role"] == "user"]
     results = [m for m in msgs if m["role"] == "assistant" and m["kind"] == "message"]
     assert [m["data"]["executor"] for m in tasks] == ["cli-a", "cli-b"]
-    assert [m["content"] for m in results] == ["done:先查", "done:再审"]
+    # 回填的是执行体自己的输出（不是它收到的 task），所以第二段正文仍以
+    # 「done:」开头；交接只影响送进去的 prompt，不污染回喂正文。
+    assert all(m["content"].startswith("done:") for m in results)
+    assert results[0]["content"] == "done:先查"
+    assert results[1]["content"].endswith("# 你的任务\n再审")
     assert [m["data"]["executor"]["index"] for m in results] == [1, 2]
     await harness.container.shutdown()
 

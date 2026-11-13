@@ -32,7 +32,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.api.chat import _aclose, error_response, routing_headers
+from app.api.chat import (
+    SSE_PING,
+    _aclose,
+    _watch_disconnect,
+    error_response,
+    keepalive_interval,
+    routing_headers,
+)
 from app.api.deps import ContainerDep, client_metadata, require_client_auth
 from app.core.errors import ZKAIError
 from app.core.logging import get_logger
@@ -61,7 +68,7 @@ async def create_response(
     metadata = client_metadata(request)
 
     if payload.stream:
-        return await _stream_response(payload, container, request_id, metadata)
+        return await _stream_response(payload, container, request_id, metadata, request)
 
     try:
         response = await container.request_service.responses(
@@ -354,6 +361,7 @@ async def _stream_response(
     container: ContainerDep,
     request_id: str,
     metadata: dict[str, str | None],
+    request: Request,
 ) -> Any:
     chat_payload = payload.to_chat_request(
         forward_images=container.settings.forward_images
@@ -389,34 +397,67 @@ async def _stream_response(
         "cache-control": "no-cache",
     }
 
+    ping_every = keepalive_interval(container.settings.stream_idle_timeout)
+
     async def event_stream() -> AsyncIterator[str]:
+        watcher = asyncio.create_task(_watch_disconnect(request))
+        # 在飞的那个 anext 必须**跨心跳保持同一个 task**（见 chat.py 同段注释）。
+        pending: asyncio.Future[Any] | None = None
         try:
             yield assembler.start()
             event = first_event
-            while event is not None:
-                if event.type == "chunk" and event.chunk is not None:
-                    for piece in assembler.feed_chunk(event.chunk):
-                        yield piece
-                elif event.type == "usage" and event.usage is not None:
-                    assembler.set_usage(
-                        event.usage.prompt_tokens,
-                        event.usage.completion_tokens,
-                        event.usage.total_tokens,
-                    )
-                elif event.type == "meta" and event.meta is not None:
-                    assembler.set_routing_meta(event.meta)
-                elif event.type == "error" and event.error is not None:
-                    yield assembler.failed(event.error)
-                    return
-                elif event.type == "end":
-                    break
+            while True:
+                # event 为 None = 心跳把上一格发完了，该去等下一个。
+                if event is not None:
+                    if event.type == "chunk" and event.chunk is not None:
+                        for piece in assembler.feed_chunk(event.chunk):
+                            yield piece
+                    elif event.type == "usage" and event.usage is not None:
+                        assembler.set_usage(
+                            event.usage.prompt_tokens,
+                            event.usage.completion_tokens,
+                            event.usage.total_tokens,
+                        )
+                    elif event.type == "meta" and event.meta is not None:
+                        assembler.set_routing_meta(event.meta)
+                    elif event.type == "error" and event.error is not None:
+                        yield assembler.failed(event.error)
+                        return
+                    elif event.type == "end":
+                        break
+                    # 这一格已发完：置空，绝不重复发（心跳不能推动数据）。
+                    event = None
+
+                if pending is None:
+                    pending = asyncio.ensure_future(anext(iterator))
+                # 与 chat / messages 同一套：timeout 只表示该发心跳了，不取消上游。
+                # 这条路径此前**连断连检测都没有**——客户端走了，上游连接还要
+                # 跑到下一个 chunk 才回收（2026-11-13 补齐）。
+                done, _ = await asyncio.wait(
+                    {pending, watcher},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=ping_every,
+                )
+                if pending not in done:
+                    if watcher.done():
+                        pending.cancel()
+                        pending = None
+                        logger.info("client disconnected during responses stream %s", request_id)
+                        return
+                    if ping_every is not None:
+                        yield SSE_PING
+                    continue
+                finished, pending = pending, None
                 try:
-                    event = await anext(iterator)
+                    event = finished.result()
                 except StopAsyncIteration:
                     break
             yield assembler.finish()
             yield "data: [DONE]\n\n"
         finally:
+            if pending is not None:
+                pending.cancel()
+            watcher.cancel()
             await _aclose(generator)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)

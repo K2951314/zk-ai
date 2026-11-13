@@ -33,7 +33,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.api.chat import _aclose, _watch_disconnect, retry_after_headers, routing_headers
+from app.api.chat import (
+    SSE_PING,
+    _aclose,
+    _watch_disconnect,
+    keepalive_interval,
+    retry_after_headers,
+    routing_headers,
+)
 from app.api.deps import ContainerDep, client_metadata, get_container
 from app.core.errors import ZKAIError
 from app.core.logging import get_logger
@@ -432,41 +439,66 @@ async def _stream_response(
         "x-accel-buffering": "no",
     }
 
+    ping_every = keepalive_interval(container.settings.stream_idle_timeout)
+
     async def event_stream() -> AsyncIterator[str]:
         watcher = asyncio.create_task(_watch_disconnect(request))
+        # 在飞的那个 anext 必须**跨心跳保持同一个 task**：每轮重新 ensure_future
+        # 会让上一轮还在跑的 generator 被第二次驱动
+        # （``anext(): asynchronous generator is already running``）。
+        pending: asyncio.Future[Any] | None = None
         try:
             yield assembler.start()
             event = first_event
             while True:
-                if event is None:
-                    break
-                if event.type == "chunk" and event.chunk is not None:
-                    for piece in assembler.feed_chunk(event.chunk):
-                        yield piece
-                elif event.type == "usage" and event.usage is not None:
-                    assembler.set_usage(event.usage.prompt_tokens, event.usage.completion_tokens)
-                elif event.type == "error" and event.error is not None:
-                    yield assembler.error_event(event.error)
-                    return
-                elif event.type == "end":
-                    break
+                # event 为 None = 心跳把上一格发完了，该去等下一个。
+                if event is not None:
+                    if event.type == "chunk" and event.chunk is not None:
+                        for piece in assembler.feed_chunk(event.chunk):
+                            yield piece
+                    elif event.type == "usage" and event.usage is not None:
+                        assembler.set_usage(
+                            event.usage.prompt_tokens, event.usage.completion_tokens
+                        )
+                    elif event.type == "error" and event.error is not None:
+                        yield assembler.error_event(event.error)
+                        return
+                    elif event.type == "end":
+                        break
+                    # 这一格已发完：置空，绝不重复发（心跳不能推动数据）。
+                    event = None
 
-                next_task: asyncio.Future[Any] = asyncio.ensure_future(anext(iterator))
+                if pending is None:
+                    pending = asyncio.ensure_future(anext(iterator))
+                # timeout 只表示「该发心跳了」：不取消 pending，上游照常推进。
+                # 没有它的时候，上游静默多久，客户端就多久收不到一个字节
+                # （2026-11-13 定位的「总是在中途断开」）。
                 done, _ = await asyncio.wait(
-                    {next_task, watcher}, return_when=asyncio.FIRST_COMPLETED
+                    {pending, watcher},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=ping_every,
                 )
-                if next_task not in done:
-                    next_task.cancel()
-                    logger.info("client disconnected during messages stream %s", request_id)
-                    return
+                if pending not in done:
+                    if watcher.done():
+                        pending.cancel()
+                        pending = None
+                        logger.info("client disconnected during messages stream %s", request_id)
+                        return
+                    # 只是静默：SSE 注释行保活，循环继续等**同一个** pending。
+                    if ping_every is not None:
+                        yield SSE_PING
+                    continue
+                finished, pending = pending, None
                 try:
-                    event = next_task.result()
+                    event = finished.result()
                 except StopAsyncIteration:
                     break
             # Invariant of this endpoint: blocks are always closed, even when
             # the upstream produced nothing but silence.
             yield assembler.finish()
         finally:
+            if pending is not None:
+                pending.cancel()
             watcher.cancel()
             await _aclose(generator)
 

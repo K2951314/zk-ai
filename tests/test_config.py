@@ -404,6 +404,29 @@ def test_yaml_settings_fill_in_values_that_have_no_env_var(monkeypatch) -> None:
     assert merged.port == 1234
 
 
+def test_stream_idle_timeout_is_bridged_from_yaml(monkeypatch) -> None:
+    """``request.stream_idle_timeout`` 必须能从 config.yaml 改到。
+
+    这个字段此前是**死配置**：定义了、也读进 Settings，但没人用，也没有
+    YAML 桥接——改 config.yaml 静默无效，运营者只能去改 .env。这与
+    AGENTS.md 记的 ``ZKAI_MAX_REQUEST_BODY`` / ``ZKAI_MAX_INPUT_TOKENS``
+    是同一个坑（第三次），所以这里钉住桥接本身。
+    """
+    monkeypatch.delenv("ZKAI_STREAM_IDLE_TIMEOUT", raising=False)
+    settings = Settings()
+    merged = apply_settings_from_yaml(settings, {"request": {"stream_idle_timeout": 45}})
+    assert merged.stream_idle_timeout == 45
+
+
+def test_stream_idle_timeout_env_still_wins(monkeypatch) -> None:
+    """环境变量永远优先于 config.yaml（既有契约，不能因为新键破坏）。"""
+    monkeypatch.setenv("ZKAI_STREAM_IDLE_TIMEOUT", "7")
+    settings = Settings()
+    assert settings.stream_idle_timeout == 7
+    merged = apply_settings_from_yaml(settings, {"request": {"stream_idle_timeout": 45}})
+    assert merged.stream_idle_timeout == 7
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end config load
 # --------------------------------------------------------------------------- #

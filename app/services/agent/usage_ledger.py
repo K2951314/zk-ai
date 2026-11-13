@@ -69,6 +69,7 @@ def record_delegation(
     tokens_in: int | None = None,
     tokens_out: int | None = None,
     cost_usd: float | None = None,
+    session_ref: str = "",
     error: str = "",
 ) -> None:
     """追加一条**外部执行体委派**记录（含上游自报用量）。
@@ -91,6 +92,7 @@ def record_delegation(
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "cost_usd": cost_usd,
+            "session_ref": session_ref,
             "error": error[:200],
         }
     )
@@ -105,6 +107,65 @@ def _append(entry: dict[str, Any]) -> None:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
         return
+
+
+def calls_today(tool: str, *, now: float | None = None) -> int:
+    """这个执行体今天（本地时区）被派了几次。
+
+    「额度是事后才知道超了」等于没有额度管理：Gemini 免费档实测 40 分钟就能
+    打空、CodeBuddy 的免费池也会静默耗尽。调用前先看一眼今天的次数，
+    才能事前拒绝，而不是撞了 429 才回头解释。
+
+    ``tool`` 传执行体名（``config.name``）；只数 ``kind == "delegation"``。
+    ``now`` 只给测试用——**不要在生产路径上依赖它**。
+    """
+    if now is None:
+        now = time.time()
+    since = _local_midnight(now)
+    count = 0
+    for item in recent():
+        if item.get("kind") != "delegation" or str(item.get("tool") or "") != tool:
+            continue
+        try:
+            ts = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts >= since:
+            count += 1
+    return count
+
+
+def cost_today(tool: str, *, now: float | None = None) -> float:
+    """这个执行体今天自报成本之和（美元）。
+
+    **只累加自报过成本的行**。没自报的调用不计 0——把「不知道」算成「免费」
+    会让熔断永远不触发（与 record_delegation 里那句「不要用 0 代替」同一条原则）。
+    """
+    if now is None:
+        now = time.time()
+    since = _local_midnight(now)
+    total = 0.0
+    for item in recent():
+        if item.get("kind") != "delegation" or str(item.get("tool") or "") != tool:
+            continue
+        try:
+            ts = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts < since:
+            continue
+        cost = item.get("cost_usd")
+        if isinstance(cost, (int, float)):
+            total += float(cost)
+    return total
+
+
+def _local_midnight(now: float) -> float:
+    """本地时区当天 00:00 的时间戳。用本地时区而不是 UTC：
+    运营者问「今天派了几次」指的是他自己的今天。
+    """
+    local = time.localtime(now)
+    return time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
 def recent(limit: int = 50) -> list[dict[str, Any]]:

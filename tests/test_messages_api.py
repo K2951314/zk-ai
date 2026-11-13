@@ -9,6 +9,7 @@ block opened by the gateway must be closed, exactly once, before
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -288,6 +289,48 @@ async def test_streaming_closes_every_content_block(messages_api) -> None:
     message_delta = next(data for name, data in events if name == "message_delta")
     assert message_delta["delta"]["stop_reason"] == "end_turn"
     assert message_delta["usage"]["output_tokens"] == 5
+
+
+async def test_silent_upstream_emits_keepalive_pings(messages_api, monkeypatch) -> None:
+    """上游静默时也要发字节，否则客户端判连接失败（2026-11-13 修）。
+
+    心跳是 SSE 注释行 ``: ping``，Anthropic SDK 按规范忽略它。
+    这里同时钉两件事：ping 真的出现了；解析出来的事件序列一个都没变。
+    """
+    import app.api.messages as messages_mod
+
+    monkeypatch.setattr(messages_mod, "keepalive_interval", lambda _v: 0.05)
+    client, adapter = messages_api
+
+    calls = {"n": 0}
+
+    async def slow_stream(request, ctx):
+        # 每块之间静默 0.25s，远大于 0.05s 的心跳间隔
+        for index in range(3):
+            if calls["n"]:
+                await asyncio.sleep(0.25)
+            calls["n"] += 1
+            yield _chunk(delta=ChunkDelta(content=f"part{index} "))
+
+    adapter.stream = slow_stream  # type: ignore[method-assign]
+    response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
+    assert response.status_code == 200
+
+    assert ": ping" in response.text, "静默期间必须发心跳注释行"
+    # 断言必须命中「静默期间新插入的注释行」，而不是开场自带的 ``event: ping``。
+    # 否则把 timeout 改回 None 测试照样绿——等于没有鉴别力（2026-11-13 踩到）。
+    lines = response.text.splitlines()
+    ping_at = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert ping_at, "心跳必须是 SSE 注释行（`: ping`），不能复用 event: ping 事件名"
+    start_at = lines.index("event: message_start")
+    assert all(i > start_at for i in ping_at), "心跳应出现在开场之后，而不是用它冒充"
+    # 事件语法完全不受影响：仍然以 message_start 开头、message_stop 收尾
+    events = parse_sse(response.text)
+    names = [name for name, _data in events]
+    assert names[0] == "message_start"
+    assert names[-1] == "message_stop"
+    deltas = [data for name, data in events if name == "content_block_delta"]
+    assert "".join(item["delta"]["text"] for item in deltas) == "part0 part1 part2 "
 
 
 async def test_streaming_tool_use_blocks_and_stop_reason(messages_api) -> None:

@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from app.api.chat import _watch_disconnect
+from app.api.chat import _watch_disconnect, keepalive_interval
 from app.main import create_app
 from app.models.provider import AliasStrategy
 from app.models.request import ChatCompletionRequest
@@ -416,6 +416,78 @@ async def test_streaming_preflight_error_returns_json_status(api) -> None:
     )
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_keepalive_interval_is_half_the_client_idle_budget() -> None:
+    """心跳必须比客户端的空闲判定更早到达，取一半留一倍余量。"""
+    assert keepalive_interval(120.0) == 60.0
+    assert keepalive_interval(10.0) == 5.0
+    # 太小的值会被下限托住：不是越勤越好
+    assert keepalive_interval(2.0) == 5.0
+    # 0 / None = 关闭（回到旧行为）
+    assert keepalive_interval(0) is None
+    assert keepalive_interval(None) is None
+
+
+async def test_silent_upstream_emits_keepalive_pings(api, monkeypatch) -> None:
+    """上游静默时必须发心跳，否则客户端会判连接失败（2026-11-13 修的断连）。
+
+    ``asyncio.wait({next_task, watcher})`` 原来是**无超时**的：上游沉默多久，
+    客户端就多久收不到一个字节。ds harness / Codex 在零字节静默后会断开。
+    """
+    import app.api.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v: 0.05)
+
+    client, harness = api
+    harness.adapter.queue(Behavior(chunks=3, delay=0.25))
+    response = await client.post(
+        "/v1/chat/completions", json={**CHAT_BODY, "stream": True}
+    )
+    assert response.status_code == 200
+    chunks, comments, raw = await parse_sse(response.text)
+
+    assert [c for c in comments if c == "ping"], "静默期间必须发心跳"
+    # 心跳是注释行：data 事件一个都不能多（OpenAI 兼容性不变）
+    text = "".join(
+        (chunk["choices"][0]["delta"].get("content") or "") for chunk in chunks
+    )
+    assert text == "part0 part1 part2 "
+    assert raw[-1] == "[DONE]"
+
+
+async def test_no_ping_when_upstream_keeps_talking(api, monkeypatch) -> None:
+    """数据流动时不发心跳：只在静默时补位，不占正常带宽。"""
+    import app.api.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v: 30.0)
+
+    client, harness = api
+    harness.adapter.queue(Behavior(chunks=3))
+    response = await client.post(
+        "/v1/chat/completions", json={**CHAT_BODY, "stream": True}
+    )
+    _, comments, _ = await parse_sse(response.text)
+    assert not [c for c in comments if c == "ping"]
+
+
+async def test_keepalive_does_not_disturb_the_usage_chunk(api, monkeypatch) -> None:
+    """心跳不能干扰 include_usage 的尾块（有客户端严格校验它）。"""
+    import app.api.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v: 0.05)
+
+    client, harness = api
+    harness.adapter.queue(
+        Behavior(chunks=2, delay=0.2, prompt_tokens=7, completion_tokens=9)
+    )
+    response = await client.post(
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True, "stream_options": {"include_usage": True}},
+    )
+    chunks, _, raw = await parse_sse(response.text)
+    assert chunks[-1]["usage"]["total_tokens"] == 16
+    assert raw[-1] == "[DONE]"
 
 
 async def test_streaming_all_fail_returns_503(api) -> None:

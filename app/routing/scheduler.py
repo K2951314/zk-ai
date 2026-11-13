@@ -379,18 +379,59 @@ class Scheduler:
         )
         return info.cooldown_seconds
 
+    def _is_only_fallible_leg(
+        self,
+        decision: Any,
+        candidate: RoutingCandidate,
+        *,
+        tried: int,
+    ) -> bool:
+        """这条腿是不是**链上唯一还能跑的**。
+
+        判据（全部满足才算）：
+        - 链上候选里，除它之外没有任何一条既 eligible、又没在冷却/隔离中的部署；
+        - 或者它已经是链上最后一条（``tried`` 之后没有别的了）。
+
+        为什么要这个（2026-11-13 实测）：``kimi-k3`` 现在只有一个部署，
+        调度器仍按 ``max_credentials_per_deployment=3`` 截断 Key 池，9 把里
+        6 把从未被试，连撞 3 次 429 就整条请求失败。这是「让渡」逻辑用错了
+        场景：让渡的前提是「还有别的腿可退」，只剩一条时让渡 = 必然失败。
+        """
+        remaining = [
+            other
+            for other in decision.candidates
+            if other is not candidate
+            and other.eligible
+            and not self.deployment_cooling_down(other.deployment.id)
+        ]
+        del tried  # 只有「别的腿是否还活着」这一个判据，保留参数便于将来扩展
+        return not remaining
+
     def _credentials_for(
-        self, candidate: RoutingCandidate, *, session_key: str | None = None
+        self,
+        candidate: RoutingCandidate,
+        *,
+        session_key: str | None = None,
+        only_leg: bool = False,
     ) -> list[CredentialRuntime]:
         """Usable credentials for a candidate, bounded by the policy.
 
         ``session_key`` floats the conversation's pinned credential to the front
         (see :meth:`app.credentials.pool.CredentialPool.candidates`).
+
+        ``only_leg``（2026-11-13）：这条腿是链上**唯一还能跑的**时候，
+        让渡已无意义 —— 不让它扫完整个池，这个请求就必然失败。实测
+        ``kimi-k3`` 只有一个部署，截到 3 把 Key 时 9 把池里 6 把从未被试，
+        连续 3 次 429 整条请求就断了（运营者看到「总是在中途断开」）。
+        ``max_credentials_per_deployment`` 的本意是「别让单个请求独占整池、
+        把 Key 留给并发」，只在还有别的腿可退时才成立。
         """
         provider = candidate.provider
         credentials = self.pool.candidates(provider.id, session_key=session_key)
         if not credentials and provider.requires_credential:
             return []
+        if only_leg:
+            return credentials
         return credentials[: self.policy.max_credentials_per_deployment]
 
     def _admit(self, provider: ProviderConfig, credential: CredentialRuntime) -> bool:
@@ -666,12 +707,19 @@ class Scheduler:
             if adapter is None:
                 continue
 
-            credentials = self._credentials_for(candidate, session_key=session_key)
+            only_leg = self._is_only_fallible_leg(
+                decision, candidate, tried=deployments_tried
+            )
+            credentials = self._credentials_for(
+                candidate, session_key=session_key, only_leg=only_leg
+            )
             # 整池都在冷却时先短暂排队（见 _wait_for_credential）：排队期间不消耗
             # 任何上游配额，比立刻 503 对客户端友好得多。等到了就重取一次，仍然
             # 没有才按下面的旧路径记录空尝试并换下一个部署。
             if not credentials and await self._wait_for_credential(candidate, wall_start):
-                credentials = self._credentials_for(candidate, session_key=session_key)
+                credentials = self._credentials_for(
+                    candidate, session_key=session_key, only_leg=only_leg
+                )
             if not credentials:
                 # No key can serve this deployment: record an attempt so the audit
                 # trail stays monotonic, then move on. Nothing was sent upstream, so
@@ -900,11 +948,18 @@ class Scheduler:
             if adapter is None:
                 continue
 
-            credentials = self._credentials_for(candidate, session_key=session_key)
+            only_leg = self._is_only_fallible_leg(
+                decision, candidate, tried=deployments_tried
+            )
+            credentials = self._credentials_for(
+                candidate, session_key=session_key, only_leg=only_leg
+            )
             if not credentials and await self._wait_for_credential(candidate, wall_start):
                 # 与非流式路径同样的排队：整池冷却时等一小会儿再重取，而不是
                 # 立刻把一次「上游一次都没发」的空尝试写进审计。
-                credentials = self._credentials_for(candidate, session_key=session_key)
+                credentials = self._credentials_for(
+                    candidate, session_key=session_key, only_leg=only_leg
+                )
             if not credentials:
                 # Same as the non-streaming path: keep the audit trail complete and
                 # monotonic even though nothing was sent upstream.
@@ -1293,6 +1348,14 @@ class Scheduler:
         error.error_type = worst.error_type if worst else "no_available_deployment"
         # Surface "come back in Ns" when the blocking failure was a cooldown /
         # throttle, so clients back off instead of hammering a blacked-out pool.
+        # Surface "come back in Ns" when the blocking failure was a cooldown /
+        # throttle, so clients back off instead of hammering a blacked-out pool.
+        if worst and worst.error_class is ErrorClass.THROTTLE and not worst.retry_after:
+            # 上游 429 往往**不带 Retry-After 头**（商汤实测：正文只有
+            # "inference exceeds tpm/rpm limit"，无秒数）。但冷却多久是我们
+            # 自己按策略算的、确定的——不告诉客户端，它只能碰运气重试，
+            # 一碰就是整池再黑一次（2026-11-13）。
+            worst.retry_after = worst.cooldown_seconds
         if worst and worst.retry_after:
             error.retry_after = worst.retry_after
         logger.error("request failed after %d attempt(s): %s", len(attempts), message)

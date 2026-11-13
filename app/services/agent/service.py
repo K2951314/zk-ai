@@ -38,6 +38,7 @@ from app.models.request import ChatCompletionRequest, ChatMessage, ToolCall
 from app.services.agent import mcp_call, taskspace, usage_ledger
 from app.services.agent.cli import CliRegistry, load_cli_registry
 from app.services.agent.cli import delegate as cli_delegate
+from app.services.agent.cli import prompting as cli_prompting
 from app.services.agent.cli.registry import EFFORT_LEVELS
 from app.services.agent.cli.runner import run_delegation, summarize_cli_line
 from app.services.agent.confirm import SessionApprovals
@@ -61,8 +62,10 @@ logger = get_logger("services.agent")
 #: 执行体实时日志推 SSE 的节流（秒）。码道 --print-logs 实测 1786 行/42s，
 #: 不节流会把页面刷爆；摘要行由 summarize_cli_line 先过滤。
 _CLI_LOG_THROTTLE = 2.0
-#: 有输出心跳就不砍，静默这么久才判定挂死；总时长仍由 cli_tools.yaml 兜底。
-_CLI_IDLE_TIMEOUT = 180.0
+#: 旧行为：全局静默 180s 判挂死。**已不再使用**，改由 cli_tools.yaml 的
+#: ``idle_timeout`` 逐执行体配置（默认 0 = 只看总时长）。保留常量只为
+#: 让「谁还记得 180 这个数」有处可查——别再加回去。
+_LEGACY_CLI_IDLE_TIMEOUT = 180.0
 
 _ACTIVE_STATUSES = frozenset({"running", "waiting_approval"})
 #: followup 允许从哪些状态继续
@@ -398,6 +401,62 @@ class AgentService:
 
         return handle
 
+    def _with_artifacts(
+        self,
+        output: str,
+        *,
+        cwd: Any,
+        workspace: Path,
+        space: taskspace.TaskSpace | None,
+        step: int | None = None,
+        session_ref: str = "",
+    ) -> str:
+        """把 ``<cwd>/outputs`` 里的产物列出来，追加到回喂正文，并落 state.json。
+
+        任务空间承诺「产物落 outputs/」，但此前全仓没有一处读过它：控制台的
+        任务空间页永远显示「（暂无）」，调用方也只能靠执行体自己汇报。
+        **调用方要的是「你产出了什么」，不是「你说你产出了什么」。**
+
+        只追加文件清单（路径 + 大小），不读内容——内容由执行体自己在结论里说，
+        这里只提供一个不依赖它诚实的旁证。写盘失败一律吞掉，不影响主流程。
+
+        ``session_ref`` 是上游自报的会话标识（claude 的 session_id）：落盘是为了
+        「同一个会话里再派一次」时能续接，而不是从零重跑。没有就留空。
+        """
+        items = cli_prompting.collect_artifacts(cwd)
+        note = cli_prompting.format_artifacts(items)
+        if space is not None:
+            try:
+                current = taskspace.load(workspace, space.task_id) or {}
+                steps = list(current.get("steps") or [])
+                if step is not None:
+                    steps.append({"step": step, "artifacts": len(items)})
+                patch: dict[str, Any] = {
+                    "steps": steps,
+                    "artifacts": items,
+                    "handoff_brief": (output or "")[:500],
+                }
+                if session_ref:
+                    patch["handoff_session"] = session_ref
+                taskspace.update(workspace, space.task_id, **patch)
+            except (OSError, ValueError):
+                pass
+        if not note:
+            return output
+        return f"{output}\n\n{note}"
+
+    @staticmethod
+    def _idle_timeout_for(config: Any) -> float | None:
+        """该执行体的静默判死阈值；0/缺省 = 不判空闲，只看总时长。
+
+        只有会持续打进度日志的执行体（码道 ``--print-logs``）才值得设这个值。
+        对「结束才一次性吐输出」的无头 CLI，静默是常态，设了就是误杀。
+        """
+        value = float(getattr(config, "idle_timeout", 0) or 0)
+        if value <= 0:
+            return None
+        return min(value, 1900.0)  # 比租约 TTL 略短：空闲判死不该晚于租约过期
+
     async def _delegation(self, run: _Running, config: Any, task: str) -> None:
         """执行体直跑：一次 run_delegation + 两条消息 + SSE 事件。"""
         session_id = run.session_id
@@ -441,7 +500,7 @@ class AgentService:
                 config, task=task, cwd=delegation_cwd, allow_bypass=allow_bypass,
                 on_line=self._cli_line_handler(run),
                 cancel=run.cancel_event,
-                idle_timeout=_CLI_IDLE_TIMEOUT,
+                idle_timeout=self._idle_timeout_for(config),
             )
             # 记账：CLI 没有价目表，这条记录是「实测价格」的唯一来源。
             usage_ledger.record_delegation(
@@ -455,26 +514,36 @@ class AgentService:
                 tokens_in=result.tokens_in,
                 tokens_out=result.tokens_out,
                 cost_usd=result.cost_usd,
+                session_ref=result.session_ref,
                 error="" if result.ok else result.output[:200],
             )
             status = "done" if result.ok else "failed"
             error = None if result.ok else result.output[:300]
             if run.cancelled:
-                # 子进程已经跑完（run_delegation 不支持中途 kill），但状态要如实
-                # 记成「已取消」，否则界面会覆盖掉用户刚点的停止。
+                # 子进程已被 watchdog kill（2026-11-12 起真 kill），状态如实记成
+                # 「已取消」，否则界面会覆盖掉用户刚点的停止。
                 status, error = "cancelled", "任务被取消"
-            payload = {**info, "elapsed": round(result.elapsed, 1), "ok": result.ok}
+            body = self._with_artifacts(
+                result.output, cwd=delegation_cwd, workspace=run.workspace,
+                space=space, session_ref=result.session_ref,
+            )
+            payload = {
+                **info,
+                **usage_fields(result),
+                "elapsed": round(result.elapsed, 1),
+                "ok": result.ok,
+            }
             seq = await self.repo.add_message(
                 session_id,
                 role="assistant",
                 kind="message",
-                content=result.output,
+                content=body,
                 data={"executor": payload},
             )
             self._emit(run, {
                 "type": "assistant",
                 "seq": seq,
-                "content": result.output,
+                "content": body,
                 "thinking": None,
                 "tool_calls": [],
                 "routing": None,
@@ -585,6 +654,8 @@ class AgentService:
         session_id = run.session_id
         outcome: dict[str, Any] = {"session_id": session_id, "status": "failed", "error": None}
         status, error = "done", None
+        #: 上一段 (角色, 结论)；第一段为 None。跨段交接的唯一来源。
+        prev: tuple[str, str] | None = None
         # 一批多段共享同一个任务空间：先让 A 查、再让 B 审，产物落在同一处。
         goals = "；".join(task for _, task, _ in resolved)[:200]
         space, batch_cwd, allow_bypass, space_error = self._enter_task_space(
@@ -615,12 +686,19 @@ class AgentService:
                     status, error = "cancelled", "任务被取消"
                     break
                 self._emit(run, {"type": "step_start", "step": index, "model": config.model})
+                # 段间交接：上一段的结论注入下一段（2026-11-13）。没有这一步，
+                # 「先让 A 查、再让 B 审」里的 B 根本看不到 A 查到了什么，
+                # 两段唯一的联系只是共享一个目录。
+                handed = task
+                if prev is not None:
+                    handed = cli_prompting.with_context(prev[0], prev[1], task)
                 result = await run_delegation(
-                    config, task=task, cwd=batch_cwd, allow_bypass=allow_bypass,
+                    config, task=handed, cwd=batch_cwd, allow_bypass=allow_bypass,
                     on_line=self._cli_line_handler(run),
                     cancel=run.cancel_event,
-                    idle_timeout=_CLI_IDLE_TIMEOUT,
+                    idle_timeout=self._idle_timeout_for(config),
                 )
+                prev = (role, result.output)
                 # 记账：批量里每一段单独记，才能看出「哪一段最贵」。
                 usage_ledger.record_delegation(
                     tool=config.name,
@@ -633,6 +711,7 @@ class AgentService:
                     tokens_in=result.tokens_in,
                     tokens_out=result.tokens_out,
                     cost_usd=result.cost_usd,
+                    session_ref=result.session_ref,
                     error="" if result.ok else result.output[:200],
                 )
                 payload = {
@@ -646,18 +725,23 @@ class AgentService:
                     "ok": result.ok,
                     "index": index,
                     "total": len(resolved),
+                    **usage_fields(result),
                 }
+                body = self._with_artifacts(
+                    result.output, cwd=batch_cwd, workspace=run.workspace,
+                    space=space, step=index, session_ref=result.session_ref,
+                )
                 seq = await self.repo.add_message(
                     session_id,
                     role="assistant",
                     kind="message",
-                    content=result.output,
+                    content=body,
                     data={"executor": payload},
                 )
                 self._emit(run, {
                     "type": "assistant",
                     "seq": seq,
-                    "content": result.output,
+                    "content": body,
                     "thinking": None,
                     "tool_calls": [],
                     "routing": None,
@@ -1063,7 +1147,9 @@ class AgentService:
                 prepared = toolbox.prepare(name, args)  # 黑名单在这里直接 ToolError
                 preview = str((prepared.display or {}).get("diff")
                               or (prepared.display or {}).get("command") or "")
-                approval = run.approvals.register(name, args, preview, prepared.display)
+                approval = run.approvals.register(
+                    name, args, preview, prepared.display, role=""
+                )
                 await self.repo.update_status(session_id, "waiting_approval")
                 seq = await self.repo.add_message(
                     session_id,
@@ -1101,22 +1187,37 @@ class AgentService:
         args: dict[str, Any],
         prepared: ToolOutcome,
     ) -> ToolOutcome | None:
-        """两阶段审批；返回 None 表示已批准（或本会话已免打扰），可以继续执行。"""
-        if run.approvals.skipped(name):
+        """两阶段审批；返回 None 表示已批准（或本会话已免打扰），可以继续执行。
+
+        ``delegate_cli`` 的免打扰按**角色**记（见 ``SessionApprovals._key``）：
+        放行一次免费档，不该等于放行所有角色（含收费 + bypass 档）。
+        """
+        role = str(args.get("role") or "").strip()
+        if run.approvals.skipped(name, role=role):
             return None
         preview = str(
             (prepared.display or {}).get("diff")
             or (prepared.display or {}).get("command")
             or ""
         )
-        approval = run.approvals.register(name, args, preview, prepared.display)
+        approval = run.approvals.register(
+            name, args, preview, prepared.display, role=role
+        )
         await self.repo.update_status(run.session_id, "waiting_approval")
+        display = prepared.display or {}
         seq = await self.repo.add_message(
             run.session_id,
             role="assistant",
             kind="approval",
             content=preview or f"请求执行 {name}",
-            data={"approval_id": approval.id, "tool": name, "args": args},
+            data={
+                "approval_id": approval.id,
+                "tool": name,
+                "args": args,
+                # 实际生效的权限档（提权之后的值）：各 CLI 的档位词表不齐，
+                # 「plan 就是只读」不成立，界面必须显示真档位而不是配置里的名义值。
+                **({"approval_mode": display["approval_mode"]} if "approval_mode" in display else {}),
+            },
         )
         self._emit(run, {
             "type": "approval_request",
@@ -1197,9 +1298,15 @@ class AgentService:
         # 任务空间：没指定 cwd 时自动开一个独立目录，执行体在里面工作，
         # 主工作区不被直接改写（产物落 outputs/，进度落 state.json）。
         space: taskspace.TaskSpace | None = None
+        # 模型发起的委派**一律不提权**（2026-11-13 收紧）：
+        # ``agent_permission_mode == "bypass"`` 的语义是「任务空间内不弹审批卡」，
+        # 不是「把执行体的沙箱也关掉」。模型派单本来就有审批卡兜底，若再借这个
+        # 全局开关给外部 CLI 加 --dangerously-skip-permissions，等于模型只要把
+        # 工作目录说成任务空间内，外部执行体就能无沙箱跑——边界从一个开关滑成两个。
+        # 真正需要提权的只有用户亲自 @ 的直跑路径（start_delegation）。
         allow_bypass = False
         if not str(args.get("cwd") or "").strip():
-            space, space_cwd, allow_bypass, space_error = self._enter_task_space(
+            space, space_cwd, _ignored, space_error = self._enter_task_space(
                 run, goal=str(args.get("task") or "")
             )
             if space_error:
@@ -1212,26 +1319,36 @@ class AgentService:
                 )
             if space is not None:
                 args["cwd"] = space_cwd.relative_to(run.workspace).as_posix()
-        elif self.settings.agent_permission_mode == "bypass":
-            # 显式指定了目录：只有落在任务空间根内才放行，其余按原配置走。
-            try:
-                target = toolbox.resolve(str(args.get("cwd") or "."))
-            except ToolError:
-                target = run.workspace
-            allow_bypass = taskspace.is_inside(run.workspace, target)
         try:
-            prepared = cli_delegate.prepare(run.cli_registry, toolbox, args)
+            # 预览与执行必须用同一个 allow_bypass：审批卡上写的命令就是真要跑的命令。
+            prepared = cli_delegate.prepare(
+                run.cli_registry, toolbox, args, allow_bypass=allow_bypass
+            )
             rejected = await self._approve(run, cli_delegate.TOOL_NAME, args, prepared)
             if rejected is not None:
                 return rejected
-            return await cli_delegate.perform(
+            config = run.cli_registry.tool_for_role(str(args.get("role") or "").strip())
+            outcome = await cli_delegate.perform(
                 run.cli_registry,
                 toolbox,
                 args,
                 allow_bypass=allow_bypass,
                 session_id=session_id,
                 task_space=str(run.workspace),
+                # 执行句柄归最上层：停止按钮要能真 kill，实时日志要能看见。
+                cancel=run.cancel_event,
+                on_line=self._cli_line_handler(run),
+                idle_timeout=self._idle_timeout_for(config),
             )
+            # 产物清单与批次/直跑同一套口径（模型派单也是「执行体在任务空间里干活」）。
+            try:
+                cwd = toolbox.resolve(str(args.get("cwd") or "."))
+            except ToolError:
+                return outcome
+            outcome.output = self._with_artifacts(
+                outcome.output, cwd=cwd, workspace=run.workspace, space=space
+            )
+            return outcome
         finally:
             if space is not None:
                 taskspace.release(run.workspace, space.task_id, owner=session_id)
@@ -1476,6 +1593,25 @@ class AgentService:
 
 #: 保活对 loop 任务的强引用（done callback 里自动清理）
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def usage_fields(result: Any) -> dict[str, Any]:
+    """把执行体自报的用量整理成前端可展示的字段。
+
+    **只放拿到的**：CLI 没有价目表，拿不到 token/成本就留空，绝不用 0 冒充
+    （0 会被读成「免费」，而实际是「不知道」——同 usage_ledger 里那条原则）。
+    2026-11-13 起 claude 也走 ``--output-format json``，所以收费档开始有数字了。
+    """
+    fields: dict[str, Any] = {}
+    if getattr(result, "tokens_in", None) is not None:
+        fields["tokens_in"] = result.tokens_in
+    if getattr(result, "tokens_out", None) is not None:
+        fields["tokens_out"] = result.tokens_out
+    if getattr(result, "cost_usd", None) is not None:
+        fields["cost_usd"] = round(float(result.cost_usd), 4)
+    if getattr(result, "session_ref", ""):
+        fields["session_ref"] = result.session_ref
+    return fields
 
 
 #: 会话里允许贴的图片（data URL 或 https 直链）。
