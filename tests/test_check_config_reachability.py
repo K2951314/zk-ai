@@ -25,9 +25,20 @@ def _provider(
     enabled: bool = True,
     key_enabled: bool = True,
     keyless: bool = False,
+    key_ids: int | None = None,
 ) -> ProviderConfig:
-    """最小供应商。``keyless`` 用来验证 Ollama 那类不需要 Key 的不会被误杀。"""
-    provider = make_provider(pid, key_ids=() if keyless else (f"{pid}-01",), keyless=keyless)
+    """最小供应商。
+
+    ``keyless`` 用来验证 Ollama 那类不需要 Key 的不会被误杀；
+    ``key_ids`` 指定凭据把数（测「轮换上限 vs 池规模」用）。
+    """
+    if keyless:
+        ids: tuple[str, ...] = ()
+    elif key_ids is None:
+        ids = (f"{pid}-01",)
+    else:
+        ids = tuple(f"{pid}-{i:02d}" for i in range(1, key_ids + 1))
+    provider = make_provider(pid, key_ids=ids, keyless=keyless)
     provider.enabled = enabled
     if keyless:
         # make_provider 的 keyless 只清空 credentials，不改 type ——
@@ -101,3 +112,39 @@ def test_disabled_deployment_is_still_unreachable():
 
     config = _config(_provider(key_enabled=True), dep_enabled=False)
     assert _live_deployments(config, "m1") == []
+
+
+# --------------------------------------------------------------------------- #
+# 轮换上限 vs 池规模（2026-11-13）：两地取值不同不报错，但可疑关系要提示
+# --------------------------------------------------------------------------- #
+def test_rotation_ceiling_larger_than_pool_is_flagged():
+    """设了超过池大小的值 = 多出的部分永远用不上。"""
+    from scripts.check_config import _check_credential_rotation_ceiling
+
+    config = _config(_provider(key_ids=2))  # 2 把
+    config.retry.max_credentials_per_deployment = 9
+    warnings: list[str] = []
+    _check_credential_rotation_ceiling(config, warnings)
+    assert warnings and "大于最大凭据池" in warnings[0]
+
+
+def test_rotation_ceiling_of_one_with_a_pool_is_flagged():
+    """设 1 且池 ≥3：撞一次 429 就换部署，兄弟 Key 基本没机会被试。"""
+    from scripts.check_config import _check_credential_rotation_ceiling
+
+    config = _config(_provider(key_ids=5))
+    config.retry.max_credentials_per_deployment = 1
+    warnings: list[str] = []
+    _check_credential_rotation_ceiling(config, warnings)
+    assert warnings and "兄弟 Key" in warnings[0]
+
+
+def test_a_deliberate_partial_ceiling_is_not_flagged():
+    """3 vs 9 是**有意的让渡**（本地负载轻、服务器账号多）——不该报。"""
+    from scripts.check_config import _check_credential_rotation_ceiling
+
+    config = _config(_provider(key_ids=9))
+    config.retry.max_credentials_per_deployment = 3
+    warnings: list[str] = []
+    _check_credential_rotation_ceiling(config, warnings)
+    assert warnings == []

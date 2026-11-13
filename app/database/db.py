@@ -97,6 +97,13 @@ class Database:
             "permission",
             "ALTER TABLE agent_sessions ADD COLUMN permission VARCHAR(16) DEFAULT 'default'",
         ),
+        # 2026-11-13：流式请求的**整条流墙钟**（latency_ms 只记首块）。
+        # 没有它，「首字节慢」和「生成慢」在数据上分不开。
+        (
+            "requests",
+            "stream_duration_ms",
+            "ALTER TABLE requests ADD COLUMN stream_duration_ms FLOAT DEFAULT 0",
+        ),
     )
 
     async def init(self) -> None:

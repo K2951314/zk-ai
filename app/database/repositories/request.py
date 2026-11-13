@@ -71,6 +71,7 @@ class RequestRepository:
         fallback_used: bool = False,
         routing_reason: str | None = None,
         latency_ms: float = 0.0,
+        stream_duration_ms: float = 0.0,
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0.0,
@@ -94,6 +95,10 @@ class RequestRepository:
             row.fallback_used = fallback_used
             row.routing_reason = ((routing_reason or "")[:2000] or None) or row.routing_reason
             row.latency_ms = latency_ms
+            # 只在有值时覆盖：非流式请求（或没测量的路径）保持原值，
+            # 避免把一次二次 finalize 写成 0。
+            if stream_duration_ms > 0:
+                row.stream_duration_ms = stream_duration_ms
             row.input_tokens = input_tokens
             row.output_tokens = output_tokens
             row.total_tokens = input_tokens + output_tokens
@@ -142,7 +147,12 @@ class RequestRepository:
                     "http_status": row.http_status,
                     "error_type": row.error_type,
                     "attempts": row.attempt_count,
+                    # ``stream`` + ``stream_duration_ms`` 一起给：只有流式请求
+                    # 才有总时长，运营者要能区分「这条是流、跑了多久」
+                    # （2026-11-13，见 RequestRecord.stream_duration_ms）。
+                    "stream": row.stream,
                     "latency_ms": row.latency_ms,
+                    "stream_duration_ms": row.stream_duration_ms,
                     "tokens": row.total_tokens,
                     "started_at": row.started_at,
                 }

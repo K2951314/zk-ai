@@ -186,12 +186,37 @@ def failure_output(kind: FailureKind, detail: str) -> str:
 class CliAdapter:
     """适配器协议：把一个外部 CLI 的非交互调用封装成统一命令构造。"""
 
-    def __init__(self, config: CliToolConfig) -> None:
+    def __init__(self, config: CliToolConfig, *, resume_ref: str = "") -> None:
         self.config = config
+        #: 上一次成功委派带回的会话标识（B-4）。空 = 全新会话。
+        #: 由 :func:`build_adapter` 注入；``build_command`` 用
+        #: :meth:`resume_args` 决定要不要、以及插到哪。
+        self.resume_ref = resume_ref
 
     def build_command(self, task: str, cwd: str) -> list[str]:
         """拼出完整 argv（不经 shell）。子类实现。"""
         raise NotImplementedError
+
+    def resume_args(self, session_ref: str) -> list[str]:
+        """续接上一次会话的额外 argv；不支持或引用为空时返回 ``[]``。
+
+        2026-11-13（B-4）：执行体跑到 80% 超时被杀，代价是整段工作白丢。
+        ``CliResult.session_ref`` 已经能从 claude 的 json 回执里拿到，
+        这里把它变成「接着上次跑」而不是「从零重跑」。
+
+        **设计成独立钩子而不是给 ``build_command`` 加参数**：9 个适配器都实现
+        了那个签名，加参数等于 9 处改动 + 所有测试跟着改；而「能不能续接」
+        本来就只有部分 CLI 支持（claude / codex / qoder / codearts 有，gemini
+        没有）。默认返回空列表 = 旧行为，零风险。
+
+        各家旗标不同，由子类映射：
+          claude   ``--resume <uuid>``
+          codex    ``exec resume <uuid>``
+          qoder    ``-r <id>``
+          codearts ``-s <id>``
+        """
+        del session_ref
+        return []
 
     def build_env(self) -> dict[str, str] | None:
         """需要追加/覆盖的环境变量；None 表示沿用当前环境。子类可覆盖。"""
@@ -241,11 +266,15 @@ class CliAdapter:
         return None, None, None
 
 
-def build_adapter(config: CliToolConfig) -> CliAdapter:
-    """按后端形态与执行体名挑适配器；未专门实现的走通用封装。"""
+def build_adapter(config: CliToolConfig, *, resume_ref: str = "") -> CliAdapter:
+    """按后端形态与执行体名挑适配器；未专门实现的走通用封装。
+
+    ``resume_ref`` 是该执行体上一次的会话标识（见 :meth:`CliAdapter.resume_args`）。
+    默认空 = 全新会话，所有旧调用点行为不变。
+    """
     from app.services.agent.cli.adapters import ADAPTERS, GenericAdapter, McpAdapter
 
     if config.backend == "mcp":
-        return McpAdapter(config)
+        return McpAdapter(config, resume_ref=resume_ref)
     cls = ADAPTERS.get(config.name, GenericAdapter)
-    return cls(config)
+    return cls(config, resume_ref=resume_ref)

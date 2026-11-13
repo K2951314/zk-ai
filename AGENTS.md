@@ -695,6 +695,20 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 **结论：`zk-auto` 目前没有独立于 sensenova 的第二供应商腿。** 要加只有两条路——
 HW 去开模型权限，或接一个真能调的新供应商。别拿「目录 200」当可用证据。
 
+## 流式耗时与委派续跑（2026-11-13，B-3/B-4）
+
+- **`requests.stream_duration_ms` ≠ `latency_ms`**：后者是**首块延迟**（别改语义，
+  控制台和历史统计都按它读），前者是**整条流墙钟**。`client_disconnected` 那批行
+  `latency_ms=0.0` 是「没拿到首块」，不是「0 秒跑完」——排查断裂要看新字段。
+  迁移：`Database._COLUMN_MIGRATIONS` 加一行幂等 ADD COLUMN。
+- **委派续跑**（`CliAdapter.resume_args` + `resume_ref`）：`session_ref` 落
+  `state.json` 的 `handoff_session` + `handoff_tool`，**同任务空间 + 同执行体**才复用
+  （claude 的 uuid 给 codex 没意义）。目前只有 claude 映射 `--resume`（位置在 `-p`
+  之前）；codex/qoder/codearts 的旗标未实测，`resume_args` 默认返回 `[]`——
+  **别凭文档瞎拼**，实测通过再开。
+- **轮换上限 3 vs 9 是两地有意不同**（本地让渡、服务器账号多），`check_config`
+  现在会打印当前值 + 池规模，只报可疑关系（>池大小、或 =1 而池≥3），不评判取值。
+
 ## 当前状态（持续整理：2026-10-07）
 
 - **`.env` 是运营配置，不是测试夹具**：绝不用 `read_text()` 读写它（CRLF 会被悄悄

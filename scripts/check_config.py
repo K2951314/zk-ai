@@ -339,6 +339,33 @@ def _check_shadowed_envs(warnings: list[str]) -> None:
         )
 
 
+def _check_credential_rotation_ceiling(config: AppConfig, warnings: list[str]) -> None:
+    """单请求能轮换几个 Key —— 这是**跟负载形态绑定**的参数，不该两地不同还无人知。
+
+    背景（2026-11-13）：本机 ``max_credentials_per_deployment: 3``、服务器是 ``9``，
+    两边**各有明确理由**（本地是让渡：单请求不独占整池把 Key 留给并发；服务器是
+    账号多、让 weighted 随机都能选中）。差异本身没错，错的是没人知道它不同 ——
+    排查「为什么这台机器只试 3 把就放弃」时会绕远路。
+
+    这里不评判取值（那是产品决策），只在**参数与池规模的关系可疑**时提醒：
+    - 设 1 且池 ≥3：单请求几乎肯定撞 429 就换部署，几乎不用兄弟 Key；
+    - 设 > 池大小：写了也永远用不满（空配置语义）。
+    """
+    policy = config.retry
+    cap = policy.max_credentials_per_deployment
+    biggest = max((len(p.credentials) for p in config.providers.values()), default=0)
+    if biggest and cap > biggest:
+        warnings.append(
+            f"retry.max_credentials_per_deployment={cap} 大于最大凭据池 {biggest}"
+            "——设了也用不满（多出的部分永远不会被选中）"
+        )
+    if cap == 1 and biggest >= 3:
+        warnings.append(
+            f"retry.max_credentials_per_deployment=1，而池里有 {biggest} 把 Key"
+            "——单请求一旦撞 429 就换部署，兄弟 Key 基本没机会被试"
+        )
+
+
 def _report(config: AppConfig) -> None:
     print("\n可用模型（模型 -> 真正可达的部署）")
     for model in sorted(config.models.values(), key=lambda m: m.id):
@@ -351,6 +378,11 @@ def _report(config: AppConfig) -> None:
     for alias in sorted(config.aliases.values(), key=lambda a: a.name):
         front = f"  接口模型={alias.front_model}" if alias.front_model else ""
         print(f"  {alias.name:<10} {' → '.join(alias.targets)}{front}")
+
+    # 轮换上限显式打印：它跟负载形态绑定，两地可能不同（见 _check_credential_rotation_ceiling）。
+    cap = config.retry.max_credentials_per_deployment
+    biggest = max((len(p.credentials) for p in config.providers.values()), default=0)
+    print(f"\n单请求轮换上限 max_credentials_per_deployment={cap}（最大凭据池 {biggest} 把）")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -380,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_deployments(config, errors)
     _check_aliases(config, errors)
     _check_unreachable_models(config, warnings)
+    _check_credential_rotation_ceiling(config, warnings)
     _check_alias_provider_breadth(config, warnings)
     _check_credential_envs(config, warnings)
     _check_shadowed_envs(warnings)

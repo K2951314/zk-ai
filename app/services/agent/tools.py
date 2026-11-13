@@ -84,6 +84,10 @@ class ToolOutcome:
     display: dict[str, Any] | None = None
     #: True -> needs user approval before ``perform`` may run
     needs_approval: bool = False
+    #: 执行体自报的会话标识（只有 ``delegate_cli`` 会填，见 B-4 续接）。
+    #: 走 ToolOutcome 而不是让 service 层再读一遍 CliResult，是因为
+    #: delegate.perform 已经把它拿到手了——重读等于多一条易漂移的路径。
+    session_ref: str = ""
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [

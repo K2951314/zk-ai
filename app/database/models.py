@@ -199,7 +199,14 @@ class RequestRecord(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
     routing_reason: Mapped[str | None] = mapped_column(Text)
+    #: 路由决策延迟（首块/首字节）。**不要改这个字段的语义**：
+    #: 控制台与既有统计都按「拿到第一个字节有多快」读它。
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    #: 整条流从请求到写完的总墙钟（2026-11-13 加）。流式请求里
+    #: ``latency_ms`` 只反映首块，``client_disconnected`` 那批行显示
+    #: ``latency_ms=0.0`` 就是这个原因——运营者分不清「首字节慢」还是
+    #: 「生成慢」，而两者的对策完全不同。0 = 非流式或没测量。
+    stream_duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)

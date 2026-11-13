@@ -208,6 +208,7 @@ async def run_delegation(
     cancel: asyncio.Event | None = None,
     idle_timeout: float | None = None,
     envelope: bool = True,
+    resume_ref: str = "",
 ) -> CliResult:
     """执行一次委派：MCP 走 HTTP，其余拉起子进程、等它结束、分类结果。
 
@@ -229,12 +230,15 @@ async def run_delegation(
         config = replace(config, approval_mode="bypass")
     if config.backend == "mcp":
         return await _run_mcp(config, task=task, cwd=cwd)
-    adapter = build_adapter(config)
+    adapter = build_adapter(config, resume_ref=resume_ref)
     # 任务信封只给子进程类执行体：它们靠位置参数/--print 收一整段人话，
     # 需要知道自己在哪、怎么交活、能不能追问。MCP 的 task 是**结构化入参**
     # （模板里的 {task} 会被直接替换成某段待处理内容），塞信封等于污染入参。
     prompt = build_task_prompt(task, cwd=str(cwd)) if envelope else task
     argv = adapter.build_command(prompt, str(cwd))
+    # 续接旗标的位置由**适配器**决定（claude 的最后一项是 --output-format 而不是
+    # prompt，runner 在这一层插不安全）——所以 ref 经 build_adapter 注入，
+    # 由 ``build_command`` 调 ``resume_args`` 自己拼。
     env = None
     extra = adapter.build_env()
     if extra is not None:

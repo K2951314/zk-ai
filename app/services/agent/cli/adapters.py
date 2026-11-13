@@ -71,10 +71,29 @@ class ClaudeAdapter(CliAdapter):
         argv = [cfg.command]
         if cfg.approval_mode == "bypass":
             argv.append("--dangerously-skip-permissions")
+        # ``--resume`` 必须在 ``-p`` 之前：claude 把 ``-p`` 当成「进入无头模式」
+        # 的开关，续接旗标跟着它走更稳（与官方无头示例一致）。
+        argv += self.resume_args(self.resume_ref)
         argv += ["-p", task, "--output-format", "json"]
         if cfg.model:
             argv += ["--model", cfg.model]
         return argv
+
+    def resume_args(self, session_ref: str) -> list[str]:
+        """``--resume <session_id>``：接着上次那个会话跑，而不是从零重来。
+
+        ``--output-format json`` 的回执里带 ``session_id``（2026-11-13 实测），
+        ``CliResult.session_ref`` 已经把它带回来、落进任务空间的
+        ``handoff_session``。超时被杀的任务重派时带上它，执行体就能看到
+        自己上一轮已经做过什么——这是「跑到 80% 白丢」唯一的解药。
+
+        ⚠ 传错 id 的行为各版本未实测（可能报错退出，也可能忽略）。
+        所以 runner 只在**同一执行体、同一任务空间**里复用 ref，不复用别人的。
+        """
+        ref = (session_ref or "").strip()
+        if not ref:
+            return []
+        return ["--resume", ref]
 
     def parse_output(self, stdout: str, stderr: str) -> str:
         """从 json 结果里取 ``result``；格式不认识就回落裸文本。

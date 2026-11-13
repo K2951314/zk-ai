@@ -157,6 +157,7 @@ async def perform(
     cancel: Any = None,
     on_line: Any = None,
     idle_timeout: float | None = None,
+    resume_ref: str = "",
 ) -> ToolOutcome:
     """批准后：真正拉起外部执行体跑任务，把结果（或分类后的失败）回填。
 
@@ -189,6 +190,7 @@ async def perform(
         cancel=cancel,
         on_line=on_line,
         idle_timeout=idle_timeout,
+        resume_ref=resume_ref,
     )
     # 记账失败不影响主流程（usage_ledger 自己吞异常）。
     # CLI 没有价目表，这条记录就是「实测价格」的唯一来源。
@@ -213,4 +215,9 @@ async def perform(
     else:
         code = result.exit_code if result.exit_code is not None else "未知"
         suffix = f"\n（执行体 {config.name} 失败于 {result.elapsed:.1f}s，退出码 {code}）"
-    return ToolOutcome(ok=result.ok, output=result.output + suffix)
+    return ToolOutcome(
+        ok=result.ok,
+        output=result.output + suffix,
+        # 把 ref 带上去，供服务层落进任务空间、下次派单时续接（B-4）。
+        session_ref=result.session_ref if result.ok else "",
+    )

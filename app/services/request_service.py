@@ -12,6 +12,7 @@ Responsibilities
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -290,6 +291,9 @@ class RequestService:
           into an ``error`` event; the status line is long gone.
         """
         request_id_var.set(request_id)
+        #: 整条流的起点（墙钟）。``latency_ms`` 只反映首块，运营者要分清
+        #: 「首字节慢」和「生成慢」必须再有这个总时长（2026-11-13）。
+        stream_started = time.perf_counter()
         await self._start(request_id, request, client_ip=client_ip, user_agent=user_agent)
 
         attempts: list[AttemptOutcome] = []
@@ -357,6 +361,7 @@ class RequestService:
                 error_status=error_status,
                 cancelled=cancelled,
                 attempts=attempts,
+                stream_duration_ms=(time.perf_counter() - stream_started) * 1000,
             ), "persist stream lifecycle")
 
     async def _finish_stream(
@@ -370,6 +375,7 @@ class RequestService:
         error_status: int,
         cancelled: bool,
         attempts: list[AttemptOutcome],
+        stream_duration_ms: float = 0.0,
     ) -> None:
         stream_cost = 0.0
         if self.usage is not None and meta is not None and usage.total_tokens > 0:
@@ -406,6 +412,7 @@ class RequestService:
                 fallback_used=meta.fallback_used,
                 routing_reason=meta.routing_reason,
                 latency_ms=meta.latency_ms,
+                stream_duration_ms=stream_duration_ms,
                 input_tokens=usage.prompt_tokens,
                 output_tokens=usage.completion_tokens,
                 cost_usd=stream_cost,
@@ -417,6 +424,9 @@ class RequestService:
                 http_status=499 if cancelled else (error_status if failed else 502),
                 error_type=error_type or "no_stream_meta",
                 attempt_count=len(attempts),
+                # 没有 meta 也要记总时长：客户端断开时 meta 仍是 None，
+                # 而「它跑了多久才断」正是排查要看的那个数。
+                stream_duration_ms=stream_duration_ms,
             )
 
     # ------------------------------------------------------------------ #

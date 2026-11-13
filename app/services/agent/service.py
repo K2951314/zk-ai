@@ -401,6 +401,32 @@ class AgentService:
 
         return handle
 
+    @staticmethod
+    def _resume_ref_for(
+        workspace: Path,
+        space: taskspace.TaskSpace | None,
+        tool: str,
+    ) -> str:
+        """从任务空间读上一次的会话标识，用于续接（B-4）。
+
+        只在**同一任务空间 + 同一执行体**里复用 ref：
+        - 换执行体（claude 的 session_id 给 codex 是没意义的）；
+        - 换任务空间（那是另一个任务，接着跑会串味）。
+
+        ref 来自 ``_with_artifacts`` 落的 ``handoff_session``；它同时记了
+        ``handoff_tool``，两个都对上才用。读不到就返回空 = 全新会话。
+        """
+        if space is None:
+            return ""
+        try:
+            data = taskspace.load(workspace, space.task_id) or {}
+        except (OSError, ValueError):
+            return ""
+        if str(data.get("handoff_tool") or "") != tool:
+            return ""
+        ref = str(data.get("handoff_session") or "").strip()
+        return ref
+
     def _with_artifacts(
         self,
         output: str,
@@ -410,6 +436,7 @@ class AgentService:
         space: taskspace.TaskSpace | None,
         step: int | None = None,
         session_ref: str = "",
+        tool: str = "",
     ) -> str:
         """把 ``<cwd>/outputs`` 里的产物列出来，追加到回喂正文，并落 state.json。
 
@@ -438,6 +465,10 @@ class AgentService:
                 }
                 if session_ref:
                     patch["handoff_session"] = session_ref
+                    # 同时记是**哪个执行体**的会话：ref 只在同一执行体内有意义
+                    # （claude 的 uuid 给 codex 没用）。续接时两个都要对上。
+                    if tool:
+                        patch["handoff_tool"] = tool
                 taskspace.update(workspace, space.task_id, **patch)
             except (OSError, ValueError):
                 pass
@@ -501,6 +532,8 @@ class AgentService:
                 on_line=self._cli_line_handler(run),
                 cancel=run.cancel_event,
                 idle_timeout=self._idle_timeout_for(config),
+                # 同一任务空间里重派同一个执行体时续接上次会话（B-4）。
+                resume_ref=self._resume_ref_for(run.workspace, space, config.name),
             )
             # 记账：CLI 没有价目表，这条记录是「实测价格」的唯一来源。
             usage_ledger.record_delegation(
@@ -525,7 +558,7 @@ class AgentService:
                 status, error = "cancelled", "任务被取消"
             body = self._with_artifacts(
                 result.output, cwd=delegation_cwd, workspace=run.workspace,
-                space=space, session_ref=result.session_ref,
+                space=space, session_ref=result.session_ref, tool=config.name,
             )
             payload = {
                 **info,
@@ -697,6 +730,7 @@ class AgentService:
                     on_line=self._cli_line_handler(run),
                     cancel=run.cancel_event,
                     idle_timeout=self._idle_timeout_for(config),
+                    resume_ref=self._resume_ref_for(run.workspace, space, config.name),
                 )
                 prev = (role, result.output)
                 # 记账：批量里每一段单独记，才能看出「哪一段最贵」。
@@ -730,6 +764,7 @@ class AgentService:
                 body = self._with_artifacts(
                     result.output, cwd=batch_cwd, workspace=run.workspace,
                     space=space, step=index, session_ref=result.session_ref,
+                    tool=config.name,
                 )
                 seq = await self.repo.add_message(
                     session_id,
@@ -1339,6 +1374,9 @@ class AgentService:
                 cancel=run.cancel_event,
                 on_line=self._cli_line_handler(run),
                 idle_timeout=self._idle_timeout_for(config),
+                resume_ref=self._resume_ref_for(run.workspace, space, config.name)
+                if config is not None
+                else "",
             )
             # 产物清单与批次/直跑同一套口径（模型派单也是「执行体在任务空间里干活」）。
             try:
@@ -1346,7 +1384,9 @@ class AgentService:
             except ToolError:
                 return outcome
             outcome.output = self._with_artifacts(
-                outcome.output, cwd=cwd, workspace=run.workspace, space=space
+                outcome.output, cwd=cwd, workspace=run.workspace, space=space,
+                session_ref=outcome.session_ref,
+                tool=config.name if config is not None else "",
             )
             return outcome
         finally:
