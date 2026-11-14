@@ -677,6 +677,15 @@ ZK-AI/
 │   ├── services/         # health_service, model_service, request_service, usage_service,
 │   │                     # chatgpt_service（ChatGPT/Codex 客户端配置，见 §3.6.3）
 │   │                     # events/ 事件中台：规则匹配、语义去重、飞书推送、跳数熔断
+│   │                     # agent/ 任务台（2026-11-14 按职责拆分）：
+│   │                     #   service.py            门面（78 行，只做状态装配）
+│   │                     #   service_session.py    会话生命周期 + SSE
+│   │                     #   service_loop.py       任务循环 / 工具调度 / 审批
+│   │                     #   service_delegate.py   外部执行体委派
+│   │                     #   service_child.py      子任务派生
+│   │                     #   service_common.py     共享常量 + _Running
+│   │                     #   agent/cli/ 执行体适配层（registry/runner/adapters/launcher）
+│   │                     #   agent/tools.py 工作区工具 · prompts.py 系统提示词
 │   └── main.py           # create_app 工厂
 ├── config/               # *.example.yaml（可提交）+ *.yaml（本地，已忽略）
 │                         # 另有 providers.real.example.yaml / models.real.example.yaml
@@ -697,8 +706,8 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 118 个文件约 33,979 行，`tests/` 66 个测试模块 1446 个用例（约 25,419 行），
-`scripts/` 22 个文件约 6,511 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
+规模：`app/` 123 个文件约 34,642 行，`tests/` 66 个测试模块 1446 个用例（约 25,419 行），
+`scripts/` 23 个文件约 6,747 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-11：新增三个测试模块（CLI 模型清单「只有实测算数」、
 额度 429 等重置点、独立脚本必须打 `/zkadmin`），统一前端设计 token 源，
@@ -1637,11 +1646,19 @@ docker run --rm -p 8317:8317 \
 # 一次性：dev 依赖是 optional extra，plain uv sync 不会装
 uv sync --extra dev
 
-# 提交前必须全绿
+# 迭代期：只跑改动相关的测试（实测全量 136s -> 相关 17s）
+.venv\Scripts\python.exe scripts\quick_test.py
+
+# 提交前必须全绿（quick_test 不能替代这一组）
 uv run ruff check app tests scripts
 uv run mypy app scripts
 uv run pytest
 ```
+
+> `scripts/quick_test.py` 按 `git status` 的改动路径映射到测试文件；横切文件
+> （`app/main.py` / `core/container.py` / `core/errors.py` / `tests/conftest.py`）
+> 与未登记的路径**一律回落全量**——宁可慢，不许静默漏跑。映射表本身有测试
+> （`tests/test_quick_test_map.py`）。
 
 - **行宽 110**、`target-version = py312`。
 - 全量 `async/await`；I/O 全部 `httpx.AsyncClient`（连接池复用、每 provider 一个）。
