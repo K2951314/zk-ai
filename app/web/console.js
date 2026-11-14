@@ -500,6 +500,17 @@ function renderServerLine(health) {
   bits.push(health.config_watch
     ? `配置自动生效${health.config_watch.reload_count ? `（已自动 reload ${health.config_watch.reload_count} 次）` : ""}`
     : "配置需手动重载");
+  // 可用模型数（2026-11-14 加）：`/health` 的 models 只是数量，运营者看不出
+  // 「10 个里有 7 个现在接不了活」。只在**不全可用**时才显示并标色——
+  // 全绿时不制造噪音，掉下来时他自己会看见。
+  const sv = health.models_servable;
+  if (sv && typeof sv.servable === "number" && typeof sv.enabled === "number") {
+    if (sv.servable < sv.enabled) {
+      bits.push(`⚠ 可用模型 ${sv.servable}/${sv.enabled}（其余在冷却或缺少 Key）`);
+    } else if (sv.enabled > 0) {
+      bits.push(`可用模型 ${sv.servable}/${sv.enabled}`);
+    }
+  }
   $("#server-line").textContent = bits.join(" · ");
   // 小圆点也在这里一并给：它以前在 /admin/* 之后才赋值，
   // 未登录时会一直停在红点——而那并不表示网关挂了。
