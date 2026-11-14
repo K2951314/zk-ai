@@ -61,3 +61,37 @@ def test_readme_test_count_matches_reality() -> None:
         "（测试树说明与 §18 两处都要改；行数同理，用 "
         "find app tests scripts -name '*.py' | xargs wc -l 数，不要估）"
     )
+
+
+# --------------------------------------------------------------------------- #
+# AGENTS.md 的载入预算（2026-11-14）
+# --------------------------------------------------------------------------- #
+#: 规则文件的载入预算。AGENTS.md 自己写着「超 65,536 字节预算要拆」，
+#: 但这条规则一直靠人记 —— 2026-11-14 实测它已经 64,674 字节（余 862），
+#: 而项目史上它超到过 74,947。**规则写进文档 ≠ 会执行，要工具化。**
+AGENTS_BUDGET = 65_536
+
+
+def test_agents_md_stays_within_its_load_budget() -> None:
+    path = Path(PROJECT_ROOT) / "AGENTS.md"
+    if not path.is_file():  # pragma: no cover - 仓库自带
+        pytest.skip("no AGENTS.md")
+    size = len(path.read_bytes())
+    assert size <= AGENTS_BUDGET, (
+        f"AGENTS.md {size} 字节，超过 {AGENTS_BUDGET} 的载入预算 {size - AGENTS_BUDGET} 字节。\n"
+        "按文件自己的规矩：把「逐项排除过程」拆到 docs/ 下（结论与索引留在原处），"
+        "见 docs/排查过程详述.md 的做法。别删规则本身。"
+    )
+
+
+def test_agents_warns_before_it_hits_the_wall() -> None:
+    """余量 < 2KB 就报，别等到撞墙才发现（给下一次会话留出拆分的时间）。"""
+    path = Path(PROJECT_ROOT) / "AGENTS.md"
+    if not path.is_file():  # pragma: no cover
+        pytest.skip("no AGENTS.md")
+    size = len(path.read_bytes())
+    slack = AGENTS_BUDGET - size
+    assert slack > 2_048, (
+        f"AGENTS.md 余量只剩 {slack} 字节（{size}/{AGENTS_BUDGET}）。"
+        "下次往里加内容前先拆分：过程进 docs/，结论留原处。"
+    )

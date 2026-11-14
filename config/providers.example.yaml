@@ -86,6 +86,11 @@ providers:
       #   - {scope: credential, window_seconds: 60, max_requests: 40}        # 40 rpm
       #   - {scope: account, window_seconds: 18000, max_tokens: 300000000}   # 5h token 预算
       #   - {scope: account, window_seconds: 604800, max_tokens: 3000000000} # 7d token 预算
+      # ⚠ 上面三行是**通用示例数字**，不是任何供应商的现役值。商汤的现役值是
+      #   5h 6 亿 / 周 60 亿（= 12 万 / 120 万积分 × 每积分约 5000 token 的折算），
+      #   写在 config/providers.yaml 里。**积分是真值、token 是派生量**：
+      #   积分上限变了要同时改 burner.yaml 的 window_credits/weekly_credits
+      #   （真值）与这里的 token 折算值（派生）。两处单位不同，不能合并。
       # ⚠ 若该供应商按 rpm 限流，务必加一条 window_seconds=60 的请求数闸：
       # 429 是**事后**惩罚（账号可能被冷却数小时），这条闸是**事前**规避。
       # 商汤公测即此例——实测每账号实际通过的 rpm 中位 2、最大 8，网关每 Key

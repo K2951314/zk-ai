@@ -12,47 +12,42 @@ from typing import Any
 
 import yaml
 
-#: 配置键 → 类型。与 scripts/burn_sensenova.py 的 _CONFIG_KEYS 保持一致；
-#: 控制台改配置也走这里校验，避免把「安全系数」写成字符串烧到一半才炸。
-CONFIG_KEYS: dict[str, type] = {
-    "model": str,
-    "base_url": str,
-    "max_seconds": float,
-    "once": bool,
-    "concurrency": int,
-    "per_account_max": int,
-    "per_account_start": int,
-    # 饥饿救济（2026-09-28 加，治 AIMD 饿死账号）。不加进白名单的话，
-    # 写在 burner.yaml 里会被静默忽略——运营者以为调了，其实没生效。
-    "starve_after": float,
-    "starve_grace": float,
-    # 限流停靠（2026-09-30 加，治「挤了也没用」的空转）。不加进白名单的话，
-    # 控制台写进 burner.yaml 也会被静默忽略——和上面两条同样的坑。
-    "rate_park_after": int,
-    "rate_park_seconds": float,
-    "max_tokens": int,
-    "filler_chars": int,
-    "window_credits": float,
-    "weekly_credits": float,
-    "safety_margin": float,
-    "week_anchor": str,
-    "week_anchors": str,
-    "pool_total_credits": float,
-    "rate_in": float,
-    "rate_out": float,
-    "quota_park_hours": float,
-    "account_groups": str,
-    "anchors": str,
-    "cooldown_base": float,
-    "cooldown_max": float,
-    "connect_timeout": float,
-    "read_timeout": float,
-    "summary_interval": float,
-    "only": str,
-    # 灰色停用闸（2026-10-27）。不加进白名单的话，写在 burner.yaml 里会被
-    # 静默忽略——运营者以为停了，其实下次启动照烧（同 starve_after 的坑）。
-    "disabled": bool,
+#: 配置键 → 类型：**单一来源是 config/burner_keys.json**（2026-11-14）。
+#:
+#: 原来这张表在 scripts/burn_sensenova.py 与这里各写一遍，靠注释互相提醒
+#: 「保持一致」。新加一个键漏改一处，表现就是「写在 burner.yaml 里被静默
+#: 忽略」——同一个坑 AGENTS.md 记过好几次。现在两边都读同一份 JSON：
+#: 脚本仍保持「不 import app」的独立性，只是多读一个数据文件。
+_KEY_TYPES: dict[str, type] = {
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
 }
+
+
+def _load_config_keys() -> dict[str, type]:
+    """读 config/burner_keys.json；缺失时回落到空表（不致命，配置只是不校验）。"""
+    import json
+
+    from app.core.config import PROJECT_ROOT
+
+    path = PROJECT_ROOT / "config" / "burner_keys.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    keys = raw.get("keys") if isinstance(raw, dict) else None
+    if not isinstance(keys, dict):
+        return {}
+    return {
+        str(name): _KEY_TYPES[str(typ)]
+        for name, typ in keys.items()
+        if str(typ) in _KEY_TYPES
+    }
+
+
+CONFIG_KEYS: dict[str, type] = _load_config_keys()
 
 #: 控制台表单字段（顺序即展示顺序）。其余键仍有默认值但不进表单。
 FORM_FIELDS: tuple[str, ...] = (

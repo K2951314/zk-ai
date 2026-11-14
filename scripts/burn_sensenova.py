@@ -546,9 +546,40 @@ def parse_week_anchor(spec: str) -> float:
     return ts
 
 
-#: 配置键 → argparse dest 的映射。值类型不同（bool/int/float/str），
-#: 故不自动推断，逐键声明，写错类型会在这里炸而不是烧到一半才炸。
-_CONFIG_KEYS: dict[str, type] = {
+#: 配置键 → 类型的**单一来源**是 config/burner_keys.json（2026-11-14）。
+#:
+#: 原来这张表在这里与 app/services/burner_service/config_io.py 各写一遍，
+#: 靠注释互相提醒「保持一致」。新加一个键漏改一处，表现是「写在 burner.yaml
+#: 里被静默忽略」——同一坑 AGENTS.md 记过多次。现在两边读同一份 JSON；
+#: 本脚本仍保持「不 import app」的独立性（只读一个数据文件）。
+_KEY_TYPE_MAP: dict[str, type] = {
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+}
+
+
+def _load_config_keys() -> dict[str, type]:
+    """读 config/burner_keys.json；读不到就用内置兜底（脚本必须能独立跑）。"""
+    path = Path(__file__).resolve().parent.parent / "config" / "burner_keys.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return dict(_FALLBACK_CONFIG_KEYS)
+    keys = raw.get("keys") if isinstance(raw, dict) else None
+    if not isinstance(keys, dict):
+        return dict(_FALLBACK_CONFIG_KEYS)
+    parsed = {
+        str(name): _KEY_TYPE_MAP[str(typ)]
+        for name, typ in keys.items()
+        if str(typ) in _KEY_TYPE_MAP
+    }
+    return parsed or dict(_FALLBACK_CONFIG_KEYS)
+
+
+#: JSON 读不到时的兜底（必须与 config/burner_keys.json 同形；只用于脚本独立运行）。
+_FALLBACK_CONFIG_KEYS: dict[str, type] = {
     "model": str,
     "base_url": str,
     "max_seconds": float,
@@ -556,12 +587,8 @@ _CONFIG_KEYS: dict[str, type] = {
     "concurrency": int,
     "per_account_max": int,
     "per_account_start": int,
-    # 饥饿救济（2026-09-28 加）。与 app/services/burner_service.py 的
-    # CONFIG_KEYS 保持一致——两边漏一处，写在 burner.yaml 里就会被忽略。
     "starve_after": float,
     "starve_grace": float,
-    # 限流停靠（2026-09-30 加）。同样要在 app/services/burner_service.py 的
-    # CONFIG_KEYS 里同步一份，否则控制台写进 burner.yaml 也会被忽略。
     "rate_park_after": int,
     "rate_park_seconds": float,
     "max_tokens": int,
@@ -583,11 +610,10 @@ _CONFIG_KEYS: dict[str, type] = {
     "read_timeout": float,
     "summary_interval": float,
     "only": str,
-    # 灰色停用闸（2026-10-27）。**必须与 app/services/burner_service/config_io.py
-    # 的 CONFIG_KEYS 同步**，否则控制台写得进、脚本读不到（或反之），
-    # 表现是「点了停用下次启动照烧」。
     "disabled": bool,
 }
+
+_CONFIG_KEYS: dict[str, type] = _load_config_keys()
 
 
 #: 可热更新的键：下一条请求就会读到新值，改完不用重启消耗器。

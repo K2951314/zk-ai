@@ -408,12 +408,6 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   退出码，asyncio 的子进程回调可能还没跑，`returncode is None` → **成功的委派被判
   失败**（实测 gemini 已吐出完整 JSON，结果仍报【执行失败】、`exit=None`）。
   现写法是 `gather(读 stdout, 读 stderr, proc.wait())`，超时分支照旧 kill。
-- **免费额度是「人机对话」的形状，不是 agent 负载的形状**：一次委派（5 条商品
-  描述的 JSON 改写）CLI 自报 **prompt 36,853 tokens**（任务正文才 ~250），
-  40 分钟内十几次请求就把 Gemini 免费配额打空（429 `exceeded your current quota`）。
-  同一模型：直连 4~5s，经 CLI 8.8~18s（进程启动 ~2s + CLI 自己的路由/分类调用 +
-  系统提示与工具清单的 token）。结论：免费档**只当 `delegate_cli` 的派单目标**，
-  不进 `/v1` 热路径、不进 `zk-auto` 候选集。
 - **Gemini 的 `plan` 档不产出正文**：它把结果写进 `~/.gemini/tmp/<proj>/plans/*.md`，
   stdout 只回一句"已保存"。机械改写要用 `default`，`plan` 只适合只读分析。
   无头还必须 `GEMINI_CLI_TRUST_WORKSPACE=true`（**字面量 `true`，写 `1` 不认**）
@@ -425,26 +419,6 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 - **CodeBuddy/Qoder 的 CLI 登录态与桌面端不共享**：桌面端明明已登录，CLI 仍报
   `Authentication required` / `Not logged in`，首次要交互式 `/login`、`qoder login`。
   这两种原文已补进 AUTH 特征（`base.py`），否则会被当普通失败让父模型白重试。
-- **CodeBuddy 的 `--output-format json` 是事件数组，不是单个对象**（2.175.0 实测）：
-  `[{type:"message",…},{type:"reasoning"},{type:"result",result:"pong",
-  total_cost_usd:0,usage:{…}}]`。前面几条 message 事件里带着**完整请求体**
-  （system prompt 含项目 AGENTS.md）。按单个对象解析会失败并回落到裸文本，
-  等于把整份上下文灌回父模型——`_codebuddy_result_event()` 现在只取最后那条
-  `type=result`。回归测试 `test_codebuddy_event_array_yields_only_the_result`。
-- **实测三条免费档执行体都能跑（登录后，2026-10-25 21:30）**：codebuddy
-  `deepseek-v4.1-flash` 9.5s、**自报成本 $0.0000**（入 45,817 / 出 248，
-  其中绝大部分是 CLI 自带脚手架）；qoder `DeepSeek-Flash` 29.8s（限时免费至 11-01）；
-  gemini `gemini-2.5-flash` 12.2s（入 9,400 / 出 36）。角色名
-  `cli-grinder` / `cli-grinder-qoder` / `cli-grinder-gem`。
-- **Qoder 的模型名要用 `qoder --list-models` 的显示名**：`DeepSeek-Flash` /
-  `GLM-5.3` / `GLM-5.3-Flash` / `Kimi-K3.1-Pro` / `Qwen3.8-Max` …，
-  不是官网的 API ID（写 `deepseek-v4.1-flash` 不认）。自建自定义模型在列表里显示成
-  `(qoder-custom-…)`，本机那两条正是指向 zkai 网关的。
-- **执行体的 `effort` / `context_window` 是「上限提示」，不是扩容**：`effort` 映射
-  `--effort`（codebuddy）/ `--reasoning-effort`（qoder），`context_window` 映射
-  `--autocompact`（codebuddy，压缩阈值）/ `--context-window`（qoder，**不填按 128K**）。
-  两家默认都不是满档。实测 max+1M：codebuddy 8.7s、qoder **56.9s**（默认档 29.8s）
-  ——满档思考的代价是墙钟翻倍。**执行体拿不到会话历史**，要长上下文走 `/v1`。
 - **控制台 `@` = 执行体直跑，不是聊天**：`@` 在输入框**任意位置**都能点名
   （`/` 只认行首，避免和路径打架），**一条消息可点名多个、按顺序串行**——
   `POST /zkadmin/agent/delegations`（`items` 最多 10 段，带 `session_id` 则追加）；
@@ -457,48 +431,15 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   改 Python 要重启网关；只改 yaml 不用（每次新任务重读花名册）。
   ✅ 「停止」会 kill 子进程（`_Running.cancel_event` + runner watchdog，2026-11-12 修）；
   实时日志走 `cli_log` SSE（本地转发，不额外耗额度），超时/取消回显已产生的输出。
-- **skill 不是接口，是提示包**：本机技能只在 `~/.agents/skills`、`~/.claude/skills`、
-  `~/.codex/skills`、`~/.catpaw/skills` 四处（codebuddy/qoder/gemini 目录为空）。
-  所以「用 skill」= 把活派给装了 skill 的 CLI，而不是给网关加工具。
-  `cli-skill`（codex）自带 15 个技能，`cli-claude`（Claude Code）另有 9 个。
-- **Claude Code 只能走 CC Switch 的模型**：`-p` 是 SDK 分支，客户端先校验模型归属，
-  `zk-k3` / 连 `claude-sonnet-4-5` 都判 `unrecognized_model`，请求到不了网关。
-  所以执行体 `model: ""`（不传 `--model`），模型由 CC Switch 决定、走
-  `127.0.0.1:15721` 本地代理，**CC Switch 没开就调不通**。
-  它也没有无头可用的只读档，`approval_mode: bypass` → `--dangerously-skip-permissions`
-  （注册表为此开了显式白名单值，只给用户亲自 @ 的执行体用）。
-  实测经生产路径 ok 但 **130s**——慢在 CC Switch 那条链路，不是我们的超时。
-- **npm shim 指向的入口不一定是 JS**：Claude Code 的 `claude.cmd` 直接指向
-  `bin/claude.exe`，`launcher` 原来一律交给 node，报 `ERR_UNKNOWN_FILE_EXTENSION`。
-  现在 `.exe` 入口直接跑，只有脚本入口才用 node。
 - **`--model` 可选值以 `codebuddy --help` 为准**（glm-5.3 / kimi-k3 /
   deepseek-v4.1-flash 都在列），但"在列"不等于"免费"——**以 JSON 里的
   `total_cost_usd` 为准**，这是唯一客观口径。
-- **CodeBuddy 未登录时退出码是 0**（2026-10-26 实测，2.176.0）：stdout 只有一行
-  `Authentication required. Please use /login command to sign in`，runner 原来按
-  「退出码 0 = 成功」把它记成 done，登录提示被当成答案回给父模型。已加
-  `CliAdapter.fatal_output()` 钩子（只有 CodeBuddy 覆盖，且只认它自己的登录
-  原文，避免正常回答里的 "401" 被误判），runner 在成功分支也过一遍；
-  回归测试 `test_runner_treats_auth_text_with_exit_zero_as_failure` 钉住接线。
-  **别再退回「只看退出码」的写法**——这类 CLI 的失败信号不一定在退出码里。
-- **Gemini 登录态过期会先弹 `Opening authentication page ... [Y/n]`**（2026-10-26）：
-  stdin 是 DEVNULL，它等不到确认就一直挂到超时（不是快速失败）。原文已进
-  AUTH 特征表，现在报「未登录」。要恢复得在真终端跑一次 `gemini` 走 OAuth。
-- **qoder / codebuddy 的 CLI 登录态与桌面端不共享，而且会过期**：2026-10-26
-  重装后两台都要求重新登录（`qodercli login` / codebuddy 交互式里 `/login`）。
-  另：从 agent 会话里直接跑 `qoder` 会继承一堆 `QODER_*`（含
-  `QODER_AGENT_SDK_ENTRYPOINT`），报 `sdk_invalid_args: Agent SDK entrypoint
-  env is set...`——测 CLI 先把 `QODER_*` 全 unset；网关托盘进程没有这些变量，
-  不受影响。`config/cli_tools.yaml` 是 gitignore 的，换机要重新生成。
-- **Qoder 执行体必须写 `command: qodercli`，不能写 `qoder`**（2026-10-26 实测）：
-  桌面端会在 `~/.qoder/entry/` 装一个 PowerShell 转发器 `qoder.CMD`，PATH 可能
-  先命中它；launcher 只认 npm shim 里的 `node_modules` 入口，从转发器里取不出
-  脚本，委派直接报「无法从中取出口脚本」。`qodercli` 是 npm 包的原生命令，
-  解析成 node + bundle/qodercli.js，实测 `pong` 通过；登录也用 `qodercli login`。
-- **Qoder 的模型清单以 `qodercli --list-models` 为准，桌面端目录不可解析**：
-  2026-10-26 实测当前账号只有 `DeepSeek-Flash` / `Qwen3.8-Flash` 两个；桌面端的
-  `.qoder/.models/*/catalog-*` 是加密文件（头 `QMC`），别去解它。面板下拉走
-  live 发现（`source: live`），静态 `models` 只是未登录时的兜底。
+
+执行体各家 CLI 的**具体形态、报错原文与实测数字**（Windows shim 不能直接 exec、
+CodeBuddy 未登录退出码 0、json 是事件数组、Qoder 登录态不共享、模型名口径、
+Claude 只能走 CC Switch、免费额度的形状）已拆到
+`docs/免费档执行体-20261025.md` 的**附录**——排查具体执行体时才翻。
+**留在本文件的都是规则**：审批档映射、@ 委派语义、产品决策。
 
 ### 2026-11-13 委派层对标 Claude Code / Codex 后的九条（都是实测）
 
@@ -691,6 +632,29 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 - qoder 的 json 输出**没有 session id**（只能 `--list-sessions` 事后查，
   并发时无法确定哪条是刚才的）→ 刻意不实现续接。codearts 的 `--format json`
   会触发「文件夹未被信任」→ 也不做。**宁可没有，也不要接错。**
+
+## 代码体量与拆分（2026-11-14）
+
+- **`agent/service.py` 已从 1,818 行拆成 6 个文件**：`service.py`(78) 只做门面，
+  `service_session/loop/delegate/child.py` 是四个 mixin，`service_common.py`
+  放共享常量与 `_Running`。**44 个方法体逐字节未改**（sha256 比对过），
+  对调用方/测试/行为零影响。再往里加方法时按职责进对应 mixin，别再堆回门面。
+- **mixin 的两个搬运坑**（只有"逐字节搬"才暴露）：`@staticmethod` 与
+  `@dataclass(slots=True)` 装饰器在 `ast` 的 `node.lineno` **之前**，
+  按行号取源码会丢；方法名搬走后 `monkeypatch.setattr("...service.run_delegation")`
+  会失效——改测试指向真实模块（`service_delegate`），**别做 re-export 骗人**。
+- **mypy 需要类型声明**：mixin 组合后静态检查器看不到 `self` 成员，
+  在每个 mixin 里用 `if TYPE_CHECKING:` 写类级注解（运行期零开销）。
+- **burner 配置键是单一来源 `config/burner_keys.json`**：脚本
+  (`_CONFIG_KEYS`) 与 `config_io.CONFIG_KEYS` 都读它，脚本另留一份兜底
+  （`_FALLBACK_CONFIG_KEYS`，保持独立运行）。**加新键只改 JSON**——
+  测试 `test_burner_key_single_source.py` 三向比对（JSON/脚本/兜底）。
+- **AGENTS.md 65,536 字节预算现在有测试守着**：`test_doc_scale.py` 的两条，
+  余量 < 2,048 就红。**规则写进文档 ≠ 会执行**，这次终于工具化了。
+  撞墙时的正确做法是「结论上提、过程下沉」（见 `docs/排查过程详述.md`），不是删规则。
+- **消耗器代码保留不删**（2026-11-14 修正上一轮的判断）：停用时零运行开销
+  （无后台任务，只在打开控制台页时走 HTTP），而它随时可能恢复；
+  删了会让恢复变大工程 + 控制台「消耗器」页全废。
 
 ## 流式耗时与委派续跑（2026-11-13，B-3/B-4）
 
