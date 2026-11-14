@@ -649,6 +649,12 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
   (`_CONFIG_KEYS`) 与 `config_io.CONFIG_KEYS` 都读它，脚本另留一份兜底
   （`_FALLBACK_CONFIG_KEYS`，保持独立运行）。**加新键只改 JSON**——
   测试 `test_burner_key_single_source.py` 三向比对（JSON/脚本/兜底）。
+- **迭代期用 `scripts/quick_test.py` 挑测试，提交前才跑全量**（2026-11-14 实测：
+  全量 136 秒 vs 改路由只跑相关 17 秒，**8 倍**）。它按 `git status` 的改动路径
+  映射到测试文件；`app/main.py`/`container.py`/`errors.py`/`conftest.py` 这类
+  横切文件**强制回落全量**，没登记的路径也回落全量（宁可慢，不许静默漏跑）。
+  映射表本身有测试（`test_quick_test_map.py`：指向的文件必须真实存在）——
+  第一版我就写错两个文件名，是它抓出来的。**它不是门禁替代品**。
 - **AGENTS.md 65,536 字节预算现在有测试守着**：`test_doc_scale.py` 的两条，
   余量 < 2,048 就红。**规则写进文档 ≠ 会执行**，这次终于工具化了。
   撞墙时的正确做法是「结论上提、过程下沉」（见 `docs/排查过程详述.md`），不是删规则。
