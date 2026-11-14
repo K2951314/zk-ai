@@ -1034,7 +1034,7 @@ async def test_start_delegation_runs_the_cli_without_touching_the_model(
         calls.append(task)
         return CliResult(ok=True, output="hello from cli", elapsed=0.42)
 
-    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
     created = await service.start_delegation(role="cli-stub", task="说 hello")
     sid = created["session"]["id"]
     row = await wait_for_status(service, sid, {"done", "failed"})
@@ -1091,7 +1091,7 @@ async def test_start_delegations_runs_items_in_order(tmp_path: Path, monkeypatch
         order.append((cfg.model, task))
         return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
 
-    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
     created = await service.start_delegations(items=[
         {"role": "cli-a", "task": "先查"},
         {"role": "cli-b", "task": "再审"},
@@ -1166,7 +1166,7 @@ async def test_start_delegations_honours_explicit_workspace(tmp_path: Path, monk
         seen.append(Path(cwd))
         return CliResult(ok=True, output="done", elapsed=0.1)
 
-    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
     created = await service.start_delegations(
         items=[{"role": "cli-a", "task": "查一下"}],
         workspace=str(ws),
@@ -1212,7 +1212,7 @@ async def test_start_delegations_stops_at_first_failure(tmp_path: Path, monkeypa
         calls.append(task)
         return CliResult(ok=False, output="boom", elapsed=0.1)
 
-    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
     created = await service.start_delegations(items=[
         {"role": "cli-a", "task": "第一"},
         {"role": "cli-a", "task": "第二"},
@@ -1285,7 +1285,7 @@ async def test_followup_delegation_appends_to_the_same_session(
     async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
         return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
 
-    monkeypatch.setattr("app.services.agent.service.run_delegation", fake_run)
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
     await service.followup_delegation(sid, role="cli-stub", task="第一条")
     await wait_for_status(service, sid, {"done", "failed"})
     await service.followup_delegation(sid, role="cli-stub", task="第二条")
