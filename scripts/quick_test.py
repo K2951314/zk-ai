@@ -122,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="只打印会跑哪些")
     args = parser.parse_args(argv)
 
+    picked: list[str]
     if args.all:
         picked, why = [], "显式要求全量"
     elif args.paths:

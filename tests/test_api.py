@@ -107,6 +107,36 @@ async def test_health_endpoint(api) -> None:
     assert "zk-test" in body["aliases"]
 
 
+async def test_health_reports_how_many_models_can_actually_serve(api) -> None:
+    """`models` 只是数量，`models_servable` 才是「此刻真能接活的」。
+
+    2026-11-14 实测：某时刻 models=10，而实际只有 2 个能返回 200
+    （sensenova 全限流、AMD Key 冷却 536s、workbuddy 代理没起）——
+    只看 `models: 10` 的运营者会以为一切正常。
+    """
+    client, _harness = api
+    body = (await client.get("/health")).json()
+    servable = body["models_servable"]
+    assert set(servable) == {"servable", "enabled"}
+    assert servable["enabled"] == body["models"]
+    # 全新 harness：凭据健康、无冷却 → 全部可服务
+    assert servable["servable"] == servable["enabled"]
+
+
+async def test_servable_count_drops_when_a_deployment_is_cooled_down(api) -> None:
+    """部署进冷却后，这个数必须跟着掉——否则它只是个装饰字段。"""
+    client, harness = api
+    before = (await client.get("/health")).json()["models_servable"]["servable"]
+    assert before > 0
+
+    # 把一个部署手工打进长冷却（模拟「这个渠道挂了」）
+    deployment = next(iter(harness.container.config.models.values())).deployments[0]
+    harness.scheduler._deployment_cooldowns[deployment.id] = 9e18
+
+    after = (await client.get("/health")).json()["models_servable"]["servable"]
+    assert after == before - 1, "冷却中的部署必须从可服务计数里扣掉"
+
+
 async def test_health_exposes_the_config_problems_block(api) -> None:
     """/health 必须带 config 段——控制台「需要处理」面板读的就是它。
 

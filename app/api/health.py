@@ -56,6 +56,14 @@ async def health(container: ContainerDep) -> dict:
         },
         "credentials": pool_stats,
         "models": len(container.config.models),
+        # 有几个模型**此刻真的能接活**：部署未被冷却/隔离，且其供应商至少
+        # 还有一把可用 Key。2026-11-14 加——`models: 10` 只报数量，
+        # 运营者从 /health 看不出「这 10 个里有 7 个是死的」。
+        # 实测同一时刻 `models=10` 而实际只有 2 个能返回 200：
+        # sensenova 全限流、AMD Key 冷却 536s、workbuddy 代理没起。
+        # 判据复用现成两处（`unavailable_deployments` + `provider_availability`），
+        # 不另造标准——那正是「检查说行、实际调不通」的裂缝来源。
+        "models_servable": _servable_models(container),
         "aliases": sorted(container.config.aliases),
         "health_check_mode": container.settings.health_check_mode,
         # 被自动隔离的部署（连续失败到阈值）。留空 = 一切正常。
@@ -79,6 +87,35 @@ async def health(container: ContainerDep) -> dict:
             "credential_env_gaps": _credential_env_gaps(container),
         },
     }
+
+
+def _servable_models(container: ContainerDep) -> dict[str, int]:
+    """此刻真能接活的模型数（与总数对照看）。
+
+    判据刻意**复用**现成的两处判断，不另造标准：
+    - ``scheduler.unavailable_deployments()`` —— 部署是否在冷却/隔离中；
+    - ``pool.provider_availability()`` —— 供应商至少还有一把可用 Key。
+
+    为什么不加「发一次真请求探测」：/health 是无令牌可读的端点、会被控制台
+    高频轮询，每次探测都是真钱。这里答的是「按网关自己的账本，现在能不能
+    路由」，不是「上游此刻一定 200」——后者只有真请求才知道，别让这个数
+    冒充成那个意思。
+    """
+    unavailable = container.scheduler.unavailable_deployments()
+    provider_ok = container.pool.provider_availability()
+    servable = 0
+    for model in container.config.models.values():
+        if not model.enabled:
+            continue
+        if any(
+            dep.enabled
+            and dep.id not in unavailable
+            and provider_ok.get(dep.provider_id, False)
+            for dep in model.deployments
+        ):
+            servable += 1
+    total = sum(1 for m in container.config.models.values() if m.enabled)
+    return {"servable": servable, "enabled": total}
 
 
 def _config_watch(container: ContainerDep) -> dict | None:

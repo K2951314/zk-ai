@@ -52,9 +52,20 @@ def test_ask_falls_back_to_fast_when_complex_is_dark(stub_post, capsys) -> None:
 
 def test_ask_batch_preserves_order_and_tolerates_failures(stub_post) -> None:
     results = zkai_client.ask_batch(["a", "b", "c"], task="simple", session_prefix="job")
+    # 返回值必须与输入保序（这是 ask_batch 的契约）
     assert results == ["答:a", "答:b", "答:c"]
-    session_ids = [c["payload"].get("session_id") for c in stub_post]
+    # ⚠ 但 ``stub_post`` 记录的是**线程完成的顺序**，不是提交顺序：
+    # ThreadPoolExecutor 有 4 路并发，三个任务谁先跑完不确定。
+    # 断言精确列表会 flaky（2026-11-14 实测：单跑绿、全量偶红）。
+    # 这里只断言集合与配对关系——那才是契约里真正重要的部分。
+    session_ids = sorted(c["payload"].get("session_id") for c in stub_post)
     assert session_ids == ["job-0", "job-1", "job-2"]
+    # 每条 prompt 必须配对自己的会话号（错配会让不同批次钉到同一把 Key）
+    pairs = {
+        c["payload"]["messages"][-1]["content"]: c["payload"].get("session_id")
+        for c in stub_post
+    }
+    assert pairs == {"a": "job-0", "b": "job-1", "c": "job-2"}
 
 
 def test_ask_batch_surfaces_errors_in_place(stub_post) -> None:
