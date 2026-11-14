@@ -165,18 +165,114 @@ class CodexAdapter(CliAdapter):
     ⚠ 它走的是 ``~/.codex/config.toml`` 里配的 provider（本机是 zkai 网关），
     所以**网关进程环境里必须有 ``ZKAI_API_TOKEN``**，否则子进程报
     ``Missing environment variable``。
+
+    续接（B-4，2026-11-14 实测）：``codex exec resume <thread_id> <task>``。
+    ``--json`` 的事件流第一行就是 ``{"type":"thread.started","thread_id":...}``，
+    所以 :meth:`session_ref` 能可靠拿到它。**注意是子命令而不是 ``--resume``
+    旗标**，所以这个适配器覆盖 :meth:`build_command` 自己拼，不用 ``resume_args``。
     """
 
     def build_command(self, task: str, cwd: str) -> list[str]:
         cfg = self.config
-        argv = [cfg.command, "exec", "--skip-git-repo-check", "-m", cfg.model]
+        argv = [cfg.command, "exec"]
+        if self.resume_ref:
+            # resume 是 exec 的子命令：``codex exec resume <id> [options] <task>``
+            argv += ["resume", self.resume_ref]
+        argv += ["--skip-git-repo-check", "-m", cfg.model, "--json"]
         if cfg.approval_mode == "bypass":
             # 统一权限：任务空间内放行，沙箱与审批一起关
             argv.append("--dangerously-bypass-approvals-and-sandbox")
-        elif cfg.approval_mode == "plan":
+        elif cfg.approval_mode == "plan" and not self.resume_ref:
+            # ⚠ ``resume`` 子命令**不接受 -s/--sandbox**（2026-11-14 真机实测：
+            # 带了就 ``error: unexpected argument '-s' found``，退出码 2）。
+            # 续接时沙箱沿用该会话首次创建时的策略——这正是想要的语义：
+            # 一个会话的权限档不该因为「继续」而变化。
             argv += ["-s", "read-only"]
         argv.append(task)
         return argv
+
+    def parse_output(self, stdout: str, stderr: str) -> str:
+        """``--json`` 是 JSONL 事件流：取最后那条 ``agent_message`` 的正文。
+
+        事件形态（0.167.2 实测）：
+          {"type":"thread.started","thread_id":"..."}
+          {"type":"item.completed","item":{"type":"agent_message","text":"OK"}}
+          {"type":"turn.completed","usage":{...}}
+        解析失败回落裸文本——不能让格式变化把整次委派判死。
+        """
+        text = _codex_last_message(stdout)
+        if not text:
+            return super().parse_output(stdout, stderr)
+        usage = _codex_usage(stdout)
+        if usage:
+            text += f"（上游自报 token：入 {usage[0]} / 出 {usage[1]}）"
+        return clip_output(text)
+
+    def parse_usage(
+        self, stdout: str, stderr: str
+    ) -> tuple[int | None, int | None, float | None]:
+        usage = _codex_usage(stdout)
+        return (usage[0], usage[1], None) if usage else (None, None, None)
+
+    def session_ref(self, stdout: str) -> str:
+        """``thread.started`` 事件里的 ``thread_id``，用于下次续接。"""
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "thread.started":
+                ref = event.get("thread_id")
+                if isinstance(ref, str):
+                    return ref
+        return ""
+
+
+def _codex_events(stdout: str) -> list[dict[str, Any]]:
+    """把 codex ``--json`` 的 JSONL 解成事件列表（坏行跳过）。"""
+    events: list[dict[str, Any]] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events
+
+
+def _codex_last_message(stdout: str) -> str:
+    """最后一条 ``agent_message`` 的正文 = 这次委派的结论。"""
+    for event in reversed(_codex_events(stdout)):
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = str(item.get("text") or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _codex_usage(stdout: str) -> tuple[int, int] | None:
+    """``turn.completed`` 里的 usage（拿不到就 None，不估）。"""
+    for event in reversed(_codex_events(stdout)):
+        if event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        tin = usage.get("input_tokens")
+        tout = usage.get("output_tokens")
+        if isinstance(tin, int) or isinstance(tout, int):
+            return int(tin or 0), int(tout or 0)
+    return None
 
 
 class QoderAdapter(CliAdapter):

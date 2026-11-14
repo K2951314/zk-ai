@@ -49,15 +49,19 @@ def test_claude_turns_a_ref_into_resume_before_the_print_flag() -> None:
 
 
 def test_adapters_without_resume_support_ignore_the_ref() -> None:
-    """codex 目前不解析 session id → 给 ref 也不能瞎拼旗标。
+    """没有续接能力的适配器（gemini）给 ref 也不能瞎拼旗标。
 
-    ``exec resume`` 是子命令，位置和 ``--resume`` 不同，没实测过就不猜。
+    2026-11-14 修正：原测试拿 codex 当反例，但当天实测 ``exec resume <id>``
+    可用、``--json`` 也能拿到 thread_id，codex 已改成支持续接（见文件末尾）。
+    现在用 gemini 当反例——它确实没有续接入口。
     """
+    from app.services.agent.cli.adapters import GeminiAdapter
+
     cfg = CliToolConfig(
-        name="codex", command="codex", backend="official", model="zk-auto",
-        cost_tier="paid", timeout=300, approval_mode="plan",
+        name="gemini", command="gemini", backend="official", model="gemini-2.5-flash",
+        cost_tier="free", timeout=300, approval_mode="default",
     )
-    argv = CodexAdapter(cfg, resume_ref="some-id").build_command("x", "/w")
+    argv = GeminiAdapter(cfg, resume_ref="some-id").build_command("x", "/w")
     assert "some-id" not in argv
     assert "resume" not in argv
 
@@ -109,3 +113,79 @@ def test_resume_ref_is_scoped_per_task_space(tmp_path: Path) -> None:
 
     assert AgentService._resume_ref_for(tmp_path, space_a, "claude") == "uuid-a"
     assert AgentService._resume_ref_for(tmp_path, space_b, "claude") == ""
+
+
+# --------------------------------------------------------------------------- #
+# codex：续接是**子命令**（exec resume <id>），不是 --resume 旗标（2026-11-14 实测）
+# --------------------------------------------------------------------------- #
+def _codex() -> CliToolConfig:
+    return CliToolConfig(
+        name="codex", command="codex", backend="official", model="zk-auto",
+        cost_tier="paid", timeout=300, approval_mode="plan",
+    )
+
+
+def test_codex_resume_is_a_subcommand_not_a_flag() -> None:
+    """``codex exec resume <id> <task>`` —— 位置错一个词它就当子命令解析失败。"""
+    argv = CodexAdapter(_codex(), resume_ref="01a1d7bf-0b14").build_command("干活", "/w")
+    assert argv[:2] == ["codex", "exec"]
+    assert argv[2] == "resume"
+    assert argv[3] == "01a1d7bf-0b14"
+    # 任务必须留在最后（resume 也是位置参数形式）
+    assert argv[-1] == "干活"
+
+
+def test_codex_resume_never_passes_the_sandbox_flag() -> None:
+    """真机实测（2026-11-14）：``resume`` 不接受 ``-s``，带了直接退出码 2。
+
+    只断言 argv 形状的测试抓不到这个——必须真跑一次才知道。
+    """
+    argv = CodexAdapter(_codex(), resume_ref="01a1d7bf-0b14").build_command("干活", "/w")
+    assert "-s" not in argv and "--sandbox" not in argv
+    # 而 --json 是 resume 支持的（拿 thread_id 与用量都靠它）
+    assert "--json" in argv
+
+
+def test_codex_without_a_ref_is_unchanged_apart_from_json() -> None:
+    argv = CodexAdapter(_codex()).build_command("干活", "/w")
+    assert "resume" not in argv
+    # --json 是为了拿 thread_id 与用量（2026-11-14 加）
+    assert "--json" in argv
+
+
+def test_codex_session_ref_comes_from_thread_started() -> None:
+    """``--json`` 第一行就是 thread.started，续接靠它。"""
+    stdout = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"01a1d7bf-0b14-7ee1-9bc5-13e9f7f49ae3"}',
+            '{"type":"turn.started"}',
+            '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"OK"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":7}}',
+        ]
+    )
+    adapter = CodexAdapter(_codex())
+    assert adapter.session_ref(stdout) == "01a1d7bf-0b14-7ee1-9bc5-13e9f7f49ae3"
+    assert adapter.parse_output(stdout, "") == "OK（上游自报 token：入 100 / 出 7）"
+    assert adapter.parse_usage(stdout, "") == (100, 7, None)
+
+
+def test_codex_falls_back_to_raw_text_when_json_is_missing() -> None:
+    """格式变了不能把整次委派判死。"""
+    adapter = CodexAdapter(_codex())
+    assert adapter.parse_output("就是一段裸文本", "") == "就是一段裸文本"
+    assert adapter.session_ref("就是一段裸文本") == ""
+
+
+def test_qoder_has_no_reliable_session_ref_so_it_stays_unsupported() -> None:
+    """qoder 的 json 输出里**没有** session id（只能 --list-sessions 事后查）。
+
+    并发时无法确定哪条是刚才的，所以刻意不实现续接——宁可没有，也不要接错。
+    """
+    from app.services.agent.cli.adapters import QoderAdapter
+
+    cfg = CliToolConfig(
+        name="qoder", command="qodercli", backend="official", model="Sonus",
+        cost_tier="free", timeout=300, approval_mode="plan",
+    )
+    argv = QoderAdapter(cfg, resume_ref="fe152bb9-8d44").build_command("x", "/w")
+    assert "fe152bb9-8d44" not in argv
