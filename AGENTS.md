@@ -215,8 +215,10 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 - **moonshot 已整块删除**（无 Key，3,102 次尝试 0 成功，纯 `no_available_credential`
   噪音）。要恢复需同时加回 providers.yaml 的供应商与 models.yaml 的部署。
 - **接口模型 `front_model`：永远排第一、手动指定、随时可改**（2026-09-28 新增，
-  `ModelAliasConfig.front_model`）：`zk-auto`/`zk-long` 已设 `step-5-preview`，
-  因为 `glm-5.3` 在 NVIDIA 上持续 60s 超时、打头等于每个长上下文请求先赔 180 秒。
+  `ModelAliasConfig.front_model`）。**当前值以 `config/models.yaml` 为准**
+  （2026-11-14 核对：`zk-auto` 是 `deepseek-flash`；`zk-long` 早已不存在）——
+  这个字段会被控制台写回文件，文档里记死一个值必然过时。当初设它是为了避开
+  `glm-5.3` 在 NVIDIA 上的 60s 超时。
   三条设计约束：①只提升**有资格**的候选——被 `request_requires` 挡掉的接口模型
   绝不能硬提到第一，那会把能跑的请求变成必败；②是**重排不是过滤**，能力路由的
   结果完整留在后面当备用与故障转移顺序；③拼错时静默回落（配置文件容忍历史遗留），
