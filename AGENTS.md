@@ -175,6 +175,15 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   新 Settings **没有写回 container**，所以改 `deploy.public_base_url` / `exposure`
   仍要重启网关——热加载日志会显示成功，`/health` 却还是旧值。启动期设置
   （host/port/log/db 一类）同理，别把「已自动 reload N 次」当成所有段都生效。
+- **`retry:` 段同样不参与热加载**（2026-11-16 实测，同型缺口）：
+  `Scheduler.policy` 只在 `__init__` 里 `policy or RetryPolicy()` 设一次，
+  `reload_config()` 不重建 scheduler。所以改 `max_credentials_per_deployment`
+  这类**不会生效**——而且不会报错。改完必须 `systemctl restart zkai`。
+  判断办法：`/health` 的 reload_count 会 +1（假象），要看实际行为或重启。
+  ⚠ 顺带两条：①`only_leg` 会让「指定具体模型且只有一个部署」的请求扫完整池，
+  这是 2026-11-13 的正确设计，不是上限没生效；②该值曾在本机修到 3、服务器
+  却遗留 9（实测单请求 attempts=26 扫 11 把、`no_available_credential`
+  latency 恒 0.0ms），换服务器后要专门核对这一项。
 - **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
   「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
   只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
