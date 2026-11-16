@@ -8,10 +8,12 @@ are zeroed through an injected sleeper so the suite stays fast.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -484,6 +486,69 @@ def now() -> float:
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+_EMPTY_SETTINGS_ENV = Path(tempfile.gettempdir()) / "zkai-test-empty-settings.env"
+_original_env_file = Settings.model_config.get("env_file")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Point ``Settings`` at an empty env file for the whole test session.
+
+    ``Settings`` is pydantic-settings whose ``env_file`` is the project-root
+    ``.env`` -- *live operator config* that carries ``ZKAI_PORT`` /
+    ``ZKAI_PUBLIC_BASE_URL`` / ``ZKAI_EXPOSURE`` / ``ZKAI_BURNER_DIR`` for
+    whichever server this machine last talked to. Tests calling
+    ``Settings(host=..., port=...)`` with only some fields set were silently
+    inheriting the rest, so the suite passed on a dev box and broke after a
+    server rotation with no code change. An empty file makes every unset field
+    fall back to its class default; explicit constructor kwargs still win.
+
+    The real ``.env`` stays on disk for tests that deliberately read it
+    (``load_dotenv_file()``, ``credential_env_gaps()``, env-var write-through).
+    """
+    _EMPTY_SETTINGS_ENV.write_text("", encoding="utf-8")
+    Settings.model_config["env_file"] = str(_EMPTY_SETTINGS_ENV)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    if _original_env_file is None:
+        Settings.model_config.pop("env_file", None)
+    else:
+        Settings.model_config["env_file"] = _original_env_file
+
+
+#: Deployment/path keys that the project-root ``.env`` injects into
+#: ``os.environ`` through ``load_dotenv_file()`` (called by ``load_app_config``
+#: on nearly every API test). Env vars outrank pydantic's ``env_file``, so
+#: pointing ``env_file`` at an empty file is not enough -- these leak in and
+#: override the defaults the deploy/credential tests assert on.
+_LOCAL_DOTENV_DEPLOY_KEYS = (
+    "ZKAI_HOST",
+    "ZKAI_PORT",
+    "ZKAI_PUBLIC_BASE_URL",
+    "ZKAI_EXPOSURE",
+    "ZKAI_BURNER_DIR",
+    "ZKAI_DATABASE_URL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_local_dotenv_from_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Remove this machine's ``.env`` deployment values from ``os.environ``.
+
+    A no-arg ``load_dotenv_file()`` (invoked straight from ``load_app_config``)
+    loads the real ``.env`` into ``os.environ`` with ``override=False``. Whichever
+    test runs first leaves those values process-wide, and every later
+    ``Settings()`` sees them regardless of ``env_file``. Scrubbing them per test
+    (via monkeypatch, so each test restores the prior state) keeps the suite
+    independent of whichever server this developer box last talked to.
+    """
+    for key in _LOCAL_DOTENV_DEPLOY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    yield
 
 
 @pytest.fixture(autouse=True)
