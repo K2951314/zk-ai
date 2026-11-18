@@ -299,7 +299,7 @@ async def test_silent_upstream_emits_keepalive_pings(messages_api, monkeypatch) 
     """
     import app.api.messages as messages_mod
 
-    monkeypatch.setattr(messages_mod, "keepalive_interval", lambda _v: 0.05)
+    monkeypatch.setattr(messages_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
     client, adapter = messages_api
 
     calls = {"n": 0}

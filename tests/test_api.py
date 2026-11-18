@@ -397,7 +397,9 @@ async def test_streaming_returns_openai_chunks(api) -> None:
     client, harness = api
     harness.adapter.queue(Behavior(text="ignored", chunks=3, prompt_tokens=4, completion_tokens=6))
     response = await client.post(
-        "/v1/chat/completions", json={**CHAT_BODY, "stream": True}
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True},
+        headers={"User-Agent": "codex_exec/0.164.0"},
     )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -413,6 +415,25 @@ async def test_streaming_returns_openai_chunks(api) -> None:
     # Routing metadata travels as an SSE comment (invisible to OpenAI SDKs).
     assert any(comment.startswith("zkai-meta") for comment in comments)
     assert "usage" not in chunks[-1]  # only sent when explicitly requested
+
+
+async def test_streaming_skips_zkai_meta_for_workbuddy(api) -> None:
+    """WorkBuddy 桌面版把 `:` 注释行当正文显示，对它发 zkai-meta = 污染输出。
+
+    只有白名单内的客户端（codex / ds-harness / OpenAI SDK）才收 zkai-meta；
+    WorkBuddy / 未知 UA 不收——meta 信息已经通过 x-zkai-* HTTP 响应头传递。
+    """
+    client, harness = api
+    harness.adapter.queue(Behavior(text="ignored", chunks=2, prompt_tokens=4, completion_tokens=6))
+    response = await client.post(
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True},
+        headers={"User-Agent": "WorkBuddy/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0"},
+    )
+    assert response.status_code == 200
+    _, comments, _ = await parse_sse(response.text)
+    assert not any(c.startswith("zkai-meta") for c in comments), \
+        "WorkBuddy 不应收到 zkai-meta 注释行"
 
 
 async def test_streaming_usage_only_with_stream_options(api) -> None:
@@ -450,13 +471,32 @@ async def test_streaming_preflight_error_returns_json_status(api) -> None:
 
 def test_keepalive_interval_is_half_the_client_idle_budget() -> None:
     """心跳必须比客户端的空闲判定更早到达，取一半留一倍余量。"""
-    assert keepalive_interval(120.0) == 60.0
-    assert keepalive_interval(10.0) == 5.0
+    codex = "codex_exec/0.164.0 (Windows 10.0.26300; x86_64)"
+    assert keepalive_interval(120.0, user_agent=codex) == 60.0
+    assert keepalive_interval(10.0, user_agent=codex) == 5.0
     # 太小的值会被下限托住：不是越勤越好
-    assert keepalive_interval(2.0) == 5.0
+    assert keepalive_interval(2.0, user_agent=codex) == 5.0
     # 0 / None = 关闭（回到旧行为）
-    assert keepalive_interval(0) is None
-    assert keepalive_interval(None) is None
+    assert keepalive_interval(0, user_agent=codex) is None
+    assert keepalive_interval(None, user_agent=codex) is None
+
+
+def test_keepalive_interval_skips_clients_that_display_ping_as_content() -> None:
+    """WorkBuddy 桌面版把 `: ping` 注释行当正文显示，对它发心跳 = 污染输出。
+
+    只有白名单里的客户端（Codex / ds-harness / OpenAI SDK）才发心跳；
+    未知 UA 和 WorkBuddy / Anthropic SDK 默认不发——安全侧。
+    """
+    # 白名单里的客户端照常发
+    assert keepalive_interval(120.0, user_agent="codex_exec/0.164.0") == 60.0
+    assert keepalive_interval(120.0, user_agent="ds-harness/1.0") == 60.0
+    assert keepalive_interval(120.0, user_agent="OpenAI-Python/1.0") == 60.0
+    # 不在白名单里 → 不发（WorkBuddy、Anthropic SDK、浏览器、未知 UA）
+    assert keepalive_interval(120.0, user_agent="WorkBuddy/5.9.3") is None
+    assert keepalive_interval(120.0, user_agent="anthropic-sdk/0.3") is None
+    assert keepalive_interval(120.0, user_agent="Mozilla/5.0") is None
+    assert keepalive_interval(120.0, user_agent=None) is None
+    assert keepalive_interval(120.0, user_agent="") is None
 
 
 async def test_silent_upstream_emits_keepalive_pings(api, monkeypatch) -> None:
@@ -467,7 +507,7 @@ async def test_silent_upstream_emits_keepalive_pings(api, monkeypatch) -> None:
     """
     import app.api.chat as chat_mod
 
-    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v: 0.05)
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
 
     client, harness = api
     harness.adapter.queue(Behavior(chunks=3, delay=0.25))
@@ -490,7 +530,7 @@ async def test_no_ping_when_upstream_keeps_talking(api, monkeypatch) -> None:
     """数据流动时不发心跳：只在静默时补位，不占正常带宽。"""
     import app.api.chat as chat_mod
 
-    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v: 30.0)
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v, **_kw: 30.0)
 
     client, harness = api
     harness.adapter.queue(Behavior(chunks=3))
@@ -505,7 +545,7 @@ async def test_keepalive_does_not_disturb_the_usage_chunk(api, monkeypatch) -> N
     """心跳不能干扰 include_usage 的尾块（有客户端严格校验它）。"""
     import app.api.chat as chat_mod
 
-    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v: 0.05)
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
 
     client, harness = api
     harness.adapter.queue(

@@ -295,7 +295,7 @@ async def test_silent_upstream_emits_keepalive_pings(responses_api, monkeypatch)
     """
     import app.api.responses as responses_mod
 
-    monkeypatch.setattr(responses_mod, "keepalive_interval", lambda _v: 0.05)
+    monkeypatch.setattr(responses_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
     client, adapter, _harness = responses_api
     adapter.chunk_script = [
         _chunk(role="assistant"),

@@ -397,7 +397,10 @@ async def _stream_response(
         "cache-control": "no-cache",
     }
 
-    ping_every = keepalive_interval(container.settings.stream_idle_timeout)
+    ping_every = keepalive_interval(
+        container.settings.stream_idle_timeout,
+        user_agent=metadata.get("user_agent"),
+    )
 
     async def event_stream() -> AsyncIterator[str]:
         watcher = asyncio.create_task(_watch_disconnect(request))

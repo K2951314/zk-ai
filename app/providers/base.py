@@ -858,13 +858,25 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 unsupported.append(key)
 
         max_tokens = request.effective_max_tokens
-        if max_tokens is not None:
-            token_param = self.token_param_name(deployment)
+        token_param = self.token_param_name(deployment)
+        if max_tokens is not None and max_tokens > 0:
+            # 防止客户端传超限值导致上游 400（WorkBuddy 实测传 >131072，
+            # 商汤报 field MaxTokens invalid, should be in [1, 131072]）。
+            # 部署的 max_output_tokens 是合理上限，超过就截断到它。
+            if deployment.max_output_tokens and max_tokens > deployment.max_output_tokens:
+                logger.debug(
+                    "provider=%s model=%s 客户端 max_tokens=%d 超过部署上限 %d，已截断",
+                    self.provider_id,
+                    deployment.model,
+                    max_tokens,
+                    deployment.max_output_tokens,
+                )
+                max_tokens = deployment.max_output_tokens
             payload[token_param] = max_tokens
             if token_param not in self.allowed_params(deployment):
                 unsupported.append(token_param)
         elif deployment.max_output_tokens:
-            payload[self.token_param_name(deployment)] = deployment.max_output_tokens
+            payload[token_param] = deployment.max_output_tokens
 
         if request.stream:
             payload["stream"] = True

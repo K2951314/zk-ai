@@ -77,17 +77,47 @@ def _chunk_payload(
     return payload
 
 
-def keepalive_interval(idle_timeout: float) -> float | None:
+#: 需要心跳的客户端 User-Agent 关键词（白名单）。只有这些客户端在长时间静默后会
+#: 判连接失败并断连——它们也是遵守 SSE 规范、能正确忽略 `:` 注释行的。
+#: WorkBuddy 桌面版、Anthropic SDK、浏览器 EventSource 不在名单里：它们要么
+#: 不遵守 SSE 规范把 `: ping` 当正文显示（WorkBuddy），要么超时容忍度够长不需要心跳。
+#: 未知 UA **默认不发**——宁可让需要心跳的客户端偶尔断连（它会重试），
+#: 也不要让不兼容的客户端显示污染信息。
+_PING_USER_AGENTS = ("codex", "ds-harness", "openai-python", "openai-node")
+
+
+def keepalive_interval(
+    idle_timeout: float, *, user_agent: str | None = None
+) -> float | None:
     """按客户端空闲判定的一半计算心跳间隔；None = 不发心跳。
 
     ``stream_idle_timeout`` 是「客户端能忍多久没有字节」。心跳必须在它**之前**
     到达，取一半留一倍余量（120s → 每 60s 一次 ping）。
 
     0 或负数 = 关闭心跳（回到旧行为），便于以后排查「心跳是否影响某个客户端」。
+
+    **按 User-Agent 白名单发心跳**（2026-11-18）：只有已知会在长时间静默后断连
+    的客户端才发。WorkBuddy 桌面版的 SSE 解析器不遵守规范、把 `: ping` 注释行
+    当正文显示——对它发心跳 = 污染输出。未知 UA 默认不发，安全侧。
     """
     if idle_timeout is None or idle_timeout <= 0:
         return None
+    if not _wants_ping(user_agent):
+        return None
     return max(5.0, idle_timeout / 2.0)
+
+
+def _wants_ping(user_agent: str | None) -> bool:
+    """只有白名单里的客户端才需要 SSE 心跳。
+
+    WorkBuddy 桌面版把 `: ping` 注释行当正文显示（不遵守 SSE 规范），
+    Anthropic SDK 超时容忍度够长，浏览器 EventSource 也不会在静默期断连。
+    只有 Codex CLI / ds harness / OpenAI SDK 会在零字节静默后判连接失败。
+    """
+    if not user_agent:
+        return False
+    ua_lower = user_agent.lower()
+    return any(keyword in ua_lower for keyword in _PING_USER_AGENTS)
 
 
 def retry_after_headers(exc: ZKAIError) -> dict[str, str]:
@@ -204,7 +234,10 @@ async def _stream_response(
         "x-accel-buffering": "no",
     }
 
-    ping_every = keepalive_interval(container.settings.stream_idle_timeout)
+    ping_every = keepalive_interval(
+        container.settings.stream_idle_timeout,
+        user_agent=metadata.get("user_agent"),
+    )
 
     async def event_stream() -> AsyncIterator[str]:
         watcher = asyncio.create_task(_watch_disconnect(request))
@@ -228,8 +261,13 @@ async def _stream_response(
                         )
                         yield f"data: {payload_json}\n\n"
                     elif event.type == "meta" and event.meta is not None:
-                        # SSE comment: invisible to OpenAI SDK parsers by design.
-                        yield f": zkai-meta {json.dumps(event.meta.model_dump(), ensure_ascii=False)}\n\n"
+                        # SSE comment: invisible to compliant SSE parsers by design.
+                        # 但 WorkBuddy 桌面版把 `:` 注释行当正文显示（与 `: ping`
+                        # 同一个根因），对它发 = 污染输出。meta 信息已经通过
+                        # x-zkai-* HTTP 响应头传递，注释行只是锦上添花——
+                        # 对不合规客户端直接不发。
+                        if _wants_ping(metadata.get("user_agent")):
+                            yield f": zkai-meta {json.dumps(event.meta.model_dump(), ensure_ascii=False)}\n\n"
                     elif event.type == "error" and event.error is not None:
                         yield f"data: {json.dumps(event.error, ensure_ascii=False)}\n\n"
                     elif event.type == "end":

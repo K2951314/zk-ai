@@ -142,6 +142,66 @@ class TestVendorPrefixedModelNames:
         assert payload["model"] == "moonshotai/kimi-k3"
 
 
+class TestMaxTokensClamping:
+    """客户端传非法 max_tokens 时网关必须兜底，不能原样透传给上游。
+
+    WorkBuddy 实测传 >131072 的 max_tokens，商汤直接 400
+    ``field MaxTokens invalid, should be in [1, 131072]``。
+    """
+
+    _DEPLOY = DeploymentConfig(
+        id="sensenova-6.8-flash-sensenova",
+        provider_id="sensenova",
+        model="sensenova-6.8-flash",
+        max_output_tokens=65536,
+    )
+
+    def _adapter(self) -> OpenAICompatibleAdapter:
+        return OpenAICompatibleAdapter(
+            ProviderConfig(
+                id="sensenova",
+                type="openai_compatible",
+                base_url="https://api.sensenova.cn/v1",
+            )
+        )
+
+    def test_over_limit_is_clamped_to_deployment_default(self) -> None:
+        from app.models.request import ChatCompletionRequest
+
+        adapter = self._adapter()
+        request = ChatCompletionRequest(
+            model="sensenova-6.8-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=200000,
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["max_tokens"] == 65536
+
+    def test_zero_or_negative_falls_back_to_deployment_default(self) -> None:
+        from app.models.request import ChatCompletionRequest
+
+        adapter = self._adapter()
+        request = ChatCompletionRequest(
+            model="sensenova-6.8-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=0,
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["max_tokens"] == 65536
+
+    def test_valid_value_is_passed_through(self) -> None:
+        from app.models.request import ChatCompletionRequest
+
+        adapter = self._adapter()
+        request = ChatCompletionRequest(
+            model="sensenova-6.8-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=8192,
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["max_tokens"] == 8192
+
+
 class TestReasoningOnlyStreaming:
     """Streaming must not silently deliver nothing when a provider streams
     everything into ``reasoning_content``.
