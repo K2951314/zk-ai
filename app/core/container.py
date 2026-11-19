@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.core.config import AppConfig, Settings, load_app_config
+from app.core.config import (
+    RUNTIME_RELOADABLE_FIELDS,
+    AppConfig,
+    Settings,
+    load_app_config,
+)
 from app.core.config_watch import ConfigWatcher, watch_paths
 from app.core.logging import get_logger
 from app.credentials.cooldown import CooldownPolicy
@@ -77,6 +82,9 @@ class Container:
     ready: bool = False
     #: Set once the file watcher is running; None when disabled or not started.
     config_watcher: ConfigWatcher | None = None
+    #: 文件里改了、但只能重启才生效的 Settings 字段（reload 后点名报告，
+    #: /health 的 config.restart_required 也读它）。空 = 没有待重启的改动。
+    pending_restart_fields: list[str] = field(default_factory=list)
     #: Set while the rate-limit flush loop is running.
     _flush_task: asyncio.Task[None] | None = None
     #: Set while the credential runtime mirror loop is running.
@@ -302,6 +310,11 @@ class Container:
             # credential_affinity 段同理（池子只在建池时读它一次）：reload
             # 不补读的话，改 ttl/max_sessions/enabled 都要重启进程才生效。
             self.pool.apply_affinity_config(config.raw.get("credential_affinity"))
+            # credential_rotation 段同理（2026-11-19 审查补齐）。
+            self.pool.set_rotation(str(config.raw.get("credential_rotation", "priority")))
+            # allow_inline_secrets 在 register_provider 里被读来校验内联密钥，
+            # 必须先于注册更新，否则这一轮注册仍按旧开关放行/拒绝。
+            self.pool.allow_inline_secrets = config.settings.allow_inline_secrets
             for provider in config.providers.values():
                 self.pool.register_provider(provider)
             pruned = self.pool.reconcile(config.providers)
@@ -322,12 +335,30 @@ class Container:
         # 进程级配置缓存也必须换掉：reload 前 get_app_config() 返回启动快照，
         # 之后再调用会一直拿到旧 AppConfig（2026-11-09 洁癖审查修正）。
         set_config_cache(config)
+        # Settings 热更新（2026-11-19 审查）：此前 reload 只换 AppConfig，
+        # container.settings 永远是启动快照——request: / admin: / deploy: 段
+        # 「自动 reload 成功」却静默不生效（stream_idle_timeout 首当其冲）。
+        # 现在把可热更字段原地写回同一个 Settings 对象，所有持有引用的服务
+        # 一起看到新值；只能重启生效的字段点名报告，绝不假装已生效。
+        applied, restart_required = self._apply_runtime_settings(config.settings)
+        self.pending_restart_fields = restart_required
+        # retry: 段与调度器旋钮同理（曾记入 AGENTS.md「必须重启」坑册）：
+        # scheduler.policy 只在 __init__ 设一次，reload 不重建 = 改 retry 段
+        # 静默无效。policy/旋钮都是每次尝试重新读的，原地替换对在途请求安全。
+        self.scheduler.policy = config.retry
+        self.scheduler.request_timeout = self.settings.request_timeout
+        self.scheduler.max_input_tokens = max(0, self.settings.max_input_tokens)
+        self.scheduler.max_request_seconds = max(0.0, self.settings.max_request_seconds)
+        # RequestService 把裁剪预算捕获成了标量，同步补上。
+        self.request_service.trim_history_tokens = max(0, self.settings.trim_history_tokens)
         self.model_service.config = config
         self.health_service.config = config
         self.usage_service.config = config
         self.rate_limiter.configure(config.providers)
         if pruned:
             logger.info("config reload pruned %d stale credential(s) from the pool", pruned)
+        if applied:
+            logger.info("配置热更新已生效：%s", "、".join(applied))
 
         # 重载后重新镜像 DB：YAML 里新增/改名的供应商、凭据、模型（市场加模型、
         # 手改文件）此前只进内存，DB 镜像要等下次重启才更新——控制台列表和统计
@@ -347,7 +378,39 @@ class Container:
             "aliases": sorted(config.aliases),
             "providers": sorted(config.providers),
             "warnings": config.warnings,
+            # 本次真正热更成功的 Settings 字段（空 = 配置里的设置段没变化）。
+            "settings_applied": applied,
+            # 文件里改了、但必须重启网关才生效的字段——说清楚，不让运营者
+            # 对着「reload 成功」以为改 port/数据库也生效了。
+            "restart_required": restart_required,
         }
+
+    def _apply_runtime_settings(self, new_settings: Settings) -> tuple[list[str], list[str]]:
+        """把新 Settings 的字段逐一比对到活对象上：能热更的原地改，其余点名。
+
+        原地 setattr 到**同一个** Settings 实例是关键：agent_service /
+        event_service / API 层都持有它的引用，换对象会让它们继续读旧值
+        （这正是原来「reload 成功却不生效」的根因）。新值来自已经过
+        pydantic 校验的 ``config.settings``，这里不重复校验。
+
+        返回 (已热更字段, 需重启字段)，均按名字排序，供日志与 /health 展示。
+        """
+        applied: list[str] = []
+        restart: list[str] = []
+        for name in Settings.model_fields:
+            new_value = getattr(new_settings, name)
+            if getattr(self.settings, name) == new_value:
+                continue
+            if name in RUNTIME_RELOADABLE_FIELDS:
+                setattr(self.settings, name, new_value)
+                applied.append(name)
+            else:
+                restart.append(name)
+        if restart:
+            logger.warning(
+                "以下配置改动需要重启网关才能生效：%s", "、".join(sorted(restart))
+            )
+        return sorted(applied), sorted(restart)
 
     # ------------------------------------------------------------------ #
     # File watch (see app/core/config_watch.py for why this exists)

@@ -78,6 +78,16 @@ class CredentialPool:
         #: limiter is attached after construction by the container.
         self.rate_limiter = rate_limiter
 
+    def set_rotation(self, name: str) -> None:
+        """热更新轮换策略（``credential_rotation`` 段，reload 调用）。
+
+        池子原来只在建池时读一次该段：改 config.yaml 的轮换策略要重启进程
+        才生效——与 cooldown/affinity 段曾经的热加载缺口同型（2026-11-19
+        审查补齐）。未知名字回落 priority，与 ``get_rotation`` 建池口径一致。
+        """
+        self.rotation_name = name
+        self._rotation = get_rotation(name)
+
     # ------------------------------------------------------------------ #
     # Registration
     # ------------------------------------------------------------------ #

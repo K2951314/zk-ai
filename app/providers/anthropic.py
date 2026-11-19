@@ -262,7 +262,10 @@ class AnthropicAdapter(ProviderAdapter):
         messages, system = self._convert_messages(request)
         unsupported: list[str] = []
 
-        max_tokens = request.effective_max_tokens or deployment.max_output_tokens
+        # 与 OpenAI 兼容路径同一条不变量：客户端超限值截断到部署上限，
+        # 0/负数回退（见基类 _clamped_max_tokens）。Anthropic 的 max_tokens
+        # 是必填字段，所以最后还有一层 provider 级默认值兜底。
+        max_tokens = self._clamped_max_tokens(request, deployment) or deployment.max_output_tokens
         if not max_tokens:
             max_tokens = int(self.config.options.get("default_max_tokens", DEFAULT_MAX_TOKENS))
 

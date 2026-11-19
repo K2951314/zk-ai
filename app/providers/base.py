@@ -228,6 +228,39 @@ class ProviderAdapter(abc.ABC):
         self._client: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------ #
+    # Payload helpers
+    # ------------------------------------------------------------------ #
+    def _clamped_max_tokens(
+        self, request: ChatCompletionRequest, deployment: DeploymentConfig
+    ) -> int | None:
+        """客户端的输出预算，截断到部署上限；``None`` = 客户端没给有效值。
+
+        为什么在基类而不是某个适配器：三个适配器（OpenAI 兼容 / Anthropic /
+        Gemini）守的是**同一条不变量**——客户端 max_tokens 不得超过部署的
+        ``max_output_tokens``，否则严格上游直接 400（WorkBuddy 实测传
+        >131072，商汤报 ``field MaxTokens invalid, should be in [1, 131072]``）。
+        2026-11-18 只在 OpenAI 兼容路径修了它，Anthropic/Gemini 同款漏洞仍在；
+        收敛到基类后，新增适配器自动继承这条保护，不会再漏一处。
+
+        0/负数视为「没给」：OpenAI 语义里 max_tokens 必须 ≥1，传 0 的客户端
+        实际想要的是「用默认值」，回退部署上限由各调用方自己接。
+        """
+        max_tokens = request.effective_max_tokens
+        if max_tokens is None or max_tokens <= 0:
+            return None
+        cap = deployment.max_output_tokens
+        if cap and max_tokens > cap:
+            logger.debug(
+                "provider=%s model=%s 客户端 max_tokens=%d 超过部署上限 %d，已截断",
+                self.provider_id,
+                deployment.model,
+                max_tokens,
+                cap,
+            )
+            return cap
+        return max_tokens
+
+    # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
     @property
@@ -857,21 +890,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             if key not in self.allowed_params(deployment):
                 unsupported.append(key)
 
-        max_tokens = request.effective_max_tokens
+        # 截断到部署上限的保护在基类 _clamped_max_tokens（三个适配器共用）。
+        max_tokens = self._clamped_max_tokens(request, deployment)
         token_param = self.token_param_name(deployment)
-        if max_tokens is not None and max_tokens > 0:
-            # 防止客户端传超限值导致上游 400（WorkBuddy 实测传 >131072，
-            # 商汤报 field MaxTokens invalid, should be in [1, 131072]）。
-            # 部署的 max_output_tokens 是合理上限，超过就截断到它。
-            if deployment.max_output_tokens and max_tokens > deployment.max_output_tokens:
-                logger.debug(
-                    "provider=%s model=%s 客户端 max_tokens=%d 超过部署上限 %d，已截断",
-                    self.provider_id,
-                    deployment.model,
-                    max_tokens,
-                    deployment.max_output_tokens,
-                )
-                max_tokens = deployment.max_output_tokens
+        if max_tokens is not None:
             payload[token_param] = max_tokens
             if token_param not in self.allowed_params(deployment):
                 unsupported.append(token_param)

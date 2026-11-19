@@ -37,6 +37,7 @@ from app.api.chat import (
     SSE_PING,
     _aclose,
     _watch_disconnect,
+    extra_sse_ua_keywords,
     keepalive_interval,
     retry_after_headers,
     routing_headers,
@@ -442,6 +443,7 @@ async def _stream_response(
     ping_every = keepalive_interval(
         container.settings.stream_idle_timeout,
         user_agent=metadata.get("user_agent"),
+        extra_keywords=extra_sse_ua_keywords(container.settings.sse_comment_user_agents),
     )
 
     async def event_stream() -> AsyncIterator[str]:

@@ -427,6 +427,95 @@ def test_stream_idle_timeout_env_still_wins(monkeypatch) -> None:
     assert merged.stream_idle_timeout == 7
 
 
+def test_previously_dead_keys_are_now_bridged(monkeypatch) -> None:
+    """2026-11-19 审查发现的死键：示例文件声明了、桥接表却没登记。
+
+    ``deploy.burner_dir`` 与顶层 ``watch_config`` / ``watch_config_interval``
+    在 config.example.yaml 里写了注释教运营者改，但 apply_settings_from_yaml
+    根本不认——改了静默无效。这里钉住它们现在真的能桥接进 Settings。
+    """
+    for name in ("ZKAI_BURNER_DIR", "ZKAI_WATCH_CONFIG", "ZKAI_WATCH_CONFIG_INTERVAL"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings()
+    merged = apply_settings_from_yaml(
+        settings,
+        {
+            "deploy": {"burner_dir": "/var/lib/zkai/burner"},
+            "watch_config": False,
+            "watch_config_interval": 5.0,
+        },
+    )
+    assert merged.burner_dir == Path("/var/lib/zkai/burner")
+    assert merged.watch_config is False
+    assert merged.watch_config_interval == 5.0
+
+
+def test_request_guards_are_bridged_from_yaml(monkeypatch) -> None:
+    """max_input_tokens / max_request_seconds / sse_comment_user_agents 的桥接。"""
+    for name in (
+        "ZKAI_MAX_INPUT_TOKENS",
+        "ZKAI_MAX_REQUEST_SECONDS",
+        "ZKAI_SSE_COMMENT_USER_AGENTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings()
+    merged = apply_settings_from_yaml(
+        settings,
+        {
+            "request": {
+                "max_input_tokens": 500000,
+                "max_request_seconds": 600,
+                "sse_comment_user_agents": "myclient",
+            }
+        },
+    )
+    assert merged.max_input_tokens == 500000
+    assert merged.max_request_seconds == 600
+    assert merged.sse_comment_user_agents == "myclient"
+
+
+def test_every_settings_field_is_classified_for_reload() -> None:
+    """每个 Settings 字段必须被划进「可热更」或「需重启」之一，不重不漏。
+
+    这是热加载完整性的守卫：新增字段若不分类，reload 就会对它静默不生效
+    （正是 2026-11-19 修的那类坑）。守卫按 model_fields 自动覆盖，不手写清单。
+    """
+    from app.core.config import RUNTIME_RELOADABLE_FIELDS, STARTUP_ONLY_FIELDS
+
+    all_fields = set(Settings.model_fields)
+    classified = RUNTIME_RELOADABLE_FIELDS | STARTUP_ONLY_FIELDS
+    assert classified == all_fields, (
+        f"未分类字段: {sorted(all_fields - classified)}；"
+        f"多余字段: {sorted(classified - all_fields)}"
+    )
+    assert not (RUNTIME_RELOADABLE_FIELDS & STARTUP_ONLY_FIELDS), "一个字段不能既是热更又是重启"
+
+
+def test_every_example_config_key_is_consumed() -> None:
+    """config.example.yaml 的每个键都必须有消费方（桥接或 raw 直读）。
+
+    死键守卫：示例文件教运营者改的键，若 loader 不桥接、代码也不读，改了
+    就静默无效。deploy.burner_dir / watch_config 正是这么漏掉的。守卫逐键
+    核对，新增示例键不登记消费方就红——把「别犯第二次」工具化。
+    """
+    from app.core.config import _SETTINGS_SECTIONS, RAW_CONSUMED_SECTIONS
+
+    example = PROJECT_ROOT / "config" / "config.example.yaml"
+    data = yaml.safe_load(example.read_text(encoding="utf-8"))
+    bridged = set(_SETTINGS_SECTIONS)
+    dead: list[str] = []
+    for key, value in data.items():
+        if key in RAW_CONSUMED_SECTIONS:
+            continue
+        if isinstance(value, dict):
+            for sub in value:
+                if f"{key}.{sub}" not in bridged:
+                    dead.append(f"{key}.{sub}")
+        elif key not in bridged:
+            dead.append(key)
+    assert not dead, f"示例配置里的死键（改了静默不生效）: {sorted(dead)}"
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end config load
 # --------------------------------------------------------------------------- #

@@ -36,6 +36,10 @@ from app.retry.policy import RetryPolicy
 # Settings <-> config.yaml bridging
 # --------------------------------------------------------------------------- #
 #: ``config.yaml`` path -> Settings field. Environment variables always win.
+#: section 为空串 = 顶层标量键（watch_config 这类），其余是「段.键」。
+#: **config.example.yaml 里出现的每个键都必须在这里或 RAW_CONSUMED_SECTIONS
+#: 登记**——tests/test_config.py 的守卫逐键核对，漏登记 = 死键（改了静默
+#: 不生效）。历史上 deploy.burner_dir / watch_config 就是这么漏掉的。
 _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     "app.name": ("app", "app_name"),
     "app.environment": ("app", "environment"),
@@ -52,11 +56,16 @@ _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     #: 网关按它的一半发 SSE 注释行 `: ping`，把「上游在长时间思考」和
     #: 「连接已死」区分开（2026-11-13，之前这个字段是死配置）。0 = 关闭心跳。
     "request.stream_idle_timeout": ("request", "stream_idle_timeout"),
+    "request.sse_comment_user_agents": ("request", "sse_comment_user_agents"),
     "request.default_max_tokens": ("request", "default_max_tokens"),
     # 2026-09-28：补上桥接。AGENTS.md 记着 ZKAI_MAX_REQUEST_BODY /
     # ZKAI_MAX_INPUT_TOKENS 没有桥接的坑——改 config.yaml 静默无效，用户只能
     # 改 .env。新的 config.yaml 键一律同时登记在这里，别再犯第二次。
     "request.trim_history_tokens": ("request", "trim_history_tokens"),
+    # 2026-11-19：这两道闸此前只有环境变量入口，config.yaml 写了也不认；
+    # 补桥接后随 reload 热更新（scheduler 每次请求重新读它们）。
+    "request.max_input_tokens": ("request", "max_input_tokens"),
+    "request.max_request_seconds": ("request", "max_request_seconds"),
     "health_check.mode": ("health_check", "health_check_mode"),
     "health_check.interval_seconds": ("health_check", "health_check_interval"),
     "health_check.on_startup": ("health_check", "health_check_on_startup"),
@@ -65,7 +74,28 @@ _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     # 部署形态：公网入口 + 形态标签。缺失 = 本机部署，回落到 host:port。
     "deploy.public_base_url": ("deploy", "public_base_url"),
     "deploy.exposure": ("deploy", "exposure"),
+    # 消耗器账本目录：示例文件早就声明了这个键，桥接却一直没登记——
+    # 服务器上照着示例改 config.yaml 静默无效（2026-11-19 审查发现）。
+    "deploy.burner_dir": ("deploy", "burner_dir"),
+    # 顶层标量：配置监听开关与轮询间隔（启动期生效，reload 会报告需重启）。
+    "watch_config": ("", "watch_config"),
+    "watch_config_interval": ("", "watch_config_interval"),
 }
+
+#: 不走 Settings 桥接、由代码直接读 ``config.raw`` 的顶层段。
+#: 守卫测试用它核对 config.example.yaml 的每个键都有消费方。
+RAW_CONSUMED_SECTIONS: frozenset[str] = frozenset(
+    {
+        "providers",
+        "providers_data",
+        "models",
+        "aliases",
+        "retry",
+        "cooldown",
+        "credential_affinity",
+        "credential_rotation",
+    }
+)
 
 
 def _env_precedence_set(field: str) -> bool:
@@ -77,15 +107,22 @@ def apply_settings_from_yaml(settings: Settings, data: dict[str, Any]) -> Settin
     """Overlay ``config.yaml`` sections onto *settings* (env vars take priority)."""
     updates: dict[str, Any] = {}
     for path, (section, field_name) in _SETTINGS_SECTIONS.items():
-        block = data.get(section)
-        if not isinstance(block, dict):
-            continue
-        key = path.split(".", 1)[1]
-        if key not in block:
-            continue
+        if section == "":
+            # 顶层标量键（watch_config / watch_config_interval）。
+            if path not in data:
+                continue
+            value = data[path]
+        else:
+            block = data.get(section)
+            if not isinstance(block, dict):
+                continue
+            key = path.split(".", 1)[1]
+            if key not in block:
+                continue
+            value = block[key]
         if _env_precedence_set(field_name):
             continue
-        updates[field_name] = block[key]
+        updates[field_name] = value
     if not updates:
         return settings
     validated = Settings(**{**settings.model_dump(), **updates})

@@ -698,7 +698,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 66 个测试模块，1448 个用例，全部 Mock
+├── tests/                # conftest + 66 个测试模块，1468 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -706,9 +706,19 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 123 个文件约 34,642 行，`tests/` 66 个测试模块 1448 个用例（约 25,419 行），
-`scripts/` 23 个文件约 6,747 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
+规模：`app/` 123 个文件约 35,020 行，`tests/` 66 个测试模块 1468 个用例（约 26,009 行），
+`scripts/` 23 个文件约 6,748 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
+数字更新至 2026-11-19：第一性原理审查后的四类修复——①客户端 `max_tokens` 截断
+保护统一到适配器基类 `_clamped_max_tokens`（Anthropic/Gemini/Ollama 补齐，
+此前只有 OpenAI 兼容路径有）；②热加载完整性重构：可热更字段原地生效
+（含 retry:/request:/credential_rotation: 段），启动期字段点名「需重启」
+（reload 返回值与 `/health` 的 `restart_required`，控制台「需要处理」面板有行）；
+③修死键（`deploy.burner_dir`、顶层 `watch_config*` 补桥接，`request` 两守卫
+补 YAML 入口），立「示例键必有消费方」「Settings 字段必须分类」两条守卫；
+④SSE 注释行 UA 白名单可配置（`request.sse_comment_user_agents`，可热更）。
+另把 conftest 的 .env 隔离清单改为从真实 .env 自动推导（手写清单漏项的同型坑）。
+补 14 条回归，用例 1454 → 1468。详见 `docs/审查报告-20261119.md`。
 数字更新至 2026-11-11：新增三个测试模块（CLI 模型清单「只有实测算数」、
 额度 429 等重置点、独立脚本必须打 `/zkadmin`），统一前端设计 token 源，
 把执行体模型实测结论落盘持久化，并补 13 条守卫（快照 5 条 + 上下文窗口 /
@@ -795,7 +805,7 @@ credential_rotation: priority   # priority | round_robin | weighted | least_fail
 retry:
   max_retries_per_credential: 2
   max_credentials_per_deployment: 3
-  max_deployments: 3
+  max_deployments: 8            # ≥ 最长别名链的部署数，否则尾部部署进不了计划
   max_total_attempts: 8         # 单请求硬顶
   stream_open_retries: 1
   attempt_timeout_floor: 20.0   # 单次尝试的时间片下限（秒）；0=关闭，见 §3.5
@@ -819,8 +829,8 @@ cooldown:                       # 凭据冷却（秒）
   deployment_cooldown: 30
   jitter: 0.15                  # ±15%，避免全池锁步复活
   throttle_scopes:              # 429 的冷却覆盖范围（按 ThrottleKind）
-    quota: provider             #   额度用尽：整供应商一起冷 + 换部署
-    throughput: provider        #   tpm 打满：桶账号间共享，扫兄弟 Key 无意义
+    quota: account              #   额度用尽：按账号冷（商汤额度按账号算）
+    throughput: credential      #   tpm：按 Key 冷，让兄弟 Key 继续被试
     frequency: credential       #   rpm/rps：按 Key 计（NVIDIA 40rpm）
     unknown: credential         #   认不出来：维持旧的逐把行为
 security:
@@ -1453,7 +1463,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1448 个用例，全部通过，零网络、零真实配额。**
+**1468 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

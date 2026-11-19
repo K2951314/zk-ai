@@ -35,9 +35,8 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   （坑：`max_tokens=1` 会误杀所有推理模型，实测 16/39）。
   另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
   （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
-  第五份 `docs/排查过程详述.md`（2026-11-13 拆出）：「已知坑」里七条最长的
-  **逐项排除过程**（.env 的 `\r\r\n`、reload 漏冷却策略、413 双闸、Codex 截图丢失、
-  `~/.codex/config.toml` 外科 patch、token 低估 2.67 倍、uv trampoline）。
+  第五份 `docs/排查过程详述.md`（2026-11-13 拆出、2026-11-19 扩充）：「已知坑」里
+  七条最长的**逐项排除过程** + **入站断连四根因的定位过程与实现坑** + mixin 搬运坑。
   AGENTS.md 里保留结论与索引，**排查同类问题时才翻这份**。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
   中间态及时删——堆到 18 个时已经分不清哪个能回滚。
@@ -170,20 +169,22 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
     `last_error`，改好后自动接上。`ZKAI_WATCH_CONFIG` / `ZKAI_WATCH_CONFIG_INTERVAL` 可控。
     `/health` 暴露 `config_watch`，控制台状态行显示「配置自动生效（已自动 reload N 次）」。
     纯标准库 stat 轮询（不引 watchdog/inotify），监听名单 = loader 真正读过的文件（不是 glob）。
-- **`config.yaml` 的 `deploy:` 段不参与热加载**（2026-10-26 实测）：`reload_config`
-  只重建 router / 别名 / 凭据 / 冷却策略，`load_app_config(self.settings)` 返回的
-  新 Settings **没有写回 container**，所以改 `deploy.public_base_url` / `exposure`
-  仍要重启网关——热加载日志会显示成功，`/health` 却还是旧值。启动期设置
-  （host/port/log/db 一类）同理，别把「已自动 reload N 次」当成所有段都生效。
-- **`retry:` 段同样不参与热加载**（2026-11-16 实测，同型缺口）：
-  `Scheduler.policy` 只在 `__init__` 里 `policy or RetryPolicy()` 设一次，
-  `reload_config()` 不重建 scheduler。所以改 `max_credentials_per_deployment`
-  这类**不会生效**——而且不会报错。改完必须 `systemctl restart zkai`。
-  判断办法：`/health` 的 reload_count 会 +1（假象），要看实际行为或重启。
-  ⚠ 顺带两条：①`only_leg` 会让「指定具体模型且只有一个部署」的请求扫完整池，
-  这是 2026-11-13 的正确设计，不是上限没生效；②该值曾在本机修到 3、服务器
-  却遗留 9（实测单请求 attempts=26 扫 11 把、`no_available_credential`
-  latency 恒 0.0ms），换服务器后要专门核对这一项。
+- **热加载完整性（2026-11-19 重构，取代「deploy:/retry: 段不热加载」两条旧坑）**：
+  `reload_config` 现在逐字段比对 Settings：`RUNTIME_RELOADABLE_FIELDS` 里的
+  **原地 setattr 到同一个 Settings 对象**（持有引用的服务一起看到新值），并重建
+  `scheduler.policy`（retry: 段）/调度器旋钮/`request_service.trim_history_tokens`/
+  `pool.set_rotation`（credential_rotation: 段）。`STARTUP_ONLY_FIELDS`
+  （host/port/db/log/两个并发闸/max_request_body_mb/watch_config）改了**不应用**，
+  在 reload 返回值与 `/health` 的 `config.restart_required` 点名「需重启」，
+  控制台「需要处理」面板有对应行。两集合必须覆盖全部字段（test_config.py 守卫），
+  新字段不分类就红。顺带修掉死键：`deploy.burner_dir`、顶层 `watch_config`/
+  `watch_config_interval` 曾在示例里声明却没桥接；`request.max_input_tokens`/
+  `max_request_seconds` 补桥接。**死键守卫** `test_every_example_config_key_is_consumed`
+  逐键核对 config.example.yaml 都有消费方。测试注意：容器级测试要挡
+  `load_dotenv_file`（真实 .env 的 ZKAI_* 会按「环境变量优先」契约盖掉 YAML）。
+  ⚠ 保留旧结论两条：①`only_leg` 让「指定模型且只有一个部署」的请求扫完整池，
+  是 2026-11-13 的正确设计，不是上限没生效；②`max_credentials_per_deployment`
+  曾本机 3、服务器遗留 9（attempts=26 扫 11 把），换服务器后专门核对。
 - **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
   「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
   只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
@@ -581,36 +582,26 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
 - **并发测试夹具要加锁**（2026-11-04）：`ask_batch` 的 `stub_post` 是多线程共写的 list，
   裸 `append` 撞出顺序错——单跑必绿、全量偶红，最能骗人的那种。已加 `threading.Lock`。
 
-## 入站断连：「总是在中途断开」的四个根因（2026-11-13 实测定位）
+## 入站断连：「总是在中途断开」的四个根因（2026-11-13 实测定位，全部已修）
 
-背景：运营者反馈「ds harness / 其它 AI 工具调网关总是断开，只有 Claude Code 最好」。
-29 万行 gateway.log + `data/zkai.db` 交叉核对后，**不是路由层的问题**：
-`zk-auto` 6749 次请求只失败 1 次、`step-5-preview` 4452 次零失败。四处根因全部已修，
-都用真机验证过。
-
-- **① `/v1` 流式没有空闲心跳**（主因）。三条路径都写成
-  `asyncio.wait({next_task, watcher})`——**没有 timeout**，上游静默时循环挂住、
-  客户端一个字节都收不到，长静默后判连接失败。现在按 `request.stream_idle_timeout`
-  （默认 120s）**一半**发 SSE 注释行 `: ping`：SDK 与 ds harness 都按规范忽略 `:`
-  开头的行（零兼容风险），有数据流动时完全不发。
-  ⚠ `stream_idle_timeout` 此前**是死配置**（读进 Settings 但全仓零引用、无 YAML 桥接，
-  改 config.yaml 静默无效）——已补桥接，`test_config.py::test_stream_idle_timeout_is_bridged_from_yaml` 钉住。
-  ⚠ 两个坑都踩过：**在飞的 `anext` 必须跨心跳保持同一个 task**（每轮新建会报
-  `anext(): asynchronous generator is already running`）；**发完一格必须把 event
-  置空**（否则心跳会重发同一个 chunk，实测 part0 被吐 5 次）。
-- **② `max_credentials_per_deployment=3` 对单腿模型是致命的**。`kimi-k3` 只有一个
-  部署（sensenova，9 把 Key），截 3 把 = 6 把从未被试，连撞 3 次 429 整条请求就失败。
-  **让渡的前提是「还有别的腿可退」**，只剩一条时让渡 = 必然失败。已加
-  `_is_only_fallible_leg`：链上最后一条可用腿可扫完整个池。真机验证：修复前 429，
-  修复后 9 把全试、其中一把恢复、返回 200。
-- **③ 429 不带 `Retry-After`**。商汤的 429 正文只有 `inference exceeds tpm/rpm limit`，
-  既无秒数也无头，客户端只能瞎撞。现在 `_exhausted` 在「上游没给 + 是 throttle」时用
-  **我们自己算的冷却时长**兜底（确定值，不告诉客户端等于浪费）。真机：`Retry-After: 1` / `60`。
-- **④ `responses` 路径连断连检测都没有**。客户端走了，上游连接要跑到下一个 chunk
-  才回收。已补 watcher（与 chat / messages 同一套）。
+29 万行日志 + DB 交叉核对：**不是路由层的问题**（`zk-auto` 6749 次请求只失败 1 次）。
+四个根因与修法：①`/v1` 流式没有空闲心跳 → 按 `request.stream_idle_timeout`（默认
+120s）**一半**发 SSE 注释行 `: ping`，有数据流动时不发；②`max_credentials_per_deployment=3`
+对单腿模型致命（让渡的前提是还有别的腿可退）→ 链上最后一条可用腿可扫完整池
+（`_is_only_fallible_leg`）；③429 不带 `Retry-After` → 用我们自己算的冷却时长兜底；
+④`responses` 路径没有断连检测 → 补 watcher（与 chat/messages 同一套）。
+**定位过程、实测数字与两个实现坑（在飞 `anext` 跨心跳保持同一 task；发完一格
+必须把 event 置空）详见 `docs/排查过程详述.md`**——动流式循环前先翻。
 
 **三条流式路径现在结构一致**，改一条时另外两条要同步——不一致本身就是 bug 源。
 `keepalive_interval()` 与 `SSE_PING` 定义在 `app/api/chat.py`，另外两处 import 复用。
+
+**2026-11-19 审查补的两条不变量**（都有回归测试）：①客户端 `max_tokens` 截断到
+部署 `max_output_tokens` 的保护在基类 `_clamped_max_tokens`，四个适配器
+（OpenAI 兼容/Anthropic/Gemini/Ollama）共用——11-18 只修了 OpenAI 路径，
+其余三家同款 400 漏洞仍在；②SSE 注释行 UA 白名单 = 内置名单（含 OpenAI SDK
+新旧两种 UA 写法）+ `request.sse_comment_user_agents` 配置追加（可热更），
+硬编码名单必然随客户端生态漂移。
 
 ### 还没做、别再拿它当「已修」
 
@@ -650,10 +641,8 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
   `service_session/loop/delegate/child.py` 是四个 mixin，`service_common.py`
   放共享常量与 `_Running`。**44 个方法体逐字节未改**（sha256 比对过），
   对调用方/测试/行为零影响。再往里加方法时按职责进对应 mixin，别再堆回门面。
-- **mixin 的两个搬运坑**（只有"逐字节搬"才暴露）：`@staticmethod` 与
-  `@dataclass(slots=True)` 装饰器在 `ast` 的 `node.lineno` **之前**，
-  按行号取源码会丢；方法名搬走后 `monkeypatch.setattr("...service.run_delegation")`
-  会失效——改测试指向真实模块（`service_delegate`），**别做 re-export 骗人**。
+- **mixin 搬运的两个坑**（装饰器在 ast lineno 之前、monkeypatch 要指向真实模块
+  别做 re-export）见 `docs/排查过程详述.md`，再做同类搬运时才翻。
 - **mypy 需要类型声明**：mixin 组合后静态检查器看不到 `self` 成员，
   在每个 mixin 里用 `if TYPE_CHECKING:` 写类级注解（运行期零开销）。
 - **burner 配置键是单一来源 `config/burner_keys.json`**：脚本

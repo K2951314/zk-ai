@@ -253,7 +253,7 @@ class GeminiAdapter(ProviderAdapter):
             config["topP"] = request.top_p
         if request.top_k is not None:
             config["topK"] = request.top_k
-        max_tokens = request.effective_max_tokens or deployment.max_output_tokens
+        max_tokens = self._clamped_max_tokens(request, deployment) or deployment.max_output_tokens
         if max_tokens:
             config["maxOutputTokens"] = int(max_tokens)
         stop = request.stop

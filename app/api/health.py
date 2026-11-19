@@ -85,6 +85,9 @@ async def health(container: ContainerDep) -> dict:
             # 凭据要读的 Key 不在 .env 里：本机好用，换机会静默丢掉
             # （2026-09-29 的 SENSENOVA_API_KEY）。此刻不报，换机那天才报就晚了。
             "credential_env_gaps": _credential_env_gaps(container),
+            # 文件里改了、但只能重启才生效的设置字段（host/port/数据库等）。
+            # reload 对它们是「点名报告」而不是假装生效——这里让运营者看见。
+            "restart_required": list(container.pending_restart_fields),
         },
     }
 

@@ -421,7 +421,8 @@ async def test_streaming_skips_zkai_meta_for_workbuddy(api) -> None:
     """WorkBuddy 桌面版把 `:` 注释行当正文显示，对它发 zkai-meta = 污染输出。
 
     只有白名单内的客户端（codex / ds-harness / OpenAI SDK）才收 zkai-meta；
-    WorkBuddy / 未知 UA 不收——meta 信息已经通过 x-zkai-* HTTP 响应头传递。
+    WorkBuddy / 未知 UA 不收——meta 的 provider/model 等字段只在这条注释行里，
+    流式响应头带不了（body 开始后才产生），所以这是合规客户端专属的补充信息。
     """
     client, harness = api
     harness.adapter.queue(Behavior(text="ignored", chunks=2, prompt_tokens=4, completion_tokens=6))
@@ -434,6 +435,26 @@ async def test_streaming_skips_zkai_meta_for_workbuddy(api) -> None:
     _, comments, _ = await parse_sse(response.text)
     assert not any(c.startswith("zkai-meta") for c in comments), \
         "WorkBuddy 不应收到 zkai-meta 注释行"
+
+
+async def test_streaming_sends_zkai_meta_to_new_openai_sdk(api) -> None:
+    """新版 OpenAI SDK 的真实 UA（Stainless 风格）必须命中白名单。
+
+    回归守卫：旧实现只写了连字符写法（openai-python/openai-node），
+    新版 UA 是 `OpenAI/Python 1.x` / `OpenAI/JS 4.x`（斜杠+空格），
+    命中不了 → 合规 SDK 反而收不到心跳和 zkai-meta（2026-11-19 修）。
+    """
+    client, harness = api
+    harness.adapter.queue(Behavior(text="ignored", chunks=2, prompt_tokens=4, completion_tokens=6))
+    response = await client.post(
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True},
+        headers={"User-Agent": "OpenAI/Python 1.55.0"},
+    )
+    assert response.status_code == 200
+    _, comments, _ = await parse_sse(response.text)
+    assert any(c.startswith("zkai-meta") for c in comments), \
+        "新版 OpenAI Python SDK 应收到 zkai-meta 注释行"
 
 
 async def test_streaming_usage_only_with_stream_options(api) -> None:
@@ -487,16 +508,68 @@ def test_keepalive_interval_skips_clients_that_display_ping_as_content() -> None
     只有白名单里的客户端（Codex / ds-harness / OpenAI SDK）才发心跳；
     未知 UA 和 WorkBuddy / Anthropic SDK 默认不发——安全侧。
     """
-    # 白名单里的客户端照常发
+    # 白名单里的客户端照常发（含新版 + 旧式两种 OpenAI SDK UA 写法）
     assert keepalive_interval(120.0, user_agent="codex_exec/0.164.0") == 60.0
     assert keepalive_interval(120.0, user_agent="ds-harness/1.0") == 60.0
     assert keepalive_interval(120.0, user_agent="OpenAI-Python/1.0") == 60.0
+    assert keepalive_interval(120.0, user_agent="OpenAI/Python 1.55.0") == 60.0
+    assert keepalive_interval(120.0, user_agent="OpenAI/JS 4.104.0") == 60.0
+    assert keepalive_interval(120.0, user_agent="openai-node/4.0.0") == 60.0
     # 不在白名单里 → 不发（WorkBuddy、Anthropic SDK、浏览器、未知 UA）
     assert keepalive_interval(120.0, user_agent="WorkBuddy/5.9.3") is None
     assert keepalive_interval(120.0, user_agent="anthropic-sdk/0.3") is None
     assert keepalive_interval(120.0, user_agent="Mozilla/5.0") is None
     assert keepalive_interval(120.0, user_agent=None) is None
     assert keepalive_interval(120.0, user_agent="") is None
+
+
+def test_extra_ua_keywords_extend_the_whitelist_without_code_changes() -> None:
+    """配置追加名单：新客户端不用改代码就能收心跳（2026-11-19）。
+
+    硬编码名单必然随客户端生态漂移——新版 OpenAI SDK 的 UA 写法变化刚暴露
+    过一次。``request.sse_comment_user_agents`` 让运营者改配置即可追加；
+    内置名单永远生效，追加只做加法。
+    """
+    from app.api.chat import extra_sse_ua_keywords, wants_sse_comments
+
+    # 解析：逗号分隔、去空白、小写化、丢空项
+    assert extra_sse_ua_keywords(" MyClient , Other/SDK ,, ") == ("myclient", "other/sdk")
+    assert extra_sse_ua_keywords("") == ()
+    assert extra_sse_ua_keywords(None) == ()
+
+    extras = extra_sse_ua_keywords("myclient")
+    # 追加的 UA 命中；内置名单不受影响；没追加的未知 UA 仍不发
+    assert keepalive_interval(120.0, user_agent="MyClient/2.0", extra_keywords=extras) == 60.0
+    assert keepalive_interval(120.0, user_agent="codex_exec/0.1", extra_keywords=extras) == 60.0
+    assert keepalive_interval(120.0, user_agent="WorkBuddy/5.9.3", extra_keywords=extras) is None
+    assert wants_sse_comments("MyClient/2.0", extras) is True
+    assert wants_sse_comments("Mozilla/5.0", extras) is False
+
+
+async def test_configured_extra_ua_receives_zkai_meta(api) -> None:
+    """配置追加的 UA 必须真的收到 zkai-meta 注释行（端到端）。"""
+    client, harness = api
+    # 模拟热更新后的配置：API 层每次请求重新读 container.settings
+    harness.container.settings.sse_comment_user_agents = "myclient"
+    harness.adapter.queue(Behavior(text="ignored", chunks=2, prompt_tokens=4, completion_tokens=6))
+    response = await client.post(
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True},
+        headers={"User-Agent": "MyClient/2.0"},
+    )
+    assert response.status_code == 200
+    _, comments, _ = await parse_sse(response.text)
+    assert any(c.startswith("zkai-meta") for c in comments), "配置追加的 UA 应收到 zkai-meta"
+
+    # 不合规客户端依旧被保护：追加名单不影响 WorkBuddy 的排除
+    harness.adapter.queue(Behavior(text="ignored", chunks=2, prompt_tokens=4, completion_tokens=6))
+    response = await client.post(
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True},
+        headers={"User-Agent": "WorkBuddy/5.9.3"},
+    )
+    _, comments, _ = await parse_sse(response.text)
+    assert not any(c.startswith("zkai-meta") for c in comments), "WorkBuddy 不应收到 zkai-meta"
 
 
 async def test_silent_upstream_emits_keepalive_pings(api, monkeypatch) -> None:

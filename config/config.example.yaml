@@ -49,8 +49,21 @@ request:
   # 一个字节都不发，ds harness / Codex 会判连接失败并断开。
   # 0 = 关闭心跳。改这里即可生效（已登记进 loader 的桥接表，不用改 .env）。
   stream_idle_timeout: 120
+  # 追加「能收 SSE 注释行（心跳 / zkai-meta）」的客户端 UA 关键词，逗号分隔、
+  # 大小写不敏感。内置名单（codex / ds-harness / OpenAI SDK 新旧 UA 写法）
+  # 永远生效，这里只追加：新客户端出现时改这一行即可，不用改代码重启。
+  # 留空 = 只用内置名单。未知 UA 默认不发注释行（不合规客户端会把它当正文）。
+  sse_comment_user_agents: ""
   # 客户端没有传 max_tokens 时使用的兜底值
   default_max_tokens: 1024
+  # 估算 input token 的硬上限（0 = 关闭）。超限直接返回可读错误，不发上游。
+  # 字节闸（ZKAI_MAX_REQUEST_BODY_MB）只看 content-length 首部，chunked 上传
+  # 会绕过它；这道闸按 token 算，是真正的上下文护栏。改完随 reload 热生效。
+  max_input_tokens: ${ZKAI_MAX_INPUT_TOKENS:-0}
+  # 单次客户端请求的墙钟预算（秒），0 = 关闭。次数上限管不住「每次尝试都
+  # 没超、累计十几分钟」的形状，这道闸管。默认 300 = 现役最大上游超时留余量，
+  # 一次成功的慢生成不会被误杀。改完随 reload 热生效。
+  max_request_seconds: ${ZKAI_MAX_REQUEST_SECONDS:-300}
   # 历史裁剪预算（估算 tokens）。0 = 关闭。
   # zk-auto / Codex 客户端每轮重发整段对话，turn 30 要为 turn 1..29 再付一遍，
   # 而实测 84% 的工具轮是再也不会被引用的 ack/diff/status 机械轮。开启后
@@ -100,6 +113,7 @@ credential_affinity:
 # ---------------------------------------------------------------------------
 # 重试与故障转移策略。每个开关都有上限，调度器绝不会无限循环
 # （max_total_attempts 是一次客户端请求的绝对尝试次数上限）。
+# 本段随 reload 热生效（2026-11-19 起）：改完不用重启网关。
 # ---------------------------------------------------------------------------
 retry:
   # 对「同一把 Key」的重试次数（指数退避 + 抖动）

@@ -201,6 +201,64 @@ class TestMaxTokensClamping:
         payload, _ = adapter.build_payload(request, self._DEPLOY)
         assert payload["max_tokens"] == 8192
 
+    def test_anthropic_clamps_over_limit_too(self) -> None:
+        """同一条不变量必须覆盖 Anthropic 适配器（2026-11-19 审查补）。
+
+        截断保护原来只写在 OpenAI 兼容路径；Anthropic 的 max_tokens 是必填
+        字段，客户端超限值原样透传同样会被上游 400。收敛到基类后这里钉住。
+        """
+        from app.models.request import ChatCompletionRequest
+        from app.providers.anthropic import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            ProviderConfig(id="anthropic", type="anthropic", base_url="https://api.anthropic.com")
+        )
+        request = ChatCompletionRequest(
+            model="claude", messages=[{"role": "user", "content": "hi"}], max_tokens=200000
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["max_tokens"] == 65536
+
+    def test_gemini_clamps_over_limit_too(self) -> None:
+        from app.models.request import ChatCompletionRequest
+        from app.providers.gemini import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            ProviderConfig(id="gemini", type="gemini", base_url="https://generativelanguage.googleapis.com")
+        )
+        request = ChatCompletionRequest(
+            model="gemini", messages=[{"role": "user", "content": "hi"}], max_tokens=200000
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["generationConfig"]["maxOutputTokens"] == 65536
+
+    def test_ollama_clamps_over_limit_too(self) -> None:
+        from app.models.request import ChatCompletionRequest
+        from app.providers.ollama import OllamaAdapter
+
+        adapter = OllamaAdapter(
+            ProviderConfig(id="ollama", type="ollama", base_url="http://127.0.0.1:11434")
+        )
+        request = ChatCompletionRequest(
+            model="llama", messages=[{"role": "user", "content": "hi"}], max_tokens=200000
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["options"]["num_predict"] == 65536
+
+    def test_zero_falls_back_on_anthropic(self) -> None:
+        """0/负数在 Anthropic 侧也要回退（必填字段不能发 0）。"""
+        from app.models.request import ChatCompletionRequest
+        from app.providers.anthropic import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            ProviderConfig(id="anthropic", type="anthropic", base_url="https://api.anthropic.com")
+        )
+        request = ChatCompletionRequest(
+            model="claude", messages=[{"role": "user", "content": "hi"}], max_tokens=0
+        )
+        payload, _ = adapter.build_payload(request, self._DEPLOY)
+        assert payload["max_tokens"] == 65536
+
 
 class TestReasoningOnlyStreaming:
     """Streaming must not silently deliver nothing when a provider streams

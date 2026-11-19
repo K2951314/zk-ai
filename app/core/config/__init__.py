@@ -33,6 +33,7 @@ from app.core.config.env_health import (
 )
 from app.core.config.loader import (
     _SETTINGS_SECTIONS,
+    RAW_CONSUMED_SECTIONS,
     apply_db_overrides,
     apply_settings_from_yaml,
     get_app_config,
@@ -42,6 +43,8 @@ from app.core.config.loader import (
 )
 from app.core.config.settings import (
     PROJECT_ROOT,
+    RUNTIME_RELOADABLE_FIELDS,
+    STARTUP_ONLY_FIELDS,
     Settings,
     deep_merge,
     interpolate_env,
@@ -50,6 +53,9 @@ from app.core.config.settings import (
 
 __all__ = [
     "PROJECT_ROOT",
+    "RAW_CONSUMED_SECTIONS",
+    "RUNTIME_RELOADABLE_FIELDS",
+    "STARTUP_ONLY_FIELDS",
     "_SETTINGS_SECTIONS",
     "AppConfig",
     "Settings",

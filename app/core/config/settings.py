@@ -157,6 +157,12 @@ class Settings(BaseSettings):
 
     request_timeout: float = 120.0
     stream_idle_timeout: float = 120.0
+    #: 追加的「能收 SSE 注释行」客户端 UA 关键词（逗号分隔，大小写不敏感）。
+    #: 内置白名单（codex / ds-harness / OpenAI SDK 新旧两种 UA 写法）永远生效，
+    #: 这里只做**追加**：新客户端出现时运营者改 config.yaml 即可让它收到
+    #: 心跳与 zkai-meta，不用改代码重启（2026-11-19：新版 OpenAI SDK 的 UA
+    #: 写法变化刚暴露过「硬编码名单必然漂移」这类坑）。留空 = 只用内置名单。
+    sse_comment_user_agents: str = ""
     max_request_body_mb: float = 10.0
     #: 估算 input token 的硬上限（0 = 关闭）。超限直接返回可读错误，不发上游。
     #: 为什么要有它：``max_request_body_mb`` 是**字节**闸且只看 content-length
@@ -394,3 +400,85 @@ class Settings(BaseSettings):
             return url
         db_path = self.resolved_data_dir / "zkai.db"
         return f"sqlite+aiosqlite:///{db_path.as_posix()}"
+
+
+# --------------------------------------------------------------------------- #
+# Settings 字段的热更新分类（2026-11-19 审查）
+#
+# 背景：reload_config 曾只重建 router/凭据/冷却策略，**不更新 Settings、
+# 不重建 scheduler.policy**——于是 request: / retry: / admin: 等整段配置
+# 「自动 reload 成功」却静默不生效，与项目「改完 YAML 自动生效」的承诺相悖。
+# 修复方式：reload 把新 Settings 的字段逐一比对，能安全热更的**原地 setattr
+# 到同一个 Settings 对象**（所有持有引用的服务自动看到新值），不能热更的
+# 点名「需要重启」。两个集合必须覆盖全部字段——test_config.py 有守卫钉住，
+# 新增字段不分类就红，杜绝「又一个静默不生效的键」。
+# --------------------------------------------------------------------------- #
+#: 运行期可热更：消费方在每次请求/每个周期重新读它（而不是构造时捕获成
+#: 别的对象）。原地更新同一个 Settings 实例即可传播到全部持有者。
+RUNTIME_RELOADABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "app_name",
+        "public_base_url",
+        "exposure",
+        "burner_dir",
+        "admin_enabled",
+        "admin_token",
+        "api_token",
+        "request_timeout",
+        "stream_idle_timeout",
+        "sse_comment_user_agents",
+        "max_input_tokens",
+        "max_request_seconds",
+        "trim_history_tokens",
+        "forward_images",
+        "default_max_tokens",
+        "health_check_mode",
+        "health_check_interval",
+        "health_check_on_startup",
+        "health_check_timeout",
+        "allow_inline_secrets",
+        "strip_reasoning",
+        "anthropic_default_model",
+        "agent_enabled",
+        "agent_workspace",
+        "agent_default_model",
+        "agent_max_steps",
+        "agent_command_timeout",
+        "agent_context_token_limit",
+        "agent_max_depth",
+        "agent_max_live_children",
+        "agent_role_aliases",
+        "agent_task_space",
+        "agent_permission_mode",
+        "events_enabled",
+        "events_claim_timeout",
+        "events_max_wait",
+        "events_max_attempts",
+        "events_max_hops",
+        "events_retention_days",
+    }
+)
+
+#: 只在进程启动时生效：监听地址/数据库/日志形态在启动期绑定；
+#: max_request_body_mb 被捕获进 app.state；两个并发闸被捕获成 Semaphore；
+#: watch_config 决定监听器是否创建。reload 发现它们变了只报告「需要重启」，
+#: 绝不假装已生效。
+STARTUP_ONLY_FIELDS: frozenset[str] = frozenset(
+    {
+        "version",
+        "environment",
+        "host",
+        "port",
+        "log_level",
+        "log_json",
+        "config_dir",
+        "data_dir",
+        "database_url",
+        "db_echo",
+        "max_request_body_mb",
+        "watch_config",
+        "watch_config_interval",
+        "agent_max_concurrent",
+        "agent_max_children_total",
+    }
+)

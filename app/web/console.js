@@ -459,6 +459,15 @@ function attentionPanel(providers, warnings, config) {
     ].join("\n"),
   }));
   rows.push(...gapRows);
+  // 文件里改了、但只能重启才生效的设置字段（host/port/数据库等）。
+  // reload 对它们是「点名报告」而不是假装生效——这里让运营者看见并一键重启。
+  const restartFields = cfg.restart_required || [];
+  if (restartFields.length) {
+    rows.push({
+      level: "warn", fix: "restart", label: "🔁 重启网关",
+      msg: `${esc(restartFields.join("、"))} 已在配置文件里改动，但需重启网关才生效（热重载不覆盖这些字段）`,
+    });
+  }
   if (!rows.length) return "";
 
   const worst = rows.reduce((acc, r) =>
@@ -469,7 +478,7 @@ function attentionPanel(providers, warnings, config) {
     ${rows.map((r, i) => `<div class="att-row">
       <span class="att-ico">${r.level === "err" ? "⛔" : "⚠️"}</span>
       <span class="att-msg">${r.msg}</span>
-      ${r.fix === "warm"
+      ${!r.fix ? "" : r.fix === "warm"
         ? `<button class="mini" data-fix="warm">🔥 清冷却</button>`
         : `<button class="mini primary" data-fix="${r.fix}" data-pid="${esc(r.pid || "")}">${r.label}</button>`}
     </div>${r.cmd
@@ -654,6 +663,7 @@ async function loadOverview() {
       toast(`已解除 ${r.cleared} 把凭据的冷却`, "ok");
       refresh();
     }
+    else if (b.dataset.fix === "restart") restartGateway();
   });
   $("#ov-health").onclick = async e => {
     e.target.disabled = true;
@@ -671,9 +681,15 @@ async function loadOverview() {
   };
   $("#ov-reload").onclick = async () => {
     const r = await api("/admin/config/reload", { method: "POST" });
-    toast(`配置已热重载：${r.models} 模型 / ${r.providers.length} 供应商`, "ok"); refresh();
+    const needRestart = (r.restart_required || []).length;
+    toast(
+      `配置已热重载：${r.models} 模型 / ${r.providers.length} 供应商` +
+      (needRestart ? `；另有 ${needRestart} 项设置需重启才生效` : ""),
+      needRestart ? "err" : "ok",
+    );
+    refresh();
   };
-  $("#ov-restart").onclick = async () => {
+  async function restartGateway() {
     if (!confirm("确定重启网关？（正在跑的请求可能中断，约 2–5 秒恢复）")) return;
     const r = await api("/admin/gateway/restart", { method: "POST" });
     if (r.error) { toast(r.error.message || "重启请求失败", "err"); return; }
@@ -681,7 +697,8 @@ async function loadOverview() {
     if (r.command) toast(`手动命令：${r.command}`, "err");
     // 网关重启后接口会短暂 502，延迟刷新
     setTimeout(() => refresh(), 4000);
-  };
+  }
+  $("#ov-restart").onclick = restartGateway;
   $("#ov-clear").onclick = async () => {
     const r = await api("/admin/credentials/cooldowns/clear", { method: "POST" });
     toast(`已解除 ${r.cleared} 把凭据的冷却`, "ok"); refresh();

@@ -596,3 +596,165 @@ async def test_column_migration_patches_a_pre_existing_database(tmp_path: Path) 
     finally:
         await db.dispose()
 
+
+# --------------------------------------------------------------------------- #
+# 热加载完整性（2026-11-19 审查）：retry / request / rotation 段与 Settings
+#
+# 事故形状：reload_config 只重建 router/凭据/冷却策略，container.settings
+# 永远是启动快照、scheduler.policy 只在 __init__ 设一次——于是这些段
+# 「自动 reload 成功」却静默不生效。AGENTS.md 曾把 retry/deploy 记成
+# 「必须重启」的坑；正确的修法是让能热更的全部热更，不能热更的点名报告。
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def no_operator_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """容器级测试不许读运营者的 .env。
+
+    ``load_app_config`` 每次都调 ``load_dotenv_file()`` 把真实 .env 灌进
+    os.environ；而「环境变量优先于 YAML」是产品契约——本机 .env 里的
+    ZKAI_MAX_INPUT_TOKENS / ZKAI_PORT 会让 YAML 桥接被静默跳过，测试失真。
+    这里把加载器置空 + 清掉相关变量，让测试只看得见自己写的 YAML。
+    """
+    import app.core.config.loader as loader_mod
+
+    monkeypatch.setattr(loader_mod, "load_dotenv_file", lambda *a, **k: False)
+    for name in (
+        "ZKAI_MAX_INPUT_TOKENS",
+        "ZKAI_MAX_REQUEST_SECONDS",
+        "ZKAI_REQUEST_TIMEOUT",
+        "ZKAI_STREAM_IDLE_TIMEOUT",
+        "ZKAI_PORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+_RETRY_A = """\
+retry:
+  max_credentials_per_deployment: 3
+  max_total_attempts: 8
+"""
+
+_RETRY_B = """\
+retry:
+  max_credentials_per_deployment: 5
+  max_total_attempts: 12
+"""
+
+
+async def test_editing_the_retry_section_reaches_the_scheduler(
+    tmp_path: Path, no_operator_dotenv: None
+) -> None:
+    """改 retry 段必须真的换掉调度器的策略对象（不用重启）。"""
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        (tmp_path / "config.yaml").write_text(_RETRY_A, encoding="utf-8")
+        await container.reload_config()
+        assert container.scheduler.policy.max_credentials_per_deployment == 3
+        old_policy = container.scheduler.policy
+
+        (tmp_path / "config.yaml").write_text(_RETRY_B, encoding="utf-8")
+        summary = await container.reload_config()
+
+        assert container.scheduler.policy.max_credentials_per_deployment == 5, (
+            "reload 之后 scheduler.policy 还是旧值——retry 段根本没被热更新"
+        )
+        assert container.scheduler.policy.max_total_attempts == 12
+        assert container.scheduler.policy is not old_policy, "要换对象，不是改旧对象的字段"
+        assert summary["reloaded"] is True
+    finally:
+        await container.shutdown()
+
+
+_REQUEST_A = """\
+request:
+  stream_idle_timeout: 120
+  timeout: 120
+  max_request_seconds: 300
+"""
+
+_REQUEST_B = """\
+request:
+  stream_idle_timeout: 240
+  timeout: 90
+  max_request_seconds: 600
+  max_input_tokens: 500000
+"""
+
+
+async def test_editing_request_settings_reaches_the_live_settings(
+    tmp_path: Path, no_operator_dotenv: None
+) -> None:
+    """改 request 段必须热更到**同一个** Settings 对象（所有持有者一起看到）。
+
+    只断言 container.settings 不够：API 层读的是它，而 agent/event 服务持有
+    的是自己的引用——换对象而非原地改，它们会继续读旧值。所以这里同时钉
+    「值变了」和「对象没换」。
+    """
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        (tmp_path / "config.yaml").write_text(_REQUEST_A, encoding="utf-8")
+        await container.reload_config()
+        live = container.settings
+        assert live.stream_idle_timeout == 120.0
+
+        (tmp_path / "config.yaml").write_text(_REQUEST_B, encoding="utf-8")
+        summary = await container.reload_config()
+
+        assert container.settings is live, "必须原地改同一个对象，不能换引用"
+        assert live.stream_idle_timeout == 240.0, "心跳基准没热更——流式断连修复会被静默绕过"
+        assert live.max_request_seconds == 600.0
+        assert live.max_input_tokens == 500000
+        # 调度器旋钮同步跟上（它捕获的是标量，不是 Settings 引用）
+        assert container.scheduler.request_timeout == 90.0
+        assert container.scheduler.max_request_seconds == 600.0
+        assert container.scheduler.max_input_tokens == 500000
+        assert "stream_idle_timeout" in summary["settings_applied"]
+        assert summary["restart_required"] == []
+    finally:
+        await container.shutdown()
+
+
+async def test_editing_credential_rotation_reaches_the_pool(
+    tmp_path: Path, no_operator_dotenv: None
+) -> None:
+    """改 credential_rotation 段必须真的换掉池子的轮换策略。"""
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        (tmp_path / "config.yaml").write_text(
+            "credential_rotation: priority\n", encoding="utf-8"
+        )
+        await container.reload_config()
+        assert container.pool.rotation_name == "priority"
+
+        (tmp_path / "config.yaml").write_text(
+            "credential_rotation: weighted\n", encoding="utf-8"
+        )
+        await container.reload_config()
+        assert container.pool.rotation_name == "weighted", "轮换策略没热更新"
+    finally:
+        await container.shutdown()
+
+
+async def test_startup_only_changes_are_reported_not_applied(
+    tmp_path: Path, no_operator_dotenv: None
+) -> None:
+    """host/port 这类启动期字段：reload 不假装生效，点名「需要重启」。
+
+    这是热加载完整性的另一半诚实：能热更的全部热更，不能热更的必须让
+    运营者看见——否则「reload 成功」会掩盖「改了 port 却没换监听」的假象。
+    """
+    container = await _container_with_cooldown(tmp_path)
+    try:
+        original_port = container.settings.port
+        (tmp_path / "config.yaml").write_text(
+            f"app:\n  port: {original_port + 1}\n", encoding="utf-8"
+        )
+        summary = await container.reload_config()
+
+        assert container.settings.port == original_port, "启动期字段不该被热改"
+        assert "port" in summary["restart_required"], "必须点名需要重启的字段"
+        assert "port" in container.pending_restart_fields
+        # /health 的 config.restart_required 读的就是这份名单
+        assert container.pending_restart_fields == summary["restart_required"]
+    finally:
+        await container.shutdown()
+

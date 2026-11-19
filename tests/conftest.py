@@ -523,14 +523,16 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 #: on nearly every API test). Env vars outrank pydantic's ``env_file``, so
 #: pointing ``env_file`` at an empty file is not enough -- these leak in and
 #: override the defaults the deploy/credential tests assert on.
-_LOCAL_DOTENV_DEPLOY_KEYS = (
-    "ZKAI_HOST",
-    "ZKAI_PORT",
-    "ZKAI_PUBLIC_BASE_URL",
-    "ZKAI_EXPOSURE",
-    "ZKAI_BURNER_DIR",
-    "ZKAI_DATABASE_URL",
-)
+#:
+#: 名单从**实际 .env 自动推导**（只取 ZKAI_* 键），不手写：手写清单曾漏掉
+#: ZKAI_MAX_INPUT_TOKENS / ZKAI_REQUEST_TIMEOUT，让热加载回归测试在本机
+#: 静默失真（2026-11-19 审查抓到）——与 AGENTS.md「守卫不要手写清单」同型。
+def _local_dotenv_deploy_keys() -> tuple[str, ...]:
+    from app.core.config import PROJECT_ROOT, env_file_names
+
+    return tuple(
+        sorted(n for n in env_file_names(PROJECT_ROOT / ".env") if n.startswith("ZKAI_"))
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -546,7 +548,7 @@ def _scrub_local_dotenv_from_environ(
     (via monkeypatch, so each test restores the prior state) keeps the suite
     independent of whichever server this developer box last talked to.
     """
-    for key in _LOCAL_DOTENV_DEPLOY_KEYS:
+    for key in _local_dotenv_deploy_keys():
         monkeypatch.delenv(key, raising=False)
     yield
 

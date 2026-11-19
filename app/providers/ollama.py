@@ -157,7 +157,7 @@ class OllamaAdapter(ProviderAdapter):
             options["seed"] = request.seed
         if request.stop:
             options["stop"] = [request.stop] if isinstance(request.stop, str) else request.stop
-        max_tokens = request.effective_max_tokens or deployment.max_output_tokens
+        max_tokens = self._clamped_max_tokens(request, deployment) or deployment.max_output_tokens
         if max_tokens:
             options["num_predict"] = int(max_tokens)
 
