@@ -263,15 +263,27 @@ async def drain_due_laters(client: httpx.AsyncClient) -> list[int]:
     return created
 
 
+#: 业务巡检写进 state 的键。``next_state`` 每轮**重建** state，必须显式继承，
+#: 否则这些键会被悄悄抹掉（2026-11-19 实测踩到：``business_probe_hour`` 丢失 →
+#: ``business_due`` 恒为 True → 每 60 秒轮询都跑一次 77 秒的 _health.py 并打一次
+#: 三菱 RPC；探针状态丢失还会让「首次观测」判定每轮成立，同一故障每轮重发）。
+_BUSINESS_STATE_KEYS = ("mitsubishi_canary", "smart_selection_freshness",
+                        "business_probe_hour")
+
+
 def next_state(
     snapshot: dict[str, Any], previous: dict[str, Any], events: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """算出下一轮的比较基线。"""
+    """算出下一轮的比较基线。
+
+    ⚠ 这是**整体替换**而不是合并：新增的 state 键必须加入 ``_BUSINESS_STATE_KEYS``
+    才会被继承。改这里之前先想清楚「这一轮的巡检结果下一轮还算不算数」。
+    """
     quarantined = snapshot.get("quarantined_deployments") or []
     providers = snapshot.get("providers") or {}
     config_block = snapshot.get("config") or {}
     degraded = snapshot.get("status") == "degraded"
-    return {
+    state = {
         "quarantine": sorted(
             str(item.get("deployment_id") or item.get("id") or item) for item in quarantined
         ),
@@ -281,6 +293,11 @@ def next_state(
         "checked_at": snapshot.get("uptime_seconds"),
         "event_count": int(previous.get("event_count") or 0) + len(events),
     }
+    # 继承业务巡检状态（见 _BUSINESS_STATE_KEYS 注释）
+    for key in _BUSINESS_STATE_KEYS:
+        if key in previous:
+            state[key] = previous[key]
+    return state
 
 
 def git_behind(repo: str) -> int | None:
@@ -317,6 +334,76 @@ def load_state(path: Path) -> dict[str, Any]:
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# 业务侧巡检（三菱金丝雀 / 数据新鲜度）
+# --------------------------------------------------------------------------- #
+#: 业务巡检间隔（小时）。库存金丝雀自带 6h 成功缓存，与这个节奏对齐；
+#: 数据新鲜度是「每天看一次就够」，6 小时也不会增加负担（脚本只读）。
+BUSINESS_PROBE_INTERVAL_HOURS = 6
+
+
+def _hour_bucket() -> int:
+    import time
+
+    return int(time.time() // 3600)
+
+
+def business_due(previous: dict[str, Any]) -> bool:
+    """这一轮该不该跑业务巡检（按小时桶，进程重启不会重复跑）。"""
+    last = previous.get("business_probe_hour")
+    if not isinstance(last, int):
+        return True
+    return _hour_bucket() - last >= BUSINESS_PROBE_INTERVAL_HOURS
+
+
+async def run_business_probes(
+    client: httpx.AsyncClient, previous: dict[str, Any], *, source: str
+) -> list[dict[str, Any]]:
+    """跑两条外部巡检并投递**状态变化**事件。返回投递成功的事件列表。
+
+    拿不到项目就静默跳过（``None``），但环境变量设了却无效要吵一声——
+    那是配置错误，不是「没装」。
+    """
+    try:
+        from scripts import signal_probes
+    except ImportError:  # 直接以脚本方式运行时 scripts 不是包
+        import signal_probes  # type: ignore[no-redef]
+
+    sent: list[dict[str, Any]] = []
+
+    # 三菱库存可用性
+    sq_root = signal_probes.resolve_sq_home()
+    if signal_probes.env_misconfigured("SQ_HOME", sq_root):
+        print("⚠ SQ_HOME 已设置但定位失败 —— 三菱巡检这一路跳过", flush=True)
+    elif sq_root is not None:
+        current = signal_probes.probe_mitsubishi(sq_root)
+        if current is not None:
+            event = signal_probes.mitsubishi_event(
+                current, previous.get(signal_probes.MITSUBISHI_KEY), source=source,
+            )
+            if event is not None:
+                await send(client, event)
+                sent.append(event)
+            previous[signal_probes.MITSUBISHI_KEY] = current
+
+    # smart-selection 数据新鲜度
+    ss_root = signal_probes.resolve_ss_home()
+    if signal_probes.env_misconfigured("SS_HOME", ss_root):
+        print("⚠ SS_HOME 已设置但定位失败 —— 新鲜度巡检这一路跳过", flush=True)
+    elif ss_root is not None:
+        current = signal_probes.probe_freshness(ss_root)
+        if current is not None:
+            event = signal_probes.freshness_event(
+                current, previous.get(signal_probes.FRESHNESS_KEY), source=source,
+            )
+            if event is not None:
+                await send(client, event)
+                sent.append(event)
+            previous[signal_probes.FRESHNESS_KEY] = current
+
+    return sent
 
 
 async def send(client: httpx.AsyncClient, event: dict[str, Any]) -> bool:
@@ -403,6 +490,20 @@ async def main_async(args: argparse.Namespace) -> int:
             burst = burst_probe(db_path)
             if burst is not None:
                 await send(client, burst_event(burst, source=args.source))
+            # 业务侧巡检（2026-11-19）：默认每 6 小时一轮，与 /health 轮询解耦。
+            # 两条都在网关之外，/health 永远看不见它们；信号源已存在（库存金丝雀、
+            # _health.py --gates），这里只是把「变化」变成事件。
+            if business_due(previous):
+                # 标记先写、再跑：巡检里任何一步抛异常都不该让这一轮变成
+                # 「每 60 秒重试一次重活」。下次窗口到了自然会再来。
+                previous["business_probe_hour"] = _hour_bucket()
+                save_state(state_path, previous)
+                try:
+                    await run_business_probes(client, previous, source=args.source)
+                except Exception as exc:
+                    print(f"业务巡检异常（本轮跳过，下个窗口重试）：{exc}", flush=True)
+                else:
+                    save_state(state_path, previous)
             # 到点的复查（回执 later）：采集器就是那个心跳，
             # 没有它，Agent 约的「明天早上再看一眼」永远不会醒。
             await drain_due_laters(client)

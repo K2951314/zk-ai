@@ -698,7 +698,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 66 个测试模块，1468 个用例，全部 Mock
+├── tests/                # conftest + 66 个测试模块，1506 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -706,8 +706,8 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 123 个文件约 35,020 行，`tests/` 66 个测试模块 1468 个用例（约 26,009 行），
-`scripts/` 23 个文件约 6,748 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
+规模：`app/` 123 个文件约 35,020 行，`tests/` 66 个测试模块 1506 个用例（约 26,416 行），
+`scripts/` 24 个文件约 7,111 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-19：第一性原理审查后的四类修复——①客户端 `max_tokens` 截断
 保护统一到适配器基类 `_clamped_max_tokens`（Anthropic/Gemini/Ollama 补齐，
@@ -1463,7 +1463,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1468 个用例，全部通过，零网络、零真实配额。**
+**1506 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

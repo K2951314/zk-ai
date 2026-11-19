@@ -158,3 +158,82 @@ rules:
     parallel: 1
     tell: needed
     max_turns: 10
+
+  # ---------------------------------------------------------------------------
+  # 4. 三菱库存接口可用性巡检（2026-11-19，P1）
+  #
+  # 信号来自 scripts/signal_probes.py，由 event_watch.py 每 6 小时跑一次
+  # （BUSINESS_PROBE_INTERVAL_HOURS）——**状态变化才发事件**，不是每天都发。
+  #
+  # 为什么值得自动化：当前 401 fail-closed，库存查询全部返回「查不到」。
+  # 但销售分不清「厂家没货」和「凭证失效」——这正是事故的温床。
+  # 巡检替人盯这个区别，并在恢复时也报一声（否则没人知道什么时候能用了）。
+  #
+  # tell: always —— 纯通报，**不派单**。这类事件没有「诊断」可做：
+  # 凭证失效要去三菱官网改密码，是人的事。派给 agent 只会烧 token 复述现状。
+  # ---------------------------------------------------------------------------
+  - name: 三菱库存接口自检失败
+    when:
+      source: zkai-gateway
+      types: [inventory.canary_failed]
+    to: cli-skill
+    cwd: "."
+    ask: "三菱库存接口自检失败，库存查询已 fail-closed。看一眼 payload 里的 reason（401/凭证失效 vs 结构变更），用一句话说明属于哪一类，然后明确写出恢复这一步需要人去做什么。**不要尝试登录三菱官网、不要改凭证、不要改任何配置。**"
+    group: mitsubishi-canary
+    dedupe_window: 21600
+    parallel: 1
+    tell: always
+    max_turns: 4
+    budget_cny: 0.5
+
+  - name: 三菱库存接口已恢复
+    when:
+      source: zkai-gateway
+      types: [inventory.canary_recovered]
+    to: cli-skill
+    cwd: "."
+    ask: "三菱库存接口自检已恢复（此前告警过）。只回一句「已恢复」并说明从什么时候开始可用的，不需要其他分析。"
+    group: mitsubishi-canary-recovered
+    dedupe_window: 21600
+    parallel: 1
+    tell: never        # 恢复是行情报，不需要打扰人；落库可查即可
+    max_turns: 2
+    budget_cny: 0.2
+
+  # ---------------------------------------------------------------------------
+  # 5. smart-selection 数据新鲜度巡检（2026-11-19，P1）
+  #
+  # 信号来自 mpgen/tools/_health.py --gates（24 数据面 + 19 真源→派生边 + 闸门）。
+  # 只信**退出码**，不解析人类可读输出——输出格式会变，退出码是契约。
+  #
+  # 为什么值得自动化：真源→派生曾静默漂移 5 天没人发现（病根是「关系只写在
+  # 文档里，没有可执行的对账」）。现在有对账脚本了，但没人每天跑 = 白建。
+  # ---------------------------------------------------------------------------
+  - name: 数据新鲜度异常
+    when:
+      source: zkai-gateway
+      types: [data.freshness_failed]
+    to: cli-skill
+    cwd: "."
+    skill: tool-selection
+    ask: "smart-selection 的数据面/构建边/闸门有异常（payload.detail 里是结论行）。按 skill 的口径判断属于哪一类：①真源更新了但没重跑生成器（重建即可）②闸门规则本身有问题（规则的事，不要动数据）③数据真的缺。**只读诊断：不要重跑生成器、不要改数据、不要 commit。** 给结论与「下一步该谁做什么」。"
+    group: data-freshness
+    dedupe_window: 21600
+    parallel: 1
+    tell: always
+    max_turns: 8
+    budget_cny: 1.5
+
+  - name: 数据新鲜度已恢复
+    when:
+      source: zkai-gateway
+      types: [data.freshness_recovered]
+    to: cli-skill
+    cwd: "."
+    ask: "smart-selection 数据面与构建闸门已恢复全绿。只回一句「已恢复」，不需要分析。"
+    group: data-freshness-recovered
+    dedupe_window: 21600
+    parallel: 1
+    tell: never
+    max_turns: 2
+    budget_cny: 0.2
