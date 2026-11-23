@@ -418,6 +418,19 @@ def test_stream_idle_timeout_is_bridged_from_yaml(monkeypatch) -> None:
     assert merged.stream_idle_timeout == 45
 
 
+def test_stream_prefetch_timeout_is_bridged_from_yaml(monkeypatch) -> None:
+    """``request.stream_prefetch_timeout`` 必须能从 config.yaml 改到（2026-11-23）。
+
+    与 ``stream_idle_timeout`` 同一条理由：新键不进桥接表 = 写了静默无效。
+    ``test_every_example_config_key_is_consumed`` 只管「示例里的键有人消费」，
+    管不到「运营者改 YAML 后真的到 Settings」——两件事分开钉。
+    """
+    monkeypatch.delenv("ZKAI_STREAM_PREFETCH_TIMEOUT", raising=False)
+    settings = Settings()
+    merged = apply_settings_from_yaml(settings, {"request": {"stream_prefetch_timeout": 3}})
+    assert merged.stream_prefetch_timeout == 3
+
+
 def test_stream_idle_timeout_env_still_wins(monkeypatch) -> None:
     """环境变量永远优先于 config.yaml（既有契约，不能因为新键破坏）。"""
     monkeypatch.setenv("ZKAI_STREAM_IDLE_TIMEOUT", "7")

@@ -611,6 +611,31 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
 - 上游 429 正文里的「多少秒后再来」没有解析（只认 `Retry-After` 头）。加「从自由文本
   猜秒数」有误判风险，**刻意不做**。
 
+### 2026-11-23：harness「经常中断」的第三个根因（已修，真机验证过）
+
+**11-13 那条心跳，对 harness 从来没生效过。** 三个并列缺口：
+
+1. **UA 名单写错**：名单是 `ds-harness`，线上是 `deepseek-harness/0.2.2-rc.5
+   (+https://github.com/deepseek-ai/...) dsh-profile/desktop`——子串对不上，
+   服务器 DB 618 条 harness 流式请求**零 ping**。已补 `deepseek-harness`。
+   ⚠ 教训：**这份名单没被任何线上 UA 验证过**就上线了；`claude-cli`/`undici`
+   至今也不在名单里——别以为它们「有」心跳，它们是不靠心跳。
+2. **预取期间零字节**：`_stream_response` 为让预检错误返回真状态码，先 `anext`
+   再建 `StreamingResponse`，而**故障转移全在这个窗口里**。服务器实测 harness
+   首块 p50=8.6s / p90=30s / p99=141s，尾部在客户端看来就是「永远没响应」。
+   新增 `request.stream_prefetch_timeout`（默认 10s，可热更）：超时**不取消**
+   在飞的 `anext`，先发 200 + 心跳，事件稍后照常到达。
+3. **配套坑（自己引入、真机抓到）**：窗口外抛出的 `ZKAIError` 会被 Starlette 报
+   `already started` 并**吞掉客户端唯一的错误信号**。三条路径都改成转成
+   **流内 error 事件**。⚠ responses 那条**不能手拼**：走 `assembler.failed()`
+   并以 `SSE_DONE` 收尾（手拼的 `data: {...}` 客户端不认；漏 `[DONE]` 只能靠
+   断连结束）；失败分支**绝不发 `response.completed`**（那是宣告成功）。
+
+真机：状态行 10.2s 返回 → `: ping` ×3 → 正文照常；失败分支收到 200 + 心跳 +
+error + `[DONE]`，日志零 `already started`。回归清单见
+`docs/harness中断根因-20261123.md` §6（有效断言是「心跳早于第一个内容块」——
+只看 200 对旧实现也绿）。
+
 ## 华为云两套东西：码道 CLI（可用）vs MaaS provider（已删）
 
 **别把这两个混成一个**——它们凭据、协议、状态完全不同：

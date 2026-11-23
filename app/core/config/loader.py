@@ -57,6 +57,9 @@ _SETTINGS_SECTIONS: dict[str, tuple[str, str]] = {
     #: 「连接已死」区分开（2026-11-13，之前这个字段是死配置）。0 = 关闭心跳。
     "request.stream_idle_timeout": ("request", "stream_idle_timeout"),
     "request.sse_comment_user_agents": ("request", "sse_comment_user_agents"),
+    #: 预取窗口（秒）：第一个事件到达前允许占着「尚未开流」状态多久。
+    #: 超时即先返回 200 + 心跳，错误改为流内事件（2026-11-23，见 settings 注释）。
+    "request.stream_prefetch_timeout": ("request", "stream_prefetch_timeout"),
     "request.default_max_tokens": ("request", "default_max_tokens"),
     # 2026-09-28：补上桥接。AGENTS.md 记着 ZKAI_MAX_REQUEST_BODY /
     # ZKAI_MAX_INPUT_TOKENS 没有桥接的坑——改 config.yaml 静默无效，用户只能

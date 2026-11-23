@@ -488,6 +488,24 @@ async def test_streaming_preflight_error_returns_json_status(api) -> None:
     )
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "application/json" in response.headers["content-type"]
+
+
+async def test_prefetch_window_keeps_real_status_codes(api) -> None:
+    """窗口内拿到的预检错误必须仍是真实 HTTP 状态码（2026-11-23）。
+
+    预取改成「最多等 N 秒」之后，窗口内到达的错误照旧走 JSON 状态码；
+    只有**窗口超时**才降级成 200 + 流内错误。否则会把所有 4xx/5xx 都变成
+    200，客户端的重试与熔断全部失灵。
+    """
+    client, harness = api
+    harness.container.settings.stream_prefetch_timeout = 5.0
+    harness.adapter.queue_status(*([503] * 8))
+    response = await client.post(
+        "/v1/chat/completions", json={**CHAT_BODY, "stream": True}
+    )
+    assert response.status_code in (429, 503)
+    assert "application/json" in response.headers["content-type"]
 
 
 def test_keepalive_interval_is_half_the_client_idle_budget() -> None:
@@ -521,6 +539,22 @@ def test_keepalive_interval_skips_clients_that_display_ping_as_content() -> None
     assert keepalive_interval(120.0, user_agent="Mozilla/5.0") is None
     assert keepalive_interval(120.0, user_agent=None) is None
     assert keepalive_interval(120.0, user_agent="") is None
+
+
+def test_keepalive_reaches_the_real_deepseek_harness_user_agent() -> None:
+    """真实 harness 的 UA 必须命中（2026-11-23，服务器 DB 原文）。
+
+    名单里写的是 ``ds-harness``，而线上发来的是
+    ``deepseek-harness/0.2.2-rc.5 (+https://github.com/deepseek-ai/...) dsh-profile/desktop``
+    ——子串既不相等也不包含，于是「为 harness 加的心跳」从上线起对它零生效
+    （服务器 DB 实测 618 条 harness 流式请求，一条 ping 都没发出去）。
+    这类缩写与官方 ID 的偏差既扫不出来也编不出用例，只能用线上原文钉住。
+    """
+    real = (
+        "deepseek-harness/0.2.2-rc.5 "
+        "(+https://github.com/deepseek-ai/deepseek-harness) dsh-profile/desktop"
+    )
+    assert keepalive_interval(120.0, user_agent=real) == 60.0
 
 
 def test_extra_ua_keywords_extend_the_whitelist_without_code_changes() -> None:
@@ -665,6 +699,71 @@ async def test_client_disconnect_closes_the_upstream_stream(api) -> None:
     assert harness.adapter.streams_completed == 0
     recent = await harness.container.request_repository.recent(limit=5)
     assert recent[0]["status"] == "cancelled"
+
+
+async def test_slow_first_chunk_still_delivers_the_whole_answer(api, monkeypatch) -> None:
+    """预取窗口超时后**不许**丢掉在飞的那个 anext（2026-11-23）。
+
+    窗口一超就先发 200 + 心跳；上游稍后才吐首块。如果超时分支取消/重建了
+    ``anext``，正文要么丢头、要么触发
+    ``anext(): asynchronous generator is already running``。
+    这里把窗口压到 0.05s、上游首块延迟 0.3s，断言状态码仍是 200、
+    正文**一个字都不少**、并以 [DONE] 收尾。
+
+    关键断言是**心跳出现在第一个 data 之前**：它证明响应体在上游首块到达
+    **之前**就已经开始发送了。只看状态码 200 没有鉴别力——把预取改回
+    「等第一个事件」也照样 200（2026-11-23 复审时发现旧版本正是这样空转的：
+    它用的是块间 ``delay``，而首块（role 块）永远零延迟，压根没走进超时分支）。
+    """
+    import app.api.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
+
+    client, harness = api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    harness.adapter.queue(Behavior(chunks=3, first_delay=0.3))
+
+    response = await client.post("/v1/chat/completions", json={**CHAT_BODY, "stream": True})
+    assert response.status_code == 200
+    chunks, _comments, raw = await parse_sse(response.text)
+    text = "".join(
+        (chunk["choices"][0]["delta"].get("content") or "") for chunk in chunks
+    )
+    assert text == "part0 part1 part2 "
+    assert raw[-1] == "[DONE]"
+
+    lines = response.text.splitlines()
+    first_data = next(i for i, line in enumerate(lines) if line.startswith("data: "))
+    pings = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert pings, "预取超时后必须先发心跳，否则客户端看到的还是零字节静默"
+    assert min(pings) < first_data, "心跳必须在首块之前到达（这才证明预取没有阻塞响应体）"
+
+
+async def test_failure_after_the_prefetch_window_becomes_an_error_event(api) -> None:
+    """窗口外失败必须变流内 error 事件，且不许让框架报 already started。
+
+    响应头已经发出（200）之后，调度器才把 ``AllAttemptsFailedError`` 抛出来。
+    这个异常若继续往上抛，Starlette 会报 "response already started" 并**吞掉**
+    客户端唯一的错误信号——客户端只看到一个空 200，永远不知道发生了什么
+    （2026-11-23 真机抓到；三条流式路径都有这个形状）。
+    """
+    client, harness = api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    # 每次尝试都「慢 0.2 秒然后 503」：全部落在窗口外
+    harness.adapter.queue(*([Behavior(status=503, first_delay=0.2)] * 12))
+
+    response = await client.post("/v1/chat/completions", json={**CHAT_BODY, "stream": True})
+    assert response.status_code == 200, "响应已开始，只能 200 + 流内错误"
+    assert "text/event-stream" in response.headers["content-type"]
+    _chunks, _comments, raw = await parse_sse(response.text)
+    errors = [json.loads(item)["error"] for item in raw if item.startswith("{") and '"error"' in item]
+    assert errors, f"流内必须带一条 error 事件，实际收到：{response.text[-400:]}"
+    # 503 是「不可重试但可换腿」的一类，调度器在第一次尝试后就 ABORT，
+    # 所以这里看到的是那条真实的 ServiceUnavailable（upstream_error）；
+    # 全部腿都试完才会是 all_attempts_failed。两者都是「窗口外的失败」。
+    assert errors[-1]["type"] in {"all_attempts_failed", "upstream_error", "service_unavailable"}
+    assert errors[-1]["message"], "错误事件必须带可读文案"
+    assert raw[-1] == "[DONE]", "错误之后仍要正常收尾，客户端才不会当成断流"
 
 
 async def test_completed_stream_is_recorded_as_success(api) -> None:

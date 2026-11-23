@@ -29,7 +29,7 @@ from app.api.deps import ContainerDep, client_metadata, require_client_auth
 from app.core.errors import ZKAIError
 from app.core.logging import get_logger
 from app.models.request import ChatCompletionRequest, new_request_id
-from app.models.response import ChatCompletionChunk
+from app.models.response import ChatCompletionChunk, StreamEvent
 
 logger = get_logger("api.chat")
 
@@ -90,6 +90,12 @@ def _chunk_payload(
 #: 也不要让不兼容的客户端显示污染信息。
 _PING_USER_AGENTS = (
     "codex",
+    #: 2026-11-23 修：真实 UA 是 ``deepseek-harness/0.2.2-rc.5
+    #: (+https://github.com/deepseek-ai/deepseek-harness) dsh-profile/desktop``，
+    #: 而名单里写的是 ``ds-harness`` —— 子串匹配不上，于是这条「为 harness 加
+    #: 的心跳」从上线起就没对 harness 生效过（服务器 DB 实测 618 条 harness
+    #: 流式请求，零心跳）。两个写法都保留：官方 ID 可能变，别名别丢。
+    "deepseek-harness",
     "ds-harness",
     "openai-python",  # 旧式 OpenAI Python SDK
     "openai-node",  # 旧式 OpenAI Node SDK
@@ -236,7 +242,7 @@ async def _stream_response(
     metadata: dict[str, str | None],
     request: Request,
 ) -> Any:
-    """Prefetch the first event (so pre-flight errors return real HTTP codes), then stream."""
+    """Start the stream immediately; prefetch only within a bounded window."""
     generator = container.request_service.stream(
         payload,
         request_id=request_id,
@@ -244,8 +250,28 @@ async def _stream_response(
         user_agent=metadata.get("user_agent"),
     )
     iterator = generator.__aiter__()
+    #: 预取窗口：第一个事件到达前最多等这么久。None = 不设超时（旧行为）。
+    #: 见 Settings.stream_prefetch_timeout —— 预取期间一个字节都发不出去，
+    #: 而调度器的故障转移全在这个窗口里，窗口开多久客户端就「静默」多久。
+    prefetch_timeout = container.settings.stream_prefetch_timeout or None
+    #: 预取：先发一个 ``anext``，但**最多等 stream_prefetch_timeout 秒**。
+    #: 超时**不取消**它——把在飞的那个 task 原样交给流（「跨心跳同一 task」
+    #: 不变式），先返回 200 + 心跳，让客户端立刻知道连接是活的。
+    #: 没有这一段，预取期间一个字节都发不出去，而调度器的换 Key / 换部署 /
+    #: 退避重试全在这个窗口里（2026-11-23 服务器实测 harness 首块 p90=30s、
+    #: p99=141s，尾部请求在客户端看来就是「永远没有响应」）。
+    first_event: StreamEvent | None = None
+    pending: asyncio.Future[Any] | None = None
+    prefetch = asyncio.ensure_future(anext(iterator))
     try:
-        first_event = await anext(iterator)
+        done, _ = await asyncio.wait(
+            {prefetch},
+            timeout=None if prefetch_timeout is None else prefetch_timeout,
+        )
+        if prefetch in done:
+            first_event = prefetch.result()
+        else:
+            pending = prefetch
     except StopAsyncIteration:
         first_event = None
     except ZKAIError as exc:
@@ -253,6 +279,7 @@ async def _stream_response(
         logger.warning("stream request %s rejected: %s", request_id, exc.error_type)
         return error_response(exc)
     except asyncio.CancelledError:
+        prefetch.cancel()
         await _aclose(generator)
         raise
 
@@ -280,7 +307,8 @@ async def _stream_response(
         # 在飞的那个 anext 必须**跨心跳保持同一个 task**：
         # 每轮重新 ensure_future 会让上一轮还在跑的 generator 被第二次驱动
         # （``anext(): asynchronous generator is already running``）。
-        pending: asyncio.Future[Any] | None = None
+        # ``pending`` 可能是预取超时时留下的那一个（见上），不能丢掉。
+        inflight: asyncio.Future[Any] | None = pending
         try:
             event = first_event
             while True:
@@ -315,35 +343,60 @@ async def _stream_response(
                     event = None
                 # ``anext`` returns an Awaitable, not a Coroutine, so wrap it with
                 # ensure_future (create_task would reject it).
-                if pending is None:
-                    pending = asyncio.ensure_future(anext(iterator))
-                # timeout 只表示「该发心跳了」：不取消 pending，上游照常推进。
+                if inflight is None:
+                    inflight = asyncio.ensure_future(anext(iterator))
+                # timeout 只表示「该发心跳了」：不取消 inflight，上游照常推进。
                 # 没有它的时候，上游静默多久，客户端就多久收不到一个字节。
                 done, _ = await asyncio.wait(
-                    {pending, watcher},
+                    {inflight, watcher},
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=ping_every,
                 )
-                if pending not in done:
+                if inflight not in done:
                     if watcher.done():
                         # Client vanished: cancel upstream and stop producing.
-                        pending.cancel()
-                        pending = None
+                        inflight.cancel()
+                        inflight = None
                         logger.info("client disconnected during stream %s", request_id)
                         break
-                    # 只是静默：SSE 注释行保活，循环继续等**同一个** pending。
+                    # 只是静默：SSE 注释行保活，循环继续等**同一个** inflight。
                     if ping_every is not None:
                         yield SSE_PING
                     continue
-                finished, pending = pending, None
+                finished, inflight = inflight, None
                 try:
                     event = finished.result()
                 except StopAsyncIteration:
                     break
+                except ZKAIError as exc:
+                    # 预取超时后响应头已发出（200），此时调度器才把
+                    # AllAttemptsFailed 之类抛出来——不能再抛给框架
+                    # （Starlette 会报 "response already started" 并吞掉客户端唯一的
+                    # 错误信号），必须转成流内 error 事件（2026-11-23 真机抓到）。
+                    logger.warning(
+                        "stream %s failed after the response started: %s",
+                        request_id,
+                        exc.error_type,
+                    )
+                    yield f"data: {json.dumps(exc.to_dict(), ensure_ascii=False)}\n\n"
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("stream %s crashed mid-flight", request_id)
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {"error": {"message": "网关内部错误", "type": "internal_error", "code": 500}},
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+                    break
             yield SSE_DONE
         finally:
-            if pending is not None:
-                pending.cancel()
+            if inflight is not None:
+                inflight.cancel()
             watcher.cancel()
             await _aclose(generator)
 

@@ -27,6 +27,7 @@ from app.models.response import (
 )
 from app.providers.base import ProviderContext
 from tests.conftest import (
+    Behavior,
     FakeAdapter,
     build_harness,
     make_alias,
@@ -99,7 +100,9 @@ def parse_sse(text: str) -> list[tuple[str, dict[str, Any]]]:
 
 
 @pytest.fixture
-async def messages_api(provider_config) -> AsyncIterator[tuple[httpx.AsyncClient, CapturingAdapter]]:
+async def messages_api(
+    provider_config,
+) -> AsyncIterator[tuple[httpx.AsyncClient, CapturingAdapter, Any]]:
     """ASGI client + capturing adapter with the default alias router."""
     adapter = CapturingAdapter(provider_config)
     config = make_config(
@@ -122,7 +125,7 @@ async def messages_api(provider_config) -> AsyncIterator[tuple[httpx.AsyncClient
     app.state.container = harness.container
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://zkai.test") as client:
-        yield client, adapter
+        yield client, adapter, harness
     await harness.container.shutdown()
 
 
@@ -137,7 +140,7 @@ MESSAGES_BODY: dict[str, Any] = {
 # Non-streaming
 # --------------------------------------------------------------------------- #
 async def test_messages_non_streaming_shape(messages_api) -> None:
-    client, _adapter = messages_api
+    client, _adapter, _harness = messages_api
     response = await client.post("/v1/messages", json=MESSAGES_BODY)
     assert response.status_code == 200
     body = response.json()
@@ -151,7 +154,7 @@ async def test_messages_non_streaming_shape(messages_api) -> None:
 
 
 async def test_messages_translates_system_tooluse_and_toolresult(messages_api) -> None:
-    client, adapter = messages_api
+    client, adapter, _harness = messages_api
     body = {
         "model": "fake-model",
         "max_tokens": 256,
@@ -209,7 +212,7 @@ async def test_messages_translates_system_tooluse_and_toolresult(messages_api) -
 
 
 async def test_messages_model_fallback_and_context_suffix(messages_api) -> None:
-    client, adapter = messages_api
+    client, adapter, _harness = messages_api
     # Unknown claude-* id falls back to the configured default alias.
     await client.post(
         "/v1/messages",
@@ -222,14 +225,14 @@ async def test_messages_model_fallback_and_context_suffix(messages_api) -> None:
 
 
 async def test_messages_count_tokens(messages_api) -> None:
-    client, _adapter = messages_api
+    client, _adapter, _harness = messages_api
     response = await client.post("/v1/messages/count_tokens", json=MESSAGES_BODY)
     assert response.status_code == 200
     assert response.json()["input_tokens"] >= 1
 
 
 async def test_messages_error_uses_anthropic_envelope(messages_api) -> None:
-    client, adapter = messages_api
+    client, adapter, _harness = messages_api
     adapter.queue_status(*([429] * 8))  # exhaust every retry slot
     response = await client.post("/v1/messages", json=MESSAGES_BODY)
     assert response.status_code == 429
@@ -269,7 +272,7 @@ async def test_messages_auth_accepts_x_api_key(provider_config) -> None:
 # --------------------------------------------------------------------------- #
 async def test_streaming_closes_every_content_block(messages_api) -> None:
     """THE regression: every content_block_start needs a content_block_stop."""
-    client, _adapter = messages_api
+    client, _adapter, _harness = messages_api
     response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
     assert response.status_code == 200
     events = parse_sse(response.text)
@@ -300,7 +303,7 @@ async def test_silent_upstream_emits_keepalive_pings(messages_api, monkeypatch) 
     import app.api.messages as messages_mod
 
     monkeypatch.setattr(messages_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
-    client, adapter = messages_api
+    client, adapter, _harness = messages_api
 
     calls = {"n": 0}
 
@@ -333,8 +336,67 @@ async def test_silent_upstream_emits_keepalive_pings(messages_api, monkeypatch) 
     assert "".join(item["delta"]["text"] for item in deltas) == "part0 part1 part2 "
 
 
+async def test_prefetch_window_starts_the_body_before_the_first_chunk(
+    messages_api, monkeypatch
+) -> None:
+    """预取超时后必须**先**返回 200 + 心跳，正文稍后照常到达（2026-11-23）。
+
+    ``messages.py`` 与 ``chat.py`` 同一规格：窗口一超就不等上游了，把在飞的
+    ``anext`` 原样交给流。断言「心跳出现在 message_start 之前」——只看状态码
+    200 没有鉴别力，改回「等第一个事件」也照样 200（见 test_api.py 同款注释）。
+    """
+    import app.api.messages as messages_mod
+
+    monkeypatch.setattr(messages_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
+    client, adapter, harness = messages_api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    adapter.queue(Behavior(chunks=2, first_delay=0.3))
+
+    response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
+    assert response.status_code == 200
+
+    lines = response.text.splitlines()
+    pings = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert pings, "预取超时后必须先发心跳"
+    # 这条路径开场就发 ``message_start``（Anthropic 语法要求），所以心跳不可能
+    # 排在它前面——但它必须排在**第一个内容块之前**，那才证明响应体没有等上游。
+    first_block = lines.index("event: content_block_start")
+    assert min(pings) < first_block, "心跳必须在第一个内容块之前（证明响应体没有被预取阻塞）"
+
+    events = parse_sse(response.text)
+    names = [name for name, _data in events]
+    assert names[0] == "message_start"
+    assert names[-1] == "message_stop"
+    deltas = [data for name, data in events if name == "content_block_delta"]
+    assert "".join(item["delta"]["text"] for item in deltas) == "part0 part1 "
+
+
+async def test_failure_after_the_prefetch_window_is_an_error_event(messages_api) -> None:
+    """窗口外失败变 Anthropic 形状的流内 ``error`` 事件，不能只留一个空 200。
+
+    窗口超时后响应头已发出，此时调度器抛的预检异常不能再往上抛——Starlette 报
+    "response already started" 并吞掉客户端唯一的错误信号（2026-11-23 真机抓到）。
+    """
+    client, _adapter, harness = messages_api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    harness.adapter.queue(*([Behavior(status=503, first_delay=0.2)] * 12))
+
+    response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
+    assert response.status_code == 200, "响应已开始，只能 200 + 流内错误"
+    events = parse_sse(response.text)
+    errors = [data for name, data in events if name == "error"]
+    assert errors, f"流内必须有 error 事件，实际收到：{response.text[-400:]}"
+    assert errors[-1]["type"] == "error"
+    assert errors[-1]["error"]["type"] in {
+        "api_error",
+        "rate_limit_error",
+        "overloaded_error",
+    }
+    assert errors[-1]["error"]["message"], "错误事件必须带可读文案"
+
+
 async def test_streaming_tool_use_blocks_and_stop_reason(messages_api) -> None:
-    client, adapter = messages_api
+    client, adapter, _harness = messages_api
     adapter.chunk_script = [
         _chunk(delta=ChunkDelta(role="assistant")),
         _chunk(
@@ -382,7 +444,7 @@ async def test_streaming_reasoning_becomes_thinking_block(messages_api) -> None:
     # Reasoning-only deltas are recovered into ``content`` upstream (never-blank
     # guard) before they reach this surface, so the thinking mapping only fires
     # when a provider streams reasoning alongside content.
-    client, adapter = messages_api
+    client, adapter, _harness = messages_api
     adapter.chunk_script = [
         _chunk(
             delta=ChunkDelta(role="assistant", reasoning_content="pondering", content="answer")

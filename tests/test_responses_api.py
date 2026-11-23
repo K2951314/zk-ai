@@ -36,6 +36,7 @@ from app.models.response import (
 )
 from app.providers.base import ProviderContext
 from tests.conftest import (
+    Behavior,
     FakeAdapter,
     build_harness,
     make_alias,
@@ -484,6 +485,63 @@ async def test_streaming_error_emits_failed_then_error(responses_api) -> None:
     assert names.index("response.failed") < names.index("error")
     failed = _payloads(events, "response.failed")[0]["response"]
     assert failed["status"] == "failed"
+
+
+async def test_prefetch_window_starts_the_body_before_the_first_chunk(
+    responses_api, monkeypatch
+) -> None:
+    """预取超时后先返回 200 + 心跳，正文稍后照常到达（2026-11-23）。
+
+    三条流式路径必须结构一致；这条钉 ``responses.py`` 的那一份。
+    断言「心跳出现在第一个 output_text 增量之前」——只看 200 没有鉴别力。
+    """
+    import app.api.responses as responses_mod
+
+    monkeypatch.setattr(responses_mod, "keepalive_interval", lambda _v, **_kw: 0.05)
+    client, adapter, harness = responses_api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    adapter.queue(Behavior(chunks=2, first_delay=0.3))
+
+    response = await client.post(
+        "/v1/responses", json={"model": "fake-model", "input": "hello", "stream": True}
+    )
+    assert response.status_code == 200
+
+    lines = response.text.splitlines()
+    pings = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert pings, "预取超时后必须先发心跳"
+    first_delta = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("data: ") and "response.output_text.delta" in line
+    )
+    assert min(pings) < first_delta, "心跳必须在第一段正文之前（证明响应体没有被预取阻塞）"
+
+    events = parse_sse(response.text)
+    text = "".join(item["delta"] for item in _payloads(events, "response.output_text.delta"))
+    assert text == "part0 part1 "
+    assert _payloads(events, "response.completed")
+
+
+async def test_failure_after_the_prefetch_window_is_an_error_event(responses_api) -> None:
+    """窗口外失败变流内 ``error`` 事件 + ``[DONE]``，不能只留一个空 200。
+
+    窗口超时后响应头已发出，调度器的预检异常不能再往上抛——Starlette 报
+    "response already started" 并吞掉客户端唯一的错误信号（2026-11-23 真机抓到）。
+    """
+    client, adapter, harness = responses_api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    adapter.queue(*([Behavior(status=503, first_delay=0.2)] * 12))
+
+    response = await client.post(
+        "/v1/responses", json={"model": "fake-model", "input": "hello", "stream": True}
+    )
+    assert response.status_code == 200, "响应已开始，只能 200 + 流内错误"
+    assert response.text.rstrip().endswith("[DONE]"), f"必须正常收尾：{response.text[-200:]}"
+    events = parse_sse(response.text)
+    errors = _payloads(events, "error")
+    assert errors, f"流内必须有 error 事件，实际收到：{response.text[-400:]}"
+    assert errors[-1]["message"], "错误事件必须带可读文案"
 
 
 # --------------------------------------------------------------------------- #

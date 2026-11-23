@@ -163,6 +163,14 @@ class Settings(BaseSettings):
     #: 心跳与 zkai-meta，不用改代码重启（2026-11-19：新版 OpenAI SDK 的 UA
     #: 写法变化刚暴露过「硬编码名单必然漂移」这类坑）。留空 = 只用内置名单。
     sse_comment_user_agents: str = ""
+    #: 流式请求在**第一个事件到达前**最多预取多久（秒），0 = 一直等到有事件。
+    #: 为什么需要它（2026-11-23 实测）：``_stream_response`` 为了「预检错误返回真
+    #: HTTP 状态码」会先 ``anext`` 一次再建 ``StreamingResponse``，而这段时间
+    #: **一个字节都发不出去**；调度器的故障转移全在这个窗口里（换 Key、换部署、
+    #: 退避重试）。服务器实测 DeepSeek harness 首块 p90=30s、p99=141s，尾部请求
+    #: 在客户端看来就是「请求已发出、永远没有响应」。超过这个窗口就先开始流式
+    #: 响应（200 + 心跳注释行），错误改为流内 ``error`` 事件。
+    stream_prefetch_timeout: float = 10.0
     max_request_body_mb: float = 10.0
     #: 估算 input token 的硬上限（0 = 关闭）。超限直接返回可读错误，不发上游。
     #: 为什么要有它：``max_request_body_mb`` 是**字节**闸且只看 content-length
@@ -427,6 +435,7 @@ RUNTIME_RELOADABLE_FIELDS: frozenset[str] = frozenset(
         "request_timeout",
         "stream_idle_timeout",
         "sse_comment_user_agents",
+        "stream_prefetch_timeout",
         "max_input_tokens",
         "max_request_seconds",
         "trim_history_tokens",

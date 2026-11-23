@@ -48,7 +48,7 @@ from app.core.logging import get_logger
 from app.core.security import constant_time_equals
 from app.models.anthropic import AnthropicMessagesRequest, strip_context_suffix
 from app.models.request import ChatCompletionRequest, new_request_id
-from app.models.response import ChatCompletionChunk, ChatCompletionResponse
+from app.models.response import ChatCompletionChunk, ChatCompletionResponse, StreamEvent
 
 logger = get_logger("api.messages")
 
@@ -409,7 +409,7 @@ async def _stream_response(
     metadata: dict[str, str | None],
     request: Request,
 ) -> Any:
-    """Prefetch the first event (real HTTP codes for pre-flight errors), then stream."""
+    """Start the stream immediately; prefetch only within a bounded window."""
     generator = container.request_service.stream(
         chat_request,
         request_id=request_id,
@@ -417,8 +417,21 @@ async def _stream_response(
         user_agent=metadata.get("user_agent"),
     )
     iterator = generator.__aiter__()
+    # 与 /v1/chat/completions 同一规格：预取窗口外先发 200 + 心跳，
+    # 在飞的 anext 原样交给流（见 chat.py 同段注释与 stream_prefetch_timeout）。
+    prefetch_timeout = container.settings.stream_prefetch_timeout or None
+    first_event: StreamEvent | None = None
+    pending: asyncio.Future[Any] | None = None
+    prefetch = asyncio.ensure_future(anext(iterator))
     try:
-        first_event = await anext(iterator)
+        done, _ = await asyncio.wait(
+            {prefetch},
+            timeout=None if prefetch_timeout is None else prefetch_timeout,
+        )
+        if prefetch in done:
+            first_event = prefetch.result()
+        else:
+            pending = prefetch
     except StopAsyncIteration:
         first_event = None
     except ZKAIError as exc:
@@ -426,6 +439,7 @@ async def _stream_response(
         logger.warning("messages stream %s rejected: %s", request_id, exc.error_type)
         return anthropic_error_response(exc)
     except asyncio.CancelledError:
+        prefetch.cancel()
         await _aclose(generator)
         raise
 
@@ -451,7 +465,8 @@ async def _stream_response(
         # 在飞的那个 anext 必须**跨心跳保持同一个 task**：每轮重新 ensure_future
         # 会让上一轮还在跑的 generator 被第二次驱动
         # （``anext(): asynchronous generator is already running``）。
-        pending: asyncio.Future[Any] | None = None
+        # 预取超时时留下的是同一个 task，必须接着用（跨心跳同一 task 不变式）。
+        inflight: asyncio.Future[Any] | None = pending
         try:
             yield assembler.start()
             event = first_event
@@ -473,37 +488,51 @@ async def _stream_response(
                     # 这一格已发完：置空，绝不重复发（心跳不能推动数据）。
                     event = None
 
-                if pending is None:
-                    pending = asyncio.ensure_future(anext(iterator))
-                # timeout 只表示「该发心跳了」：不取消 pending，上游照常推进。
+                if inflight is None:
+                    inflight = asyncio.ensure_future(anext(iterator))
+                # timeout 只表示「该发心跳了」：不取消 inflight，上游照常推进。
                 # 没有它的时候，上游静默多久，客户端就多久收不到一个字节
                 # （2026-11-13 定位的「总是在中途断开」）。
                 done, _ = await asyncio.wait(
-                    {pending, watcher},
+                    {inflight, watcher},
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=ping_every,
                 )
-                if pending not in done:
+                if inflight not in done:
                     if watcher.done():
-                        pending.cancel()
-                        pending = None
+                        inflight.cancel()
+                        inflight = None
                         logger.info("client disconnected during messages stream %s", request_id)
                         return
-                    # 只是静默：SSE 注释行保活，循环继续等**同一个** pending。
+                    # 只是静默：SSE 注释行保活，循环继续等**同一个** inflight。
                     if ping_every is not None:
                         yield SSE_PING
                     continue
-                finished, pending = pending, None
+                finished, inflight = inflight, None
                 try:
                     event = finished.result()
                 except StopAsyncIteration:
                     break
+                except ZKAIError as exc_envelope:
+                    # 预取超时后响应头已发出（200）。此时调度器的预检异常不能再抛给
+                    # 框架（Starlette 报 "response already started"，客户端唯一的错误
+                    # 信号被吞掉），改成 Anthropic 形状的流内 error 事件。
+                    yield assembler.error_event(exc_envelope.to_dict())
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("messages stream %s crashed mid-flight", request_id)
+                    yield assembler.error_event(
+                        {"error": {"message": "网关内部错误", "type": "internal_error"}}
+                    )
+                    return
             # Invariant of this endpoint: blocks are always closed, even when
             # the upstream produced nothing but silence.
             yield assembler.finish()
         finally:
-            if pending is not None:
-                pending.cancel()
+            if inflight is not None:
+                inflight.cancel()
             watcher.cancel()
             await _aclose(generator)
 

@@ -57,7 +57,12 @@ class Behavior:
     #: pattern and lands on ThrottleKind.UNKNOWN.
     error_message: str = "fake"
     chunks: int = 3
+    #: 内容块之间的静默秒数。
     delay: float = 0.0
+    #: **首字节**之前的静默秒数。``delay`` 只在块之间生效，第一个事件（role 块）
+    #: 永远零延迟——所以光靠 ``delay`` 写不出「预取窗口超时」的用例
+    #: （2026-11-23 补：``stream_prefetch_timeout`` 测的就是首块之前那段静默）。
+    first_delay: float = 0.0
     prompt_tokens: int = 10
     completion_tokens: int = 5
     model_list: list[str] = field(default_factory=list)
@@ -161,6 +166,12 @@ class FakeAdapter(ProviderAdapter):
         self.build_payload(request, ctx.deployment)
         self.streams_opened += 1
         completed = False
+        # ``first_delay`` = the upstream's time-to-first-byte. It has to come
+        # **before** the failure branches too: ``stream_prefetch_timeout`` is
+        # about that silence, and a failure that lands *after* the window is a
+        # different code path (200 + in-stream error event).
+        if behavior.first_delay:
+            await asyncio.sleep(behavior.first_delay)
         if behavior.error is not None:
             self.streams_closed += 1
             raise behavior.error

@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.chat import (
+    SSE_DONE,
     SSE_PING,
     _aclose,
     _watch_disconnect,
@@ -49,6 +50,7 @@ from app.models.response import (
     ChatCompletionChunk,
     ResponsesRequest,
     ResponsesUsage,
+    StreamEvent,
     message_output_item,
 )
 
@@ -375,8 +377,22 @@ async def _stream_response(
         user_agent=metadata.get("user_agent"),
     )
     iterator = generator.__aiter__()
+    # 与 /v1/chat/completions 同一规格（见 chat.py 同段注释）：
+    # 预取最多 stream_prefetch_timeout 秒，超时先发 200 + 心跳，
+    # 在飞的 anext 原样交给流，绝不重新驱动生成器。
+    prefetch_timeout = container.settings.stream_prefetch_timeout or None
+    first_event: StreamEvent | None = None
+    pending: asyncio.Future[Any] | None = None
+    prefetch = asyncio.ensure_future(anext(iterator))
     try:
-        first_event = await anext(iterator)
+        done, _ = await asyncio.wait(
+            {prefetch},
+            timeout=None if prefetch_timeout is None else prefetch_timeout,
+        )
+        if prefetch in done:
+            first_event = prefetch.result()
+        else:
+            pending = prefetch
     except StopAsyncIteration:
         first_event = None
     except ZKAIError as exc:
@@ -384,6 +400,7 @@ async def _stream_response(
         logger.warning("responses stream %s rejected: %s", request_id, exc.error_type)
         return error_response(exc)
     except asyncio.CancelledError:
+        prefetch.cancel()
         await _aclose(generator)
         raise
 
@@ -407,7 +424,7 @@ async def _stream_response(
     async def event_stream() -> AsyncIterator[str]:
         watcher = asyncio.create_task(_watch_disconnect(request))
         # 在飞的那个 anext 必须**跨心跳保持同一个 task**（见 chat.py 同段注释）。
-        pending: asyncio.Future[Any] | None = None
+        inflight: asyncio.Future[Any] | None = pending
         try:
             yield assembler.start()
             event = first_event
@@ -433,35 +450,62 @@ async def _stream_response(
                     # 这一格已发完：置空，绝不重复发（心跳不能推动数据）。
                     event = None
 
-                if pending is None:
-                    pending = asyncio.ensure_future(anext(iterator))
+                if inflight is None:
+                    inflight = asyncio.ensure_future(anext(iterator))
                 # 与 chat / messages 同一套：timeout 只表示该发心跳了，不取消上游。
                 # 这条路径此前**连断连检测都没有**——客户端走了，上游连接还要
                 # 跑到下一个 chunk 才回收（2026-11-13 补齐）。
                 done, _ = await asyncio.wait(
-                    {pending, watcher},
+                    {inflight, watcher},
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=ping_every,
                 )
-                if pending not in done:
+                if inflight not in done:
                     if watcher.done():
-                        pending.cancel()
-                        pending = None
+                        inflight.cancel()
+                        inflight = None
                         logger.info("client disconnected during responses stream %s", request_id)
                         return
                     if ping_every is not None:
                         yield SSE_PING
                     continue
-                finished, pending = pending, None
+                finished, inflight = inflight, None
                 try:
                     event = finished.result()
                 except StopAsyncIteration:
                     break
+                except ZKAIError as exc:
+                    # 预取超时后响应头已发出（200），预检异常必须转成流内 error 事件
+                    # （同 chat.py / messages.py，2026-11-23 真机抓到）。
+                    # 形状与流中 ``type == "error"`` 那条分支**一致**：走 assembler.failed()
+                    # 发 ``response.failed`` + ``error``，不要手拼 OpenAI 形状的 data——
+                    # 这条路径的客户端读的是 ``event: error``，手拼等于没发。
+                    logger.warning(
+                        "responses stream %s failed after the response started: %s",
+                        request_id,
+                        exc.error_type,
+                    )
+                    yield assembler.failed(exc.to_dict())
+                    # 只发 ``[DONE]`` 这个**纯结束哨兵**，绝不发 ``response.completed``
+                    # ——那会告诉客户端「成功了」。与 chat.py 的失败分支对齐：
+                    # 正常路径以 [DONE] 收尾，失败路径也必须给同一个收尾信号，
+                    # 否则「读 data 直到 [DONE]」的客户端只能靠连接关闭来结束。
+                    yield SSE_DONE
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("responses stream %s crashed mid-flight", request_id)
+                    yield assembler.failed(
+                        {"error": {"message": "网关内部错误", "type": "internal_error"}}
+                    )
+                    yield SSE_DONE
+                    return
             yield assembler.finish()
-            yield "data: [DONE]\n\n"
+            yield SSE_DONE
         finally:
-            if pending is not None:
-                pending.cancel()
+            if inflight is not None:
+                inflight.cancel()
             watcher.cancel()
             await _aclose(generator)
 
