@@ -8,12 +8,13 @@
 
 ```bash
 # 二选一：SSH 别名（推荐，换机只改 ~/.ssh/config）或直接写当前公网 IP
-export SERVER=tandian211          # 等价于 ubuntu@<当前公网>
-# export SERVER=ubuntu@<新公网IP>  # 换服务器时改成新地址，其它命令不用动
+export SERVER=腾讯               # 等价于 root@115.159.87.18（当前现役）
+# export SERVER=root@<新公网IP>  # 换服务器时改成新地址，其它命令不用动
 ```
 
-现役机器的 SSH 别名与密钥见 `~/.ssh/config`（`tandian211` → key `migrate_211`）。
-旧地址（如 120.53.28.29）已停用，文档里不再出现具体 IP。
+现役机器：公网 `115.159.87.18`，SSH 别名 `腾讯`，用户 `root`，key `~/.ssh/id_ed25519`
+（`~/.ssh/config` 里已配 `Host 腾讯`）。因是 root 直连，命令里的 `sudo` 可省。
+历史地址 `211.159.174.204`（别名 `tandian211`）与 `120.53.28.29` 均已停用，别连错。
 
 ## 现状一览（部署后实测）
 
