@@ -739,6 +739,34 @@ async def test_slow_first_chunk_still_delivers_the_whole_answer(api, monkeypatch
     assert min(pings) < first_data, "心跳必须在首块之前到达（这才证明预取没有阻塞响应体）"
 
 
+async def test_prefetch_timeout_emits_first_ping_without_waiting_an_interval(
+    api, monkeypatch
+) -> None:
+    """预取窗口一超就发首个心跳，不许再等满一个 ``ping_every``（2026-11-23）。
+
+    窗口超时只解决了「响应头何时发出」；心跳若仍按 ``asyncio.wait`` 的
+    ``timeout=ping_every`` 轮转，服务器配置 ``stream_idle_timeout=120`` 时第一个
+    ping 要等 60s，加上 10s 预取窗口就是 70s 零字节——DeepSeek harness 早断了。
+    这里把心跳间隔撑到远大于上游首块延迟：旧实现会一个 ping 都发不出，
+    新实现在窗口超时那一刻就补第一个，断言因此有鉴别力。
+    """
+    import app.api.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "keepalive_interval", lambda _v, **_kw: 5.0)
+
+    client, harness = api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    harness.adapter.queue(Behavior(chunks=1, first_delay=0.3))
+
+    response = await client.post("/v1/chat/completions", json={**CHAT_BODY, "stream": True})
+    assert response.status_code == 200
+    lines = response.text.splitlines()
+    pings = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert pings, "预取超时后必须立刻发首个心跳，不能等满一个心跳间隔"
+    first_data = next(i for i, line in enumerate(lines) if line.startswith("data: "))
+    assert min(pings) < first_data
+
+
 async def test_failure_after_the_prefetch_window_becomes_an_error_event(api) -> None:
     """窗口外失败必须变流内 error 事件，且不许让框架报 already started。
 

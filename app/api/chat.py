@@ -310,6 +310,10 @@ async def _stream_response(
         # ``pending`` 可能是预取超时时留下的那一个（见上），不能丢掉。
         inflight: asyncio.Future[Any] | None = pending
         try:
+            # 预取窗口超时时先发 HTTP 200；立即补首个心跳，避免再等一个 ping_every。
+            # ping_every is not None 仅对 SSE 注释行兼容的 UA 成立，不会污染非白名单客户端。
+            if pending is not None and ping_every is not None:
+                yield SSE_PING
             event = first_event
             while True:
                 # event 为 None = 心跳把上一格发完了，该去等下一个。

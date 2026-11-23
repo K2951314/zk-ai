@@ -371,6 +371,30 @@ async def test_prefetch_window_starts_the_body_before_the_first_chunk(
     assert "".join(item["delta"]["text"] for item in deltas) == "part0 part1 "
 
 
+async def test_prefetch_timeout_emits_first_ping_without_waiting_an_interval(
+    messages_api, monkeypatch
+) -> None:
+    """预取超时瞬间补首个心跳，不等 ``ping_every``（三条流式路径同规格）。
+
+    把心跳间隔撑到 5s、上游首块只慢 0.3s：旧实现在首块到达前一个 ping 都
+    不会发（``asyncio.wait`` 直接被 inflight 抢先完成），新实现立刻发一个。
+    """
+    import app.api.messages as messages_mod
+
+    monkeypatch.setattr(messages_mod, "keepalive_interval", lambda _v, **_kw: 5.0)
+    client, adapter, harness = messages_api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    adapter.queue(Behavior(chunks=1, first_delay=0.3))
+
+    response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
+    assert response.status_code == 200
+    lines = response.text.splitlines()
+    assert any(line == ": ping" for line in lines), "预取超时后必须立刻发首个心跳"
+    assert min(i for i, line in enumerate(lines) if line == ": ping") < lines.index(
+        "event: content_block_start"
+    )
+
+
 async def test_failure_after_the_prefetch_window_is_an_error_event(messages_api) -> None:
     """窗口外失败变 Anthropic 形状的流内 ``error`` 事件，不能只留一个空 200。
 

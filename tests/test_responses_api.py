@@ -523,6 +523,35 @@ async def test_prefetch_window_starts_the_body_before_the_first_chunk(
     assert _payloads(events, "response.completed")
 
 
+async def test_prefetch_timeout_emits_first_ping_without_waiting_an_interval(
+    responses_api, monkeypatch
+) -> None:
+    """预取超时瞬间补首个心跳，不等 ``ping_every``（三条流式路径同规格）。
+
+    心跳间隔 5s、上游首块 0.3s：旧实现的 ``asyncio.wait`` 会被 inflight 抢先
+    完成，一个 ping 都发不出；新实现在窗口超时那一刻就补了第一个。
+    """
+    import app.api.responses as responses_mod
+
+    monkeypatch.setattr(responses_mod, "keepalive_interval", lambda _v, **_kw: 5.0)
+    client, adapter, harness = responses_api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    adapter.queue(Behavior(chunks=1, first_delay=0.3))
+
+    response = await client.post(
+        "/v1/responses", json={"model": "fake-model", "input": "hello", "stream": True}
+    )
+    assert response.status_code == 200
+    lines = response.text.splitlines()
+    pings = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert pings, "预取超时后必须立刻发首个心跳"
+    first_delta = next(
+        i for i, line in enumerate(lines)
+        if line.startswith("data: ") and "response.output_text.delta" in line
+    )
+    assert min(pings) < first_delta
+
+
 async def test_failure_after_the_prefetch_window_is_an_error_event(responses_api) -> None:
     """窗口外失败变流内 ``error`` 事件 + ``[DONE]``，不能只留一个空 200。
 

@@ -48,7 +48,7 @@ request:
   # 把「上游在长时间思考」和「连接已死」区分开——没有它，/v1 流式在静默期
   # 一个字节都不发，ds harness / Codex 会判连接失败并断开。
   # 0 = 关闭心跳。改这里即可生效（已登记进 loader 的桥接表，不用改 .env）。
-  stream_idle_timeout: 120
+  stream_idle_timeout: 20
   # 追加「能收 SSE 注释行（心跳 / zkai-meta）」的客户端 UA 关键词，逗号分隔、
   # 大小写不敏感。内置名单（codex / ds-harness / OpenAI SDK 新旧 UA 写法）
   # 永远生效，这里只追加：新客户端出现时改这一行即可，不用改代码重启。

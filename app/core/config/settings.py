@@ -156,7 +156,7 @@ class Settings(BaseSettings):
     api_token: str | None = None
 
     request_timeout: float = 120.0
-    stream_idle_timeout: float = 120.0
+    stream_idle_timeout: float = 20.0
     #: 追加的「能收 SSE 注释行」客户端 UA 关键词（逗号分隔，大小写不敏感）。
     #: 内置白名单（codex / ds-harness / OpenAI SDK 新旧两种 UA 写法）永远生效，
     #: 这里只做**追加**：新客户端出现时运营者改 config.yaml 即可让它收到
