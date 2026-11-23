@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 import uuid
 from dataclasses import replace
@@ -413,28 +414,41 @@ class DelegateMixin:
     ) -> dict[str, Any]:
         """按顺序跑多段执行体任务（一条消息里点名多个 CLI）。
 
-        每段各自带 ``data.executor``；一条消息里「先让 A 查、再让 B 审」是常态，
-        所以这里一次落库全部任务，再串行跑——串行是有意的：免费档额度本来就紧，
-        并发只会互相挤成 429。
+        每段各自带 ``data.executor``。**步内并发、步间串行**（2026-11-23）：
+        第 N 段标了 ``concurrent`` 就与上一段同一步并发跑，否则开始新的一步。
+        没有这个分界，「先让 A 查、再让 B 审」就失去意义——所以默认仍是纯串行，
+        并发必须逐段显式标。
+
+        为什么以前一律串行：免费档额度紧，并发容易互相挤成 429。那条理由现在
+        仍然成立，只是不再一刀切——同一批里「两个互不相干的调研」本来就该并跑
+        （串行纯等待），而「查完再审」必须串。判断权交给派单的人，不再由服务层
+        替他假定全是后者。
         """
         if not items:
             raise ZKAIError("至少要有一段任务", http_status=400)
         if len(items) > 10:
             raise ZKAIError("一条消息最多指派 10 段任务", http_status=400)
 
-        resolved: list[tuple[Any, str, str]] = []
-        for item in items:
+        resolved: list[tuple[Any, str, str, bool]] = []
+        for position, item in enumerate(items):
             role = str(item.get("role") or "").strip()
             task = str(item.get("task") or "").strip()
             if not task:
                 raise ZKAIError(f"执行体 {role!r} 那段没有任务内容", http_status=400)
+            concurrent = bool(item.get("concurrent"))
+            if concurrent and position == 0:
+                raise ZKAIError(
+                    "第一段不能标并发：它前面没有段可以并行。"
+                    "想并行就把它后面的段标成并发，第一段会自动和它们同一步跑。",
+                    http_status=400,
+                )
             registry, config = self._resolve_delegation(
                 role,
                 model=item.get("model"),
                 effort=item.get("effort"),
                 context_window=item.get("context_window"),
             )
-            resolved.append((config, task, role))
+            resolved.append((config, task, role, concurrent))
 
         if session_id:
             row = await self.repo.get_session(session_id)
@@ -457,7 +471,7 @@ class DelegateMixin:
                 permission="ask",
             )
 
-        for config, task, role in resolved:
+        for config, task, role, _concurrent in resolved:
             await self.repo.add_message(
                 session_id,
                 role="user",
@@ -479,17 +493,128 @@ class DelegateMixin:
         job.add_done_callback(_BACKGROUND_TASKS.discard)
         return await self.session_detail(session_id) or {"session": None, "messages": []}
 
+    @staticmethod
+    def plan_steps(resolved: list[tuple[Any, str, str, bool]]) -> list[list[int]]:
+        """把段序切成「步」，返回每步里各段的下标（0 起）。
+
+        第 N 段标了 concurrent 就并入上一步，否则自己开一步。下标而不是段本身，
+        是因为步内完成顺序不确定，落库顺序必须按段序稳定。
+        """
+        steps: list[list[int]] = []
+        for index, _item in enumerate(resolved):
+            concurrent = _item[3]
+            if concurrent and steps:
+                steps[-1].append(index)
+            else:
+                steps.append([index])
+        return steps
+
+    def _segment_cwd(self, batch_cwd: Path, index: int, role: str, grouped: bool) -> Path:
+        """并行段各用独立工作目录，否则两个 CLI 同时写 outputs/report.md 会互相覆盖。
+
+        串行段仍用整批共享的目录（行为不变：先查后审，产物落在同一处）。
+        """
+        if not grouped:
+            return batch_cwd
+        safe = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in role)[:32]
+        target = batch_cwd / "parallel" / f"{index}-{safe or 'seg'}"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning("并行段目录创建失败，回落到共享目录：%s", target)
+            return batch_cwd
+        return target
+
+    async def _run_segment(
+        self,
+        run: _Running,
+        *,
+        index: int,
+        total: int,
+        config: Any,
+        task: str,
+        role: str,
+        cwd: Path,
+        space: taskspace.TaskSpace | None,
+        allow_bypass: bool,
+        handed: str,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        """跑一段：调执行体、记账、落一条 assistant 消息、发事件。
+
+        返回 (结果, 产物清单)。产物清单返回给调用方合并——并行段各自写自己的
+        ``state.json`` 会互相覆盖，必须由上层按整步合并后再写一次。
+        """
+        self._emit(run, {"type": "step_start", "step": index, "model": config.model})
+        result = await run_delegation(
+            config, task=handed, cwd=cwd, allow_bypass=allow_bypass,
+            on_line=self._cli_line_handler(run),
+            cancel=run.cancel_event,
+            idle_timeout=self._idle_timeout_for(config),
+            resume_ref=self._resume_ref_for(run.workspace, space, config.name),
+        )
+        usage_ledger.record_delegation(
+            tool=config.name,
+            model=config.model,
+            role=role,
+            session_id=run.session_id,
+            task_space=str(run.workspace),
+            ok=result.ok,
+            elapsed=result.elapsed,
+            tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out,
+            cost_usd=result.cost_usd,
+            session_ref=result.session_ref,
+            error="" if result.ok else result.output[:200],
+        )
+        payload = {
+            "role": role,
+            "tool": config.name,
+            "model": config.model,
+            "cost_tier": config.cost_tier,
+            "effort": config.effort,
+            "context_window": config.context_window,
+            "elapsed": round(result.elapsed, 1),
+            "ok": result.ok,
+            "index": index,
+            "total": total,
+            **usage_fields(result),
+        }
+        items = cli_prompting.collect_artifacts(cwd)
+        body = self._with_artifacts(
+            result.output, cwd=cwd, workspace=run.workspace,
+            space=space, step=index, session_ref=result.session_ref,
+            tool=config.name,
+        )
+        seq = await self.repo.add_message(
+            run.session_id,
+            role="assistant",
+            kind="message",
+            content=body,
+            data={"executor": payload},
+        )
+        self._emit(run, {
+            "type": "assistant",
+            "seq": seq,
+            "content": body,
+            "thinking": None,
+            "tool_calls": [],
+            "routing": None,
+            "step": index,
+            "executor": payload,
+        })
+        return result, items
+
     async def _delegation_batch(
-        self, run: _Running, resolved: list[tuple[Any, str, str]]
+        self, run: _Running, resolved: list[tuple[Any, str, str, bool]]
     ) -> None:
-        """串行跑多段：每段一条 assistant 消息，失败即停（后面的段不再烧额度）。"""
+        """按步跑多段：步内并发、步间串行，每步都跑完再判成败。"""
         session_id = run.session_id
         outcome: dict[str, Any] = {"session_id": session_id, "status": "failed", "error": None}
         status, error = "done", None
         #: 上一段 (角色, 结论)；第一段为 None。跨段交接的唯一来源。
         prev: tuple[str, str] | None = None
         # 一批多段共享同一个任务空间：先让 A 查、再让 B 审，产物落在同一处。
-        goals = "；".join(task for _, task, _ in resolved)[:200]
+        goals = "；".join(task for _config, task, _role, _cc in resolved)[:200]
         space, batch_cwd, allow_bypass, space_error = self._enter_task_space(
             run, goal=goals
         )
@@ -513,80 +638,67 @@ class DelegateMixin:
                 "workspace": str(run.workspace),
                 "resumed": False,
             })
-            for index, (config, task, role) in enumerate(resolved, start=1):
+            steps = self.plan_steps(resolved)
+            for members in steps:
                 if run.cancelled:
                     status, error = "cancelled", "任务被取消"
                     break
-                self._emit(run, {"type": "step_start", "step": index, "model": config.model})
-                # 段间交接：上一段的结论注入下一段（2026-11-13）。没有这一步，
-                # 「先让 A 查、再让 B 审」里的 B 根本看不到 A 查到了什么，
-                # 两段唯一的联系只是共享一个目录。
-                handed = task
-                if prev is not None:
-                    handed = cli_prompting.with_context(prev[0], prev[1], task)
-                result = await run_delegation(
-                    config, task=handed, cwd=batch_cwd, allow_bypass=allow_bypass,
-                    on_line=self._cli_line_handler(run),
-                    cancel=run.cancel_event,
-                    idle_timeout=self._idle_timeout_for(config),
-                    resume_ref=self._resume_ref_for(run.workspace, space, config.name),
-                )
-                prev = (role, result.output)
-                # 记账：批量里每一段单独记，才能看出「哪一段最贵」。
-                usage_ledger.record_delegation(
-                    tool=config.name,
-                    model=config.model,
-                    role=role,
-                    session_id=session_id,
-                    task_space=str(run.workspace),
-                    ok=result.ok,
-                    elapsed=result.elapsed,
-                    tokens_in=result.tokens_in,
-                    tokens_out=result.tokens_out,
-                    cost_usd=result.cost_usd,
-                    session_ref=result.session_ref,
-                    error="" if result.ok else result.output[:200],
-                )
-                payload = {
-                    "role": role,
-                    "tool": config.name,
-                    "model": config.model,
-                    "cost_tier": config.cost_tier,
-                    "effort": config.effort,
-                    "context_window": config.context_window,
-                    "elapsed": round(result.elapsed, 1),
-                    "ok": result.ok,
-                    "index": index,
-                    "total": len(resolved),
-                    **usage_fields(result),
-                }
-                body = self._with_artifacts(
-                    result.output, cwd=batch_cwd, workspace=run.workspace,
-                    space=space, step=index, session_ref=result.session_ref,
-                    tool=config.name,
-                )
-                seq = await self.repo.add_message(
-                    session_id,
-                    role="assistant",
-                    kind="message",
-                    content=body,
-                    data={"executor": payload},
-                )
-                self._emit(run, {
-                    "type": "assistant",
-                    "seq": seq,
-                    "content": body,
-                    "thinking": None,
-                    "tool_calls": [],
-                    "routing": None,
-                    "step": index,
-                    "executor": payload,
-                })
+                grouped = len(members) > 1
+                calls: list[tuple[int, Any, str, str, str, Path]] = []
+                for offset in members:
+                    config, task, role, _concurrent = resolved[offset]
+                    index = offset + 1
+                    handed = task
+                    if prev is not None:
+                        # 串行段的行為与 2026-11-13 完全相同：拿上一段的结论。
+                        handed = cli_prompting.with_context(prev[0], prev[1], task)
+                    cwd = self._segment_cwd(batch_cwd, index, role, grouped)
+                    calls.append((index, config, task, role, handed, cwd))
+                if grouped:
+                    # 步内并发。return_exceptions=True 是为了让同一步全跑完——
+                    # 一段崩了不该让另一段的产物和账目凭空消失。
+                    produced = await asyncio.gather(*[
+                        self._run_segment(
+                            run, index=index, total=len(resolved), config=config,
+                            task=task, role=role, cwd=cwd, space=space,
+                            allow_bypass=allow_bypass, handed=handed,
+                        )
+                        for index, config, task, role, handed, cwd in calls
+                    ], return_exceptions=True)
+                    finished: list[tuple[Any, list[dict[str, Any]]]] = []
+                    for lane_result in produced:
+                        if isinstance(lane_result, BaseException):
+                            raise lane_result
+                        finished.append(lane_result)
+                    await self._merge_step_artifacts(
+                        run, space=space, batch_cwd=batch_cwd, calls=calls,
+                        finished=finished,
+                    )
+                else:
+                    index, config, task, role, handed, cwd = calls[0]
+                    finished = [await self._run_segment(
+                        run, index=index, total=len(resolved), config=config,
+                        task=task, role=role, cwd=cwd, space=space,
+                        allow_bypass=allow_bypass, handed=handed,
+                    )]
                 if run.cancelled:
                     status, error = "cancelled", "任务被取消"
                     break
-                if not result.ok:
-                    status, error = "failed", result.output[:300]
+                # 交接：单段组照旧用「上一段」；并行组用整组结论合并注入，
+                # 下游看到的是全量，而不是随机先跑完那一段。
+                if len(calls) == 1:
+                    prev = (calls[0][3], finished[0][0].output)
+                else:
+                    prev = (
+                        "同一步并行段 " + "、".join(call[3] for call in calls),
+                        cli_prompting.combine_outputs([
+                            (call[3], result.output)
+                            for call, (result, _items) in zip(calls, finished, strict=True)
+                        ]),
+                    )
+                failure = next((result for result, _items in finished if not result.ok), None)
+                if failure is not None:
+                    status, error = "failed", failure.output[:300]
                     break
             await self.repo.update_status(session_id, status, steps=len(resolved), error=error)
             self._emit(run, {
@@ -609,6 +721,63 @@ class DelegateMixin:
                 taskspace.release(run.workspace, space.task_id, owner=session_id)
             run.done.put_nowait(outcome)
             self._running.pop(session_id, None)
+
+    async def _merge_step_artifacts(
+        self,
+        run: _Running,
+        *,
+        space: taskspace.TaskSpace | None,
+        batch_cwd: Path,
+        calls: list[tuple[int, Any, str, str, str, Path]],
+        finished: list[tuple[Any, list[dict[str, Any]]]],
+    ) -> None:
+        """并行步跑完后合并产物清单（2026-11-23）。
+
+        每个并行段有自己的 cwd，``collect_artifacts`` 只看到自己目录下的东西。
+        这里按段收拢到整步共享的 ``outputs/<段>-<角色>/`` 下，再**写一次**
+        ``state.json``：各段并发写同一份 state 会互相覆盖，最后只剩一个。
+
+        用复制而不是移动：执行体就是在原处写的，移走会让它自己找不到文件。
+        """
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        shared_root = batch_cwd / "outputs"
+        for (index, _config, _task, role, _handed, cwd), (_result, items) in zip(
+            calls, finished, strict=True
+        ):
+            if cwd == batch_cwd:
+                continue
+            for item in items:
+                rel = str(item.get("path") or "")
+                if not rel:
+                    continue
+                size = int(item.get("bytes") or 0)
+                try:
+                    inner = Path(rel).relative_to("outputs")
+                    target = shared_root / f"{index}-{role}" / inner
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cwd / rel, target)
+                    archived = target.relative_to(batch_cwd).as_posix()
+                except (OSError, ValueError):
+                    logger.warning("并行产物归档失败：%s", rel)
+                    archived = rel
+                key = f"{archived}|{role}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append({"path": archived, "bytes": size, "role": role})
+        if not merged or space is None:
+            return
+        summary = "；".join(f"{it['role']}: {it['path']}" for it in merged)[:500]
+        try:
+            taskspace.update(
+                run.workspace,
+                space.task_id,
+                artifacts=merged,
+                handoff_brief=summary,
+            )
+        except (OSError, ValueError):
+            logger.warning("并行产物清单落盘失败：%s", run.session_id)
 
     def _enter_task_space(
         self, run: _Running, *, goal: str

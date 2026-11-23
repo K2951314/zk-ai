@@ -154,10 +154,18 @@ class DelegationItem(BaseModel):
     model: str | None = Field(default=None, max_length=128)
     effort: str | None = Field(default=None, max_length=16)
     context_window: int | None = Field(default=None, ge=0, le=2_000_000)
+    #: 与**上一段**同一步并发跑（2026-11-23）。默认 false = 自己一步、按序串行。
+    #: 第一段不能标（它前面没有段可并行），标了返回 400。
+    concurrent: bool = False
 
 
 class DelegationPayload(BaseModel):
-    """一条消息里点名多个执行体：按顺序串行跑。"""
+    """一条消息里点名多个执行体：默认按顺序串行，段可标 ``concurrent`` 并跑。
+
+    步 = 连续若干个标了 ``concurrent`` 的段 + 它们前面那段。步内并发、步间串行：
+    ``A``、``B(concurrent)``、``C`` 是「A 与 B 同时跑，都完了再跑 C」，
+    而不是三段一起跑。没有这个分界，「先查再审」就失去了意义。
+    """
 
     items: list[DelegationItem] = Field(min_length=1, max_length=10)
     session_id: str | None = Field(default=None, max_length=64)

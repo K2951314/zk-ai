@@ -1144,6 +1144,8 @@ function segDefaults(role) {
     model: e ? e.model : "",
     effort: e ? (e.effort || "") : "",
     context_window: e ? (e.context_window || 0) : 0,
+    //: 与上一段同一步并发跑（2026-11-23）。默认关——免费档额度紧，并发要人显式要。
+    concurrent: false,
   };
 }
 
@@ -1198,9 +1200,10 @@ const CTX_OPTS = [[0, "默认上下文"], [128000, "128K"], [200000, "200K"], [1
 function renderExecBar(segs) {
   const bar = $("execBar");
   const open = state.segsOpen;
+  const parallel = segs.filter((s, i) => state.segs[i] && state.segs[i].concurrent).length;
   let html = `<div class="exec-head">
     <span class="chip">⚡ ${segs.length} 段</span>
-    <span class="small muted">按顺序串行</span>
+    <span class="small muted">${parallel ? `第 1 段与后续 ${parallel} 段并跑，之后串行` : "按顺序串行"}</span>
     <button type="button" class="linklike" id="execToggle">${open ? "收起设置" : "设置每一段"}</button>
   </div>`;
 
@@ -1226,6 +1229,8 @@ function renderExecBar(segs) {
         <label class="small">模型 <select data-i="${i}" data-k="model">${models}</select></label>
         ${hasEffort ? `<label class="small">思考 <select data-i="${i}" data-k="effort">${selectOpts(EFFORT_OPTS, st.effort)}</select></label>` : ""}
         ${hasCtx ? `<label class="small">上下文 <select data-i="${i}" data-k="context_window">${selectOpts(CTX_OPTS, st.context_window)}</select></label>` : ""}
+        ${i === 0 ? "" : `<label class="small" title="与上一段同时跑；同一步全跑完才进入下一步">
+          <input type="checkbox" data-i="${i}" data-k="concurrent"${st.concurrent ? " checked" : ""} /> 与上一段并跑</label>`}
       </div>`;
     }).join("");
   } else {
@@ -1245,6 +1250,16 @@ function renderExecBar(segs) {
       const k = el.dataset.k;
       if (!state.segs[i]) return;
       state.segs[i][k] = k === "context_window" ? Number(el.value) : el.value;
+    };
+  });
+  bar.querySelectorAll("input[type=checkbox][data-i]").forEach(el => {
+    el.onchange = () => {
+      const i = Number(el.dataset.i);
+      if (!state.segs[i]) return;
+      state.segs[i].concurrent = el.checked;
+      // 并发标记会影响标题那句（串行 / 并跑），改完必须重渲染、并换签名。
+      state.sig = "";
+      updateExecBar();
     };
   });
 }
@@ -1473,6 +1488,8 @@ $("composer").onsubmit = async (e) => {
         if (st.model) item.model = st.model;
         if (st.effort) item.effort = st.effort;
         if (st.context_window) item.context_window = st.context_window;
+        // 第一段不能标并发（它前面没有段），后端会 400——这里直接不发。
+        if (i > 0 && st.concurrent) item.concurrent = true;
         return item;
       });
       const active = state.session && (state.session.status === "running" ||

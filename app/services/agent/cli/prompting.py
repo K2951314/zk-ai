@@ -50,6 +50,10 @@ def with_context(prev_role: str, prev_output: str, task: str) -> str:
     等于在审空气。这里显式传递（带截断），比靠「同一个 cwd」假装有上下文可靠。
 
     ``prev_output`` 为空时不注入，避免给第一段塞一个空段落。
+
+    只在**串行**的段之间用（2026-11-23）。并行段彼此不知道对方存在，谁先跑完
+    取决于网络，拿「上一段」当参照就成了随机结果；同一并行组跑完后，下一段
+    拿到的是整组的合并结论（见 :func:`combine_outputs`）。
     """
     context = (prev_output or "").strip()
     if not context:
@@ -62,6 +66,23 @@ def with_context(prev_role: str, prev_output: str, task: str) -> str:
         f"# 你的任务\n"
         f"{task}"
     )
+
+
+def combine_outputs(results: list[tuple[str, str]]) -> str:
+    """把**并行组**里各段的结论合成一段交接材料，给下一段（通常是汇总/审查）。
+
+    并行组内各段互不参照，所以不能只挑一个当「上一段」——那等于让下游审
+    「随机选中那一段」。这里按段序全列，每段带自己的角色名，下游自己判断
+    哪一份有用。总长仍受 :data:`HANDOFF_CHARS` 约束（在 ``with_context`` 里截断），
+    所以组越大每段被读到的越少——这是有意的：宁可截断，也不给下游灌全量。
+    """
+    parts: list[str] = []
+    for role, output in results:
+        text = (output or "").strip()
+        if not text:
+            continue
+        parts.append(f"### {role}\n{text}")
+    return "\n\n".join(parts)
 
 
 def collect_artifacts(cwd: Any, *, limit: int = 20) -> list[dict[str, Any]]:

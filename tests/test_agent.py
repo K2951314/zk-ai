@@ -1466,3 +1466,224 @@ async def test_a_bad_file_name_cannot_escape_the_upload_dir(tmp_path):
     assert uploads in path.parents, f"文件逃出了上传目录：{path}"
     assert ".." not in path.parts
     await harness.container.shutdown()
+
+
+# --------------------------------------------------------------------------
+# 多角色并发（2026-11-23）：步内并发、步间串行
+# --------------------------------------------------------------------------
+
+
+def _concurrency_repo(tmp_path: Path):
+    """写一个三执行体的 cli_tools.yaml，返回 (config, cfg_dir)。"""
+    import sys
+
+    import yaml
+
+    config = agent_config(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "cli_tools.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tools": {
+                    "stub": {
+                        "enabled": True,
+                        "command": sys.executable,
+                        "backend": "official",
+                        "model": "m",
+                        "cost_tier": "free",
+                        "timeout": 60,
+                        "approval_mode": "plan",
+                    }
+                },
+                "roles": {
+                    "cli-a": {"tool": "stub", "hint": "A"},
+                    "cli-b": {"tool": "stub", "hint": "B"},
+                    "cli-c": {"tool": "stub", "hint": "C"},
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config.settings.config_dir = str(cfg_dir)
+    return config
+
+
+def test_plan_steps_groups_only_consecutive_concurrent_segments() -> None:
+    """步的切法：标了 concurrent 就并入上一步，否则自己开一步。
+
+    这是整个并发语义的定义式，单独钉住——只跑集成测试的话，「A、B 并跑、
+    C 串行」和「A、B、C 全部一步」在计时上可能长得一样。
+    """
+    from app.services.agent.service_delegate import DelegateMixin
+
+    steps = DelegateMixin.plan_steps([
+        ("cfg-a", "甲", "cli-a", False),   # 自己一步
+        ("cfg-b", "乙", "cli-b", True),    # 并入上一步 → [0, 1]
+        ("cfg-c", "丙", "cli-c", False),   # 新的一步
+        ("cfg-d", "丁", "cli-d", True),    # 并入上一步 → [2, 3]
+        ("cfg-e", "戊", "cli-e", True),    # 继续并入 → [2, 3, 4]
+    ])
+    assert steps == [[0, 1], [2, 3, 4]]
+
+
+def test_plan_steps_keeps_everything_serial_by_default() -> None:
+    """不标 concurrent 就是纯串行——默认行为不许被并发改造顺手改掉。"""
+    from app.services.agent.service_delegate import DelegateMixin
+
+    steps = DelegateMixin.plan_steps([
+        ("cfg-a", "甲", "cli-a", False),
+        ("cfg-b", "乙", "cli-b", False),
+        ("cfg-c", "丙", "cli-c", False),
+    ])
+    assert steps == [[0], [1], [2]]
+
+
+async def test_concurrent_segments_overlap_and_the_next_step_waits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """标了 concurrent 的两段真的同时在跑，且下一步等它们都结束才开工。
+
+    为什么值得一条测试：``asyncio.gather`` 写成 ``await`` 串起来、或者把
+    ``return_exceptions`` 丢掉，代码读起来都像是对的——只有「同时在飞几条」
+    这个数字能分辨。
+    """
+    from app.services.agent.cli.base import CliResult
+
+    config = _concurrency_repo(tmp_path)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    live = 0
+    peak = 0
+    events: list[tuple[str, str]] = []
+
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
+        nonlocal live, peak
+        lane = "parallel" if Path(cwd).parent.name == "parallel" else "shared"
+        live += 1
+        peak = max(peak, live)
+        events.append(("start", lane))
+        await asyncio.sleep(0.15)
+        live -= 1
+        events.append(("end", lane))
+        return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
+    created = await service.start_delegations(items=[
+        {"role": "cli-a", "task": "甲"},
+        {"role": "cli-b", "task": "乙", "concurrent": True},
+        {"role": "cli-c", "task": "丙"},
+    ])
+    sid = created["session"]["id"]
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+    assert peak == 2, f"前两段应当同时在飞，实测峰值 {peak}：{events}"
+    # 第三步（共享目录那条）必须在两个并行段都结束之后才开始。
+    first_shared = next(i for i, ev in enumerate(events) if ev == ("start", "shared"))
+    last_parallel_end = max(i for i, ev in enumerate(events) if ev == ("end", "parallel"))
+    assert first_shared > last_parallel_end, events
+    await harness.container.shutdown()
+
+
+async def test_concurrent_segments_get_separate_directories_and_no_context(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """并行段各用独立目录，且彼此**不**注入上下文。
+
+    反过来说：如果并行段还按「上一段」注入，同一步的 A 会莫名其妙拿到 B 的
+    结论——谁先跑完取决于网络，那就成了随机结果。
+    """
+    from app.services.agent.cli.base import CliResult
+
+    config = _concurrency_repo(tmp_path)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    handed: dict[str, str] = {}
+    cwds: dict[str, Path] = {}
+
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
+        label = task[-1]  # 任务都以单个汉字结尾
+        handed[label] = task
+        cwds[label] = Path(cwd)
+        return CliResult(ok=True, output=f"结论-{label}", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
+    created = await service.start_delegations(items=[
+        {"role": "cli-a", "task": "甲"},
+        {"role": "cli-b", "task": "乙", "concurrent": True},
+        {"role": "cli-c", "task": "丙"},
+    ])
+    sid = created["session"]["id"]
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "done", row["error"]
+    # 并行段互不注入。
+    assert handed["甲"] == "甲"
+    assert handed["乙"] == "乙"
+    # 两个并行段目录不同，且都在 parallel/ 下——否则 outputs/report.md 互相覆盖。
+    assert cwds["甲"] != cwds["乙"]
+    assert cwds["甲"].parent.name == "parallel"
+    assert cwds["乙"].parent.name == "parallel"
+    # 第三步拿到的是整组合并结论，不是随机一份。
+    assert handed["丙"].startswith("# 上一段（同一步并行段 cli-a、cli-b）的结论")
+    assert "### cli-a" in handed["丙"]
+    assert "### cli-b" in handed["丙"]
+    assert "结论-甲" in handed["丙"]
+    assert "结论-乙" in handed["丙"]
+    assert handed["丙"].endswith("# 你的任务\n丙")
+    await harness.container.shutdown()
+
+
+async def test_one_failing_lane_does_not_cancel_its_sibling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """并行段里一段失败，另一段照样跑完并落库——否则它的额度和产物凭空蒸发。"""
+    from app.services.agent.cli.base import CliResult
+
+    config = _concurrency_repo(tmp_path)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+
+    ran: list[str] = []
+
+    async def fake_run(cfg, *, task, cwd, allow_bypass=False, **_kwargs):
+        ran.append(task)
+        if "乙" in task:
+            return CliResult(ok=False, output="上游报错", elapsed=0.1)
+        return CliResult(ok=True, output=f"done:{task}", elapsed=0.1)
+
+    monkeypatch.setattr("app.services.agent.service_delegate.run_delegation", fake_run)
+    created = await service.start_delegations(items=[
+        {"role": "cli-a", "task": "甲"},
+        {"role": "cli-b", "task": "乙", "concurrent": True},
+        {"role": "cli-c", "task": "丙"},
+    ])
+    sid = created["session"]["id"]
+    row = await wait_for_status(service, sid, {"done", "failed"})
+    assert row["status"] == "failed"
+    assert sorted(ran) == sorted(["甲", "乙"]), ran  # 第三段不再跑
+    msgs = await service.repo.messages(sid)
+    results = [m for m in msgs if m["role"] == "assistant" and m["kind"] == "message"]
+    assert len(results) == 2  # 失败的那段也落了消息，另一段没被吞
+    await harness.container.shutdown()
+
+
+async def test_first_segment_cannot_be_concurrent(tmp_path: Path) -> None:
+    """第一段标并发是 400：它前面没有段可以并行。"""
+    import pytest
+
+    from app.core.errors import ZKAIError
+
+    config = _concurrency_repo(tmp_path)
+    harness = await build_harness(config)
+    service = harness.container.agent_service
+    with pytest.raises(ZKAIError) as excinfo:
+        await service.start_delegations(items=[
+            {"role": "cli-a", "task": "甲", "concurrent": True},
+            {"role": "cli-b", "task": "乙"},
+        ])
+    assert excinfo.value.http_status == 400
+    assert "第一段不能标并发" in str(excinfo.value)
+    await harness.container.shutdown()
