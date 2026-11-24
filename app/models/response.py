@@ -25,6 +25,7 @@ __all__ = [
     "ChatMessage",
     "ChunkDelta",
     "FunctionCall",
+    "ResponsesInputTokensDetails",
     "ResponsesRequest",
     "ResponsesResponse",
     "ResponsesUsage",
@@ -226,10 +227,64 @@ class ChatCompletionChunk(BaseModel):
     usage: Usage | None = None
 
 
+class ResponsesInputTokensDetails(BaseModel):
+    """Responses 协议的输入 token 明细。
+
+    OpenAI Responses 的缓存命中数**只**出现在这里（``usage.input_tokens_details.
+    cached_tokens``），没有 chat completions 那个 ``prompt_tokens_details`` 位置的
+    兼容义务。DeepSeek Harness 的 Responses 客户端正是按这个路径读的
+    （``response.usage.input_tokens_details.cached_tokens``，读不到就当 0）——
+    2026-11-24 实测：harness 走 /v1/responses，网关此前只下发三个整数字段，
+    于是它显示的缓存命中恒为 0%，而上游其实命中 90%+。
+    """
+
+    cached_tokens: int = 0
+
+
 class ResponsesUsage(BaseModel):
+    """Responses 协议的 usage。
+
+    ``input_tokens`` 沿用 OpenAI 语义 = **含缓存命中**的总输入（与 chat
+    completions 的 ``prompt_tokens`` 同一口径），客户端会自己减掉
+    ``input_tokens_details.cached_tokens`` 得到真正新算的部分。
+    """
+
     input_tokens: int = 0
+    input_tokens_details: ResponsesInputTokensDetails = Field(
+        default_factory=ResponsesInputTokensDetails
+    )
     output_tokens: int = 0
     total_tokens: int = 0
+
+    @classmethod
+    def from_usage(cls, usage: Usage | None) -> ResponsesUsage:
+        """把内部规范化的 ``Usage`` 映射成 Responses 形状（唯一的转换入口）。
+
+        /v1/responses 的三个构造点（assembler 收 chunk.usage / assembler 收 usage
+        事件 / request_service 的非流式响应）全部走这里，
+        免得哪一处又漏掉缓存字段——这正是本次 bug 的成因。
+
+        ⚠ **不做 ``cached <= input`` 的夹取**。看着像个该有的保护，实际会**改错数**：
+        本项目内部的 ``Usage.prompt_tokens`` 对 OpenAI 系是「含缓存的输入」
+        （``app/providers/base.py`` 直接透传上游 ``prompt_tokens``），对 Anthropic 系
+        却是「不含缓存的输入」（``app/providers/anthropic.py:364-368`` 把
+        ``input_tokens`` 原样当 prompt、``cache_read_input_tokens`` 当 cached）。
+        按 prompt 当上界夹取会把 StepFun 这类 Anthropic 上游的缓存数**削减到错值**。
+        客户端本来就有 ``Math.max(0, input - cached)`` 这种防护（DSH 的 Responses
+        客户端实测如此），夹取收益为零、代价是静默改数。
+        顺带：某条日志出现 >100% 的命中率正是在提示「这个上游不是 OpenAI 语义」，
+        夹掉就看不见这个信号了。
+        """
+        if usage is None:
+            return cls()
+        return cls(
+            input_tokens=usage.prompt_tokens,
+            input_tokens_details=ResponsesInputTokensDetails(
+                cached_tokens=max(0, usage.cached_tokens)
+            ),
+            output_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+        )
 
 
 def message_output_item(text: str, *, item_id: str | None = None) -> dict[str, Any]:

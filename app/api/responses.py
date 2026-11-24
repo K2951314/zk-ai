@@ -51,6 +51,7 @@ from app.models.response import (
     ResponsesRequest,
     ResponsesUsage,
     StreamEvent,
+    Usage,
     message_output_item,
 )
 
@@ -159,11 +160,7 @@ class _ResponsesAssembler:
     def feed_chunk(self, chunk: ChatCompletionChunk) -> list[str]:
         out: list[str] = []
         if chunk.usage is not None:
-            self._usage = ResponsesUsage(
-                input_tokens=chunk.usage.prompt_tokens,
-                output_tokens=chunk.usage.completion_tokens,
-                total_tokens=chunk.usage.total_tokens,
-            )
+            self._usage = ResponsesUsage.from_usage(chunk.usage)
         if chunk.model:
             self.model = chunk.model
         if not chunk.choices:
@@ -222,12 +219,13 @@ class _ResponsesAssembler:
     def set_routing_meta(self, meta: Any) -> None:
         self._zk_ai = meta.model_dump()
 
-    def set_usage(self, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
-        self._usage = ResponsesUsage(
-            input_tokens=prompt_tokens,
-            output_tokens=completion_tokens,
-            total_tokens=total_tokens,
-        )
+    def set_usage(self, usage: Usage | None) -> None:
+        """记录本次响应的 usage（缓存字段一并保留）。
+
+        收整个 ``Usage`` 而不是三个 int：拆成三个参数时，第 N 次漏传缓存字段
+        是**静默**的（客户端只看到 0%），而这里签名逼着调用方交出完整对象。
+        """
+        self._usage = ResponsesUsage.from_usage(usage)
 
     def finish(self) -> str:
         """Close every open item, then emit ``response.completed``."""
@@ -438,11 +436,7 @@ async def _stream_response(
                         for piece in assembler.feed_chunk(event.chunk):
                             yield piece
                     elif event.type == "usage" and event.usage is not None:
-                        assembler.set_usage(
-                            event.usage.prompt_tokens,
-                            event.usage.completion_tokens,
-                            event.usage.total_tokens,
-                        )
+                        assembler.set_usage(event.usage)
                     elif event.type == "meta" and event.meta is not None:
                         assembler.set_routing_meta(event.meta)
                     elif event.type == "error" and event.error is not None:

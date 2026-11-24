@@ -48,7 +48,12 @@ from app.core.logging import get_logger
 from app.core.security import constant_time_equals
 from app.models.anthropic import AnthropicMessagesRequest, strip_context_suffix
 from app.models.request import ChatCompletionRequest, new_request_id
-from app.models.response import ChatCompletionChunk, ChatCompletionResponse, StreamEvent
+from app.models.response import (
+    ChatCompletionChunk,
+    ChatCompletionResponse,
+    StreamEvent,
+    Usage,
+)
 
 logger = get_logger("api.messages")
 
@@ -145,7 +150,7 @@ class _StreamAssembler:
         self._singleton_blocks: dict[str, int] = {}
         self._tool_blocks: dict[int, int] = {}
         self._stop_reason: str | None = None
-        self._usage: tuple[int, int] | None = None
+        self._usage: Usage | None = None
 
     def start(self) -> str:
         message_start = {
@@ -166,7 +171,7 @@ class _StreamAssembler:
     def feed_chunk(self, chunk: ChatCompletionChunk) -> list[str]:
         out: list[str] = []
         if chunk.usage is not None:
-            self._usage = (chunk.usage.prompt_tokens, chunk.usage.completion_tokens)
+            self._usage = chunk.usage
         if not chunk.choices:
             return out
         choice = chunk.choices[0]
@@ -201,8 +206,16 @@ class _StreamAssembler:
             self._stop_reason = _STOP_REASONS.get(choice.finish_reason, "end_turn")
         return out
 
-    def set_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
-        self._usage = (prompt_tokens, completion_tokens)
+    def set_usage(self, usage: Usage | None) -> None:
+        """收下**完整**的 ``Usage``，而不是拆成几个 int。
+
+        拆成 ``(prompt, completion)`` 时，第 N 个字段漏传是**静默**的——
+        2026-11-24 的 ``cache_read_input_tokens`` 就是这么丢了两个月：
+        上游命中 90%+，DeepSeek Harness 的 usage 里却没有这个字段，
+        客户端 ``cacheHitRate`` 因此拿到 ``null``、UI 一直显示 0%。
+        签名逼着调用方交出完整对象，下一个字段就不会再漏。
+        """
+        self._usage = usage
 
     def finish(self) -> str:
         """Close every open block, then ``message_delta`` + ``message_stop``."""
@@ -212,9 +225,20 @@ class _StreamAssembler:
         self._open_blocks.clear()
         self._singleton_blocks.clear()
         self._tool_blocks.clear()
+        usage_obj = self._usage or Usage()
+        cached = max(0, usage_obj.cached_tokens)
         usage = {
-            "input_tokens": self._usage[0] if self._usage else 0,
-            "output_tokens": self._usage[1] if self._usage else 0,
+            # Anthropic 的 ``input_tokens`` **不含**缓存（官方口径
+            # ``context = input_tokens + cache_read_input_tokens``），
+            # 而网关内部的 ``prompt_tokens`` **含**缓存（OpenAI 语义）。
+            # 原样下发会让客户端把上下文算大一倍、命中率显示成一半：
+            # 实测 prompt=31893 / cached=28800，直接下发得到 47.5%，真值 90.3%。
+            # 所以这里拆回去，两个字段各按各自的语义，客户端相加才对得上总输入。
+            "input_tokens": max(0, usage_obj.prompt_tokens - cached),
+            "output_tokens": usage_obj.completion_tokens,
+            # Anthropic 官方字段名。缺失时客户端会保留 undefined 而不是补 0
+            # （asar: ``if (value === void 0) continue``），于是命中率算不出来。
+            "cache_read_input_tokens": cached,
         }
         out.append(
             _sse(
@@ -385,6 +409,9 @@ def _message_payload(
         stop_reason = _STOP_REASONS.get(choice.finish_reason or "", "end_turn")
 
     usage = response.usage
+    # 同 :func:`_StreamAssembler.finish` 的理由：网关口径的 ``prompt_tokens`` 含缓存，Anthropic
+    # 客户端按 ``input_tokens + cache_read_input_tokens`` 算上下文，必须拆开。
+    cached_tokens = max(0, usage.cached_tokens)
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -394,9 +421,9 @@ def _message_payload(
         "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
-            "input_tokens": usage.prompt_tokens,
+            "input_tokens": max(0, usage.prompt_tokens - cached_tokens),
             "output_tokens": usage.completion_tokens,
-            "cache_read_input_tokens": usage.cached_tokens,
+            "cache_read_input_tokens": cached_tokens,
         },
     }
 
@@ -480,9 +507,7 @@ async def _stream_response(
                         for piece in assembler.feed_chunk(event.chunk):
                             yield piece
                     elif event.type == "usage" and event.usage is not None:
-                        assembler.set_usage(
-                            event.usage.prompt_tokens, event.usage.completion_tokens
-                        )
+                        assembler.set_usage(event.usage)
                     elif event.type == "error" and event.error is not None:
                         yield assembler.error_event(event.error)
                         return

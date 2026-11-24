@@ -466,11 +466,7 @@ class RequestService:
             model=chat_response.model,
             output=output,
             output_text="\n".join(text_parts),
-            usage=ResponsesUsage(
-                input_tokens=usage.prompt_tokens,
-                output_tokens=usage.completion_tokens,
-                total_tokens=usage.total_tokens,
-            ),
+            usage=ResponsesUsage.from_usage(usage),
             zk_ai=chat_response.zk_ai,
         )
 

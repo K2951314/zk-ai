@@ -62,6 +62,32 @@ UNMAPPABLE = frozenset(
 )
 
 
+def _cache_read_tokens(usage: dict[str, Any]) -> int:
+    """从 Anthropic ``usage`` 里取缓存命中数，缺失或非法一律当 0。
+
+    非流式与流式收尾共用这一处判定：``cache_read_input_tokens`` 在
+    ``message_start`` 里给出，个别兼容实现会在 ``message_delta`` 再补一次。
+    """
+    try:
+        return max(0, int(usage.get("cache_read_input_tokens") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _total_input_tokens(input_tokens: int, cache_read_tokens: int) -> int:
+    """把 Anthropic 的「新算输入」折算成网关统一的「总输入」。
+
+    **两家的 ``input_tokens`` 含义相反**，这是缓存命中率算错的隐形根因：
+    Anthropic 的 ``input_tokens`` **不含**缓存（官方口径
+    ``context = input_tokens + cache_read_input_tokens``），OpenAI 系的
+    ``prompt_tokens`` **含**缓存。网关内部一律用 OpenAI 语义
+    （``app/routing/scheduler.py`` 的命中率 = ``cached / prompt``、
+    ``usage_records`` 的 ``total = input + output``），所以 Anthropic 上游
+    必须在这里补齐，否则同一条命中 90% 的请求会被算成 45%。
+    """
+    return max(0, input_tokens) + max(0, cache_read_tokens)
+
+
 class AnthropicAdapter(ProviderAdapter):
     """Adapter for the Anthropic Messages API."""
 
@@ -362,9 +388,11 @@ class AnthropicAdapter(ProviderAdapter):
                 )
         usage_raw = payload.get("usage") or {}
         usage = Usage.build(
-            usage_raw.get("input_tokens"),
+            _total_input_tokens(
+                int(usage_raw.get("input_tokens") or 0), _cache_read_tokens(usage_raw)
+            ),
             usage_raw.get("output_tokens"),
-            usage_raw.get("cache_read_input_tokens") or 0,
+            _cache_read_tokens(usage_raw),
         )
         finish = self._normalize_finish_reason(payload.get("stop_reason"))
         response = ChatCompletionResponse.simple(
@@ -408,6 +436,10 @@ class AnthropicAdapter(ProviderAdapter):
         message_id: str | None = None
         input_tokens = 0
         output_tokens = 0
+        #: ``cache_read_input_tokens`` 必须一路带到收尾的 ``Usage``，否则下游
+        #: （/v1/messages 的 message_delta、/v1/responses 的 usage）永远报 0%。
+        #: 2026-11-24 实测：上游命中 90%+ 而 DeepSeek Harness 显示 0%，根因就在这里。
+        cache_read_tokens = 0
         finish_reason: str | None = None
         tool_index = -1
 
@@ -426,6 +458,7 @@ class AnthropicAdapter(ProviderAdapter):
                 message_id = message.get("id")
                 usage = message.get("usage") or {}
                 input_tokens = int(usage.get("input_tokens") or 0)
+                cache_read_tokens = _cache_read_tokens(usage) or cache_read_tokens
                 yield self._chunk(
                     model=ctx.upstream_model, role="assistant", chunk_id=message_id
                 )
@@ -492,12 +525,18 @@ class AnthropicAdapter(ProviderAdapter):
                 usage = parsed.get("usage") or {}
                 if usage.get("output_tokens") is not None:
                     output_tokens = int(usage["output_tokens"])
+                # 兼容实现在 message_delta 里补一次缓存数；缺失时不覆盖已读到的值。
+                cache_read_tokens = _cache_read_tokens(usage) or cache_read_tokens
                 continue
 
             if event_type == "message_stop":
                 break
 
-        usage = Usage.build(input_tokens, output_tokens)
+        usage = Usage.build(
+            _total_input_tokens(input_tokens, cache_read_tokens),
+            output_tokens,
+            cache_read_tokens,
+        )
         yield self._chunk(
             model=ctx.upstream_model,
             finish_reason=finish_reason or "stop",

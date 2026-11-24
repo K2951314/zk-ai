@@ -22,6 +22,7 @@ from app.models.request import ChatCompletionRequest
 from app.models.response import (
     ChatCompletionChunk,
     ChatCompletionChunkChoice,
+    ChatCompletionResponse,
     ChunkDelta,
     Usage,
 )
@@ -496,3 +497,88 @@ async def test_streaming_reasoning_becomes_thinking_block(messages_api) -> None:
 
 def item_delta_type(data: dict[str, Any]) -> str:
     return str(data["delta"]["type"])
+
+
+# --------------------------------------------------------------------------- #
+# 缓存命中数（2026-11-24）
+# --------------------------------------------------------------------------- #
+async def test_streaming_usage_carries_cache_read_input_tokens(messages_api) -> None:
+    """流式 ``message_delta.usage`` 必须带 ``cache_read_input_tokens``。
+
+    真机现场（2026-11-24）：DeepSeek Harness 桌面档走 ``anthropic-messages``，
+    它按 Anthropic 官方字段读缓存命中；网关只发 ``input_tokens`` /
+    ``output_tokens``，客户端 ``cacheReadTokens`` 拿到 ``undefined`` →
+    ``cacheHitRate()`` 返回 ``null`` → UI 恒显 0%。而网关自己的日志显示
+    上游命中 90%+，两边看起来互相矛盾，实际就是这一个字段没下发。
+
+    断言必须落在 ``message_delta`` 上：客户端只在那里读 usage，
+    ``message_start`` 的 usage 按 Anthropic 规范是占位的 0。
+    """
+    client, adapter, _harness = messages_api
+    adapter.chunk_script = [
+        _chunk(delta=ChunkDelta(role="assistant")),
+        _chunk(delta=ChunkDelta(content="cached answer")),
+        _chunk(finish_reason="stop", usage=Usage.build(1000, 50, 900)),
+    ]
+    response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
+    assert response.status_code == 200
+    events = parse_sse(response.text)
+    message_delta = next(data for name, data in events if name == "message_delta")
+
+    # 网关口径 Usage.build(1000, 50, 900)：prompt=1000 是**含缓存**的总输入。
+    # Anthropic 口径下要拆成 新算 100 + 命中 900，客户端相加才等于 1000。
+    assert message_delta["usage"]["input_tokens"] == 100
+    assert message_delta["usage"]["output_tokens"] == 50
+    assert message_delta["usage"]["cache_read_input_tokens"] == 900, (
+        "字段名必须是 Anthropic 官方的 cache_read_input_tokens，"
+        "少一个字段客户端就算不出命中率"
+    )
+    # 命中率 = 900 / (100 + 900) = 90%，与网关自己日志里的口径一致
+    usage = message_delta["usage"]
+    context = usage["input_tokens"] + usage["cache_read_input_tokens"]
+    assert round(usage["cache_read_input_tokens"] / context * 100) == 90
+
+
+async def test_streaming_usage_reports_zero_cache_read_when_nothing_cached(
+    messages_api,
+) -> None:
+    """没命中缓存时字段必须**存在且为 0**，不能缺字段。
+
+    缺字段与「命中 0」在客户端是两件事：asar 的 ``updateUsage`` 对
+    ``value === void 0`` 直接 ``continue``，于是 ``cacheReadTokens`` 一直是
+    ``undefined``、命中率算成 ``null``。显式 0 才是「确实没命中」。
+    """
+    client, adapter, _harness = messages_api
+    adapter.chunk_script = [
+        _chunk(delta=ChunkDelta(role="assistant")),
+        _chunk(delta=ChunkDelta(content="cold answer")),
+        _chunk(finish_reason="stop", usage=Usage.build(1000, 50)),
+    ]
+    response = await client.post("/v1/messages", json={**MESSAGES_BODY, "stream": True})
+    events = parse_sse(response.text)
+    message_delta = next(data for name, data in events if name == "message_delta")
+
+    assert "cache_read_input_tokens" in message_delta["usage"]
+    assert message_delta["usage"]["cache_read_input_tokens"] == 0
+
+
+async def test_non_streaming_usage_carries_cache_read_input_tokens(messages_api) -> None:
+    """非流式的 ``usage`` 早就有这个字段，钉住它，别再退回三字段。"""
+    client, adapter, _harness = messages_api
+
+    # FakeAdapter 的 Behavior 没有 cached 字段，直接替换非流式产量。
+    async def chat_with_cache(request, ctx):
+        adapter._record(ctx, stream=False)
+        return ChatCompletionResponse.simple(
+            model="fake-model",
+            content="cached reply",
+            usage=Usage.build(1000, 50, 900),
+            provider_id=adapter.provider_id,
+        )
+
+    adapter.chat = chat_with_cache  # type: ignore[method-assign]
+    response = await client.post("/v1/messages", json=MESSAGES_BODY)
+    assert response.status_code == 200, response.text
+    body = response.json()["usage"]
+    assert body["input_tokens"] == 100
+    assert body["cache_read_input_tokens"] == 900

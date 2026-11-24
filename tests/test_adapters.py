@@ -728,6 +728,163 @@ class TestAnthropicThinkingBlocks:
 
 
 
+class TestAnthropicStreamingCacheTokens:
+    """流式 Anthropic 的 ``cache_read_input_tokens`` 必须落到收尾的 ``Usage``。
+
+    2026-11-24 真机：DeepSeek Harness 桌面档走 ``anthropic-messages``，网关
+    日志里上游命中 90%+ 而客户端恒显 0%。两处一起漏——适配器的流式分支只
+    取了 input/output，``/v1/messages`` 的 assembler 又只发两个字段。
+    """
+
+    def _adapter(self):
+        from app.providers.anthropic import AnthropicAdapter
+
+        return AnthropicAdapter(
+            ProviderConfig(id="stepfun", type="anthropic", base_url="https://api.stepfun.com/step_plan/v1")
+        )
+
+    def _ctx_request(self):
+        from app.models.provider import ModelConfig
+        from app.models.request import ChatCompletionRequest
+        from app.providers.base import ProviderContext
+
+        ctx = ProviderContext(
+            request_id="t",
+            deployment=DeploymentConfig(id="d", provider_id="stepfun", model="step-3.7-flash"),
+            model=ModelConfig(id="step-3.7-flash"),
+        )
+        request = ChatCompletionRequest(
+            model="step-3.7-flash", messages=[{"role": "user", "content": "hi"}]
+        )
+        return ctx, request
+
+    def _wire(self, adapter, events: list[dict]) -> None:
+        import json
+
+        def _sse(payload: dict) -> str:
+            return "data: " + json.dumps(payload, ensure_ascii=False)
+
+        class FakeResp:
+            status_code = 200
+
+            async def aiter_lines(self):
+                for event in events:
+                    yield _sse(event)
+                    yield ""
+
+            async def aread(self):
+                return b""
+
+            async def aclose(self):
+                return None
+
+        class FakeClient:
+            is_closed = False
+
+            def build_request(self, *a, **k):
+                return None
+
+            async def send(self, *a, **k):
+                return FakeResp()
+
+        adapter._client = FakeClient()
+
+    @pytest.mark.asyncio
+    async def test_cache_read_input_tokens_reaches_the_final_usage(self) -> None:
+        adapter = self._adapter()
+        self._wire(
+            adapter,
+            [
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        # Anthropic 语义：input_tokens **不含**缓存部分
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 900,
+                        },
+                    },
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "hi"},
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 10},
+                },
+                {"type": "message_stop"},
+            ],
+        )
+        ctx, request = self._ctx_request()
+        chunks = [chunk async for chunk in adapter.stream(request, ctx)]
+
+        final_usage = next(c.usage for c in reversed(chunks) if c.usage is not None)
+        assert final_usage.cached_tokens == 900, "流式路径不许再把缓存数丢掉"
+        # 网关口径（OpenAI 语义）：prompt_tokens 是**含缓存**的总输入，
+        # 所以 Anthropic 的 input_tokens=100 要折算成 100 + 900 = 1000。
+        # 照抄 100 会让 /v1/messages 的 input_tokens 变成 100-900 → 夹到 0，
+        # 命中率显示 100%，而真值是 90%。
+        assert final_usage.prompt_tokens == 1000
+        assert final_usage.completion_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_cache_read_input_tokens_survives_a_message_delta_only_report(
+        self,
+    ) -> None:
+        """``message_start`` 没报、``message_delta`` 补报时也要接住。"""
+        adapter = self._adapter()
+        self._wire(
+            adapter,
+            [
+                {
+                    "type": "message_start",
+                    "message": {"id": "msg_2", "usage": {"input_tokens": 100}},
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 10, "cache_read_input_tokens": 640},
+                },
+                {"type": "message_stop"},
+            ],
+        )
+        ctx, request = self._ctx_request()
+        chunks = [chunk async for chunk in adapter.stream(request, ctx)]
+        final_usage = next(c.usage for c in reversed(chunks) if c.usage is not None)
+        assert final_usage.cached_tokens == 640
+
+    @pytest.mark.asyncio
+    async def test_no_cache_field_means_zero_not_a_crash(self) -> None:
+        """上游完全不报缓存（StepFun 常见）时按 0 处理，不影响正常字段。"""
+        adapter = self._adapter()
+        self._wire(
+            adapter,
+            [
+                {
+                    "type": "message_start",
+                    "message": {"id": "msg_3", "usage": {"input_tokens": 100}},
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 10},
+                },
+                {"type": "message_stop"},
+            ],
+        )
+        ctx, request = self._ctx_request()
+        chunks = [chunk async for chunk in adapter.stream(request, ctx)]
+        final_usage = next(c.usage for c in reversed(chunks) if c.usage is not None)
+        assert final_usage.cached_tokens == 0
+        assert final_usage.prompt_tokens == 100
+        assert final_usage.completion_tokens == 10
+
+
 # ---------------------------------------------------------------------------
 # 健康检查必须测「推理」，不能只测「目录」（2026-09-29）
 # ---------------------------------------------------------------------------

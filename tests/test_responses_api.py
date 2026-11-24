@@ -754,3 +754,100 @@ async def test_parallel_function_calls_merge_into_one_assistant_message(response
         ("call_p1", "out-a"),
         ("call_p2", "out-b"),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Cache visibility (2026-11-24)
+# --------------------------------------------------------------------------- #
+#: DeepSeek Harness 的 Responses 客户端读的就是这个位置（ASAR 实测）：读不到
+#: 就记 0，界面上恒显示「缓存命中 0%」。网关此前只下发三个整数 usage 字段。
+async def test_non_streaming_usage_exposes_cached_tokens(responses_api) -> None:
+    """非流式：``usage.input_tokens_details.cached_tokens`` 必须带缓存数。"""
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(
+        model="fake-model",
+        content="ok",
+        usage=Usage.build(1000, 50, 900),
+    )
+
+    response = await client.post(
+        "/v1/responses",
+        json={"model": "fake-model", "input": "hello", **CODEX_HEAD},
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["input_tokens"] == 1000, "input_tokens 是含缓存的 OpenAI 口径"
+    assert usage["input_tokens_details"]["cached_tokens"] == 900
+    assert usage["output_tokens"] == 50
+    assert usage["total_tokens"] == 1050
+
+
+async def test_streaming_completed_usage_exposes_cached_tokens(responses_api) -> None:
+    """流式：``response.completed`` 的 usage 同样必须带缓存数。
+
+    这是 harness 真正走的路径（agent 客户端一律流式），非流式那条覆盖不到它。
+    """
+    client, adapter, _harness = responses_api
+    adapter.chunk_script = [
+        _chunk(role="assistant"),
+        _chunk(content="done"),
+        _chunk(finish_reason="stop", usage=Usage.build(1000, 50, 900)),
+    ]
+
+    response = await client.post(
+        "/v1/responses",
+        json={"model": "fake-model", "input": "hello", "stream": True, **CODEX_HEAD},
+    )
+    assert response.status_code == 200
+    events = parse_sse(response.text)
+    completed = _payloads(events, "response.completed")[0]["response"]
+    usage = completed["usage"]
+    assert usage["input_tokens"] == 1000
+    assert usage["input_tokens_details"]["cached_tokens"] == 900
+    assert usage["output_tokens"] == 50
+    assert usage["total_tokens"] == 1050
+
+
+async def test_cached_tokens_are_passed_through_untouched(responses_api) -> None:
+    """cached > input 时**原样下发**，不做夹取。
+
+    这条看着违反直觉，但它钉的是一个真实约束：本项目内部 ``Usage.prompt_tokens``
+    对 OpenAI 系是「含缓存的输入」，对 Anthropic 系（StepFun）却是「不含缓存的输入」。
+    按 prompt 当上界夹取会把 Anthropic 上游的缓存数削减成错值，收益为零
+    （客户端自己会 ``max(0, input - cached)``），代价是静默改数。
+    """
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(
+        model="fake-model",
+        content="ok",
+        usage=Usage.build(100, 10, 400),
+    )
+
+    response = await client.post(
+        "/v1/responses",
+        json={"model": "fake-model", "input": "hello", **CODEX_HEAD},
+    )
+    assert response.status_code == 200
+    details = response.json()["usage"]["input_tokens_details"]
+    assert details["cached_tokens"] == 400, "上游报多少就下发多少，不夹取"
+
+
+async def test_zero_cached_tokens_is_still_reported_as_zero(responses_api) -> None:
+    """真的没命中时字段必须在（显式的 0），不是缺字段。
+
+    缺字段和 0 在客户端是同一回事，但少一个字段会让「网关支持缓存上报」
+    这件事没法从响应体本身验证——排查时就得去翻源码。
+    """
+    client, adapter, _harness = responses_api
+    adapter.chat_output = ChatCompletionResponse.simple(
+        model="fake-model",
+        content="ok",
+        usage=Usage.build(100, 10),
+    )
+
+    response = await client.post(
+        "/v1/responses",
+        json={"model": "fake-model", "input": "hello", **CODEX_HEAD},
+    )
+    assert response.status_code == 200
+    assert response.json()["usage"]["input_tokens_details"]["cached_tokens"] == 0
