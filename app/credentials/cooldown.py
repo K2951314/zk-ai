@@ -19,6 +19,19 @@ _VALID_SCOPES = frozenset({"credential", "account", "provider"})
 #: 「重置时刻刚过」的最小等待（秒），见 :meth:`CooldownPolicy.seconds_until_quota_reset`。
 _MIN_RESET_WAIT = 60.0
 
+#: 「排队等一把 Key 回来」的最长时间（秒），见 :meth:`CooldownPolicy.worth_waiting`。
+#:
+#: 取 10 秒：这是**把一次必败换成一次重试**的耐心，不是「等窗口翻转」的耐心。
+#: 商汤/AMD 的 429 冷却基数就是 60 秒，等更久不如让客户端自己重试；
+#: 而 10 秒足以吃掉「刚被上一个请求打空、下一批请求立刻到」的那个尖峰
+#: （实测那批请求 0.01 秒就失败，本来一次上游都没发）。
+#:
+#: ⚠ 关键区别：额度型冷却（``quota_exhausted``）睡的是**到次日重置点的整段**，
+#: 实测 35,733 秒 ≈ 9.9 小时。那种等待要立刻放弃、换下一家——
+#: 2026-11-24 日志实锤：ModelScope 整池额度耗尽时，每个 ``ds`` 请求仍先等满
+#: 10 秒才换到 sensenova/AMD，而等来的那次尝试注定失败。
+_MAX_WAIT_BEFORE_FAILOVER = 10.0
+
 
 @dataclass(slots=True)
 class CooldownPolicy:
@@ -130,6 +143,26 @@ class CooldownPolicy:
         """Cooldown breadth for a throttle *kind* (``credential``/``account``/``provider``)."""
         scope = self.throttle_scopes.get(str(kind), "credential")
         return scope if scope in _VALID_SCOPES else "credential"
+
+    def worth_waiting(self, seconds: float | None) -> float:
+        """排队等一把 Key 回来值不值得；返回实际该睡的秒数（``0.0`` = 别等）。
+
+        *seconds* 来自 :meth:`app.credentials.pool.CredentialPool.next_available_in`
+        ——「最早一把 Key 还要多久恢复」。
+
+        ⚠ **不能**用 ``min(seconds, 上限)`` 一刀切。额度型冷却睡的是到次日
+        重置点的整段（2026-11-24 实测 ``recovers in ~35733s`` ≈ 9.9 小时），
+        把它截成上限再睡，醒来时那把 Key **还在冷却**——这段等待在数学上
+        不可能换来任何一次尝试。实测代价：ModelScope 整池额度耗尽期间，
+        每个 ``ds`` 请求都白等 10 秒才换到 sensenova/AMD。
+        只有「睡完之后真的能拿到 Key」才值得睡，所以超过上限直接返回 0，
+        让调用方立刻故障转移。
+        """
+        if seconds is None or seconds <= 0:
+            return 0.0
+        if seconds > _MAX_WAIT_BEFORE_FAILOVER:
+            return 0.0
+        return seconds
 
     def seconds_until_quota_reset(
         self, now: float | None = None, *, spec: str | None = None

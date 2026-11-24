@@ -1257,16 +1257,32 @@ class Scheduler:
         客户端的 10 req/min 与商汤 27 req/min 的容量本来是够的，缺的只是
         让渡。所以这里等一小会儿（上限 ``_CREDENTIAL_WAIT_SECONDS``，且不越过
         墙钟预算），把「拒绝」换成「稍等」。等不到才如实报 503 + Retry-After。
+
+        ⚠ **只有睡完之后真能拿到 Key 才值得睡**。额度型冷却睡的是到次日重置
+        点的整段（实测 ``recovers in ~35733s``），这种等待再怎么长也换不来一次
+        尝试，而旧的 ``min(wait, 上限)`` 会让它白睡满上限再换下一家——实测
+        每个 ``ds`` 请求都为此多等 10 秒。超过上限的等待直接判为不值得，
+        立刻故障转移（2026-11-24 改，判据见 ``CooldownPolicy.worth_waiting``）。
         """
         wait = self.pool.next_available_in(candidate.deployment.provider_id)
         if wait is None or wait <= 0:
             return False
         budget_left = self.max_request_seconds - (time.time() - wall_start)
-        pause = min(wait, _CREDENTIAL_WAIT_SECONDS)
+        # 判据在策略层（CooldownPolicy.worth_waiting）：睡完真能拿到 Key 才睡。
+        # 冷却策略挂在池子上（池子按它给凭据挂冷却），这里读同一个对象，
+        # 免得判定表和实际冷却时长各有一份、日后漂移。
+        pause = self.pool.policy.worth_waiting(wait)
         if self.max_request_seconds > 0:
             # 留一点给真正的那次尝试，别把预算全睡掉。
             pause = min(pause, max(0.0, budget_left - self.policy.attempt_timeout_floor))
         if pause < _CREDENTIAL_WAIT_MIN_SECONDS:
+            if wait > _CREDENTIAL_WAIT_SECONDS:
+                logger.info(
+                    "keys of %s recover in ~%.0fs; failing over instead of idling %.0fs",
+                    candidate.deployment.provider_id,
+                    wait,
+                    _CREDENTIAL_WAIT_SECONDS,
+                )
             return False
         logger.info(
             "all keys of %s are cooling down; waiting %.1fs instead of failing fast",

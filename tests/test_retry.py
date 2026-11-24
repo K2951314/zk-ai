@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 
 import httpx
 import pytest
@@ -616,11 +617,55 @@ async def test_a_cooling_pool_waits_instead_of_failing_fast(
             model="zk-wait", messages=[{"role": "user", "content": "hi"}]
         )
         fake_adapter.queue(Behavior(text="after wait"))
-        # 第一次取候选为空 → 排队 → 重取。这里让排队后仍为空（真实冷却没到期），
-        # 但必须看到 sleep 被调用过，且时间不超过上限。
+        # 整池冷却且都睡不到（45 秒 > 10 秒上限）→ 不该睡，直接按旧路径
+        # 记录空尝试并失败。判据见 CooldownPolicy.worth_waiting。
         with pytest.raises((AllAttemptsFailedError, ContextLengthExceededError)):
             await harness.service.chat(request, request_id="req-wait")
-        assert harness.sleeps, "整池冷却时应当排队等待，而不是立刻失败"
+        # 2026-11-24 起这条测试守的是**分支**，不再是「一定会睡」：
+        # 排队判据搬进了 CooldownPolicy.worth_waiting——几秒内会好的冷却照旧睡，
+        # 长冷却（60s 基数、以及 9.9 小时的额度冷却）立刻换下一家。
+        # 这里的 45 秒属于后者，所以断言改为「不睡」；原意图（不立刻 503、
+        # 而是继续尝试）由 _wait_for_credential 返回 False 后的旧路径保证。
+        assert not harness.sleeps, "长冷却不该睡，应当立刻故障转移"
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_a_pool_that_recovers_within_seconds_is_still_queued_for(
+    provider_config, fake_adapter
+) -> None:
+    """对照 :func:`test_a_cooling_pool_waits_instead_of_failing_fast`：短冷却照样排队。
+
+    排队机制本身没有取消，只是加了判据（``CooldownPolicy.worth_waiting``）：
+    睡完真能拿到 Key 才睡。这里把冷却设成 2 秒——正是那个尖峰的形状
+    （「刚被上一个请求打空、下一批请求立刻到」），必须看到 sleep。
+    少了这条，把排队整个砍掉也能让上面那条全绿。
+    """
+    from app.models.credential import CredentialStatus
+    from app.models.request import ChatCompletionRequest
+
+    config = make_config(
+        providers=[provider_config],
+        models=[make_model("primary", priority=100)],
+        aliases=[make_alias("zk-wait", ["primary"])],
+    )
+    harness = await build_harness(config, adapters={"fake": fake_adapter})
+    try:
+        # 直接设冷却截止时刻：走 tracker.on_failure 会被策略重算成 60 秒基数，
+        # 这里要的正是「几秒内就会好」那个形状。
+        for key in ("key-1", "key-2", "key-3"):
+            credential = harness.pool.get(key)
+            credential.status = CredentialStatus.COOLDOWN
+            credential.cooldown_until = time.time() + 2.0
+
+        request = ChatCompletionRequest(
+            model="zk-wait", messages=[{"role": "user", "content": "hi"}]
+        )
+        fake_adapter.queue(Behavior(text="after wait"))
+        # fake sleep 不推进时钟，醒来 Key 仍在冷却 → 最终失败；关键是它先睡过。
+        with pytest.raises((AllAttemptsFailedError, ContextLengthExceededError)):
+            await harness.service.chat(request, request_id="req-wait-short")
+        assert harness.sleeps, "几秒内就好的冷却应当排队，而不是立刻失败"
         assert max(harness.sleeps) <= 10.0 + 0.001
     finally:
         await harness.container.shutdown()

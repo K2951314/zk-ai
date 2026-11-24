@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,8 @@ from app.credentials.rotation import (
 from app.models.credential import CredentialStatus
 from app.models.provider import CredentialConfig, ProviderConfig, ProviderType
 from app.retry.classifier import ErrorClass, ErrorClassifier, ErrorInfo
+from app.retry.policy import RetryPolicy
+from app.routing.scheduler import Scheduler
 from tests.conftest import make_provider
 
 CLASSIFIER = ErrorClassifier()
@@ -534,6 +537,121 @@ def test_next_available_in_reports_the_pool_recovery_time() -> None:
     assert 0 < wait <= 900
     pool.invalidate_cooldowns("p1")
     assert pool.next_available_in("p1") is None
+
+
+# --------------------------------------------------------------------------- #
+# 排队判据：睡完真能拿到 Key 才值得睡（2026-11-24）
+# --------------------------------------------------------------------------- #
+def quota_policy(reset_at: str = "00:00") -> CooldownPolicy:
+    """额度型 429 会睡到次日重置点的策略（ModelScope 那套配置）。"""
+    return CooldownPolicy(quota_reset_at=reset_at, jitter=0.0)
+
+
+def test_a_per_minute_rate_limit_is_still_worth_queuing_for() -> None:
+    """商汤/AMD 的 429 冷却基数 60 秒：等 10 秒能吃到尖峰后的恢复，值得睡。
+
+    这是 ``_wait_for_credential`` 原本存在的理由——实测「刚被上一个请求打空、
+    下一批请求立刻到」那批请求 0.01 秒就失败，一次上游都没发。
+    """
+    policy = quota_policy()
+    assert policy.worth_waiting(9.99) == 9.99
+    assert policy.worth_waiting(0.6) == 0.6
+
+
+def test_a_daily_quota_cooldown_is_not_worth_queuing_for() -> None:
+    """额度耗尽睡到次日重置点：再等也是那把 Key 还在睡，立刻故障转移。
+
+    2026-11-24 服务器实锤：ModelScope 整池额度耗尽时日志是
+    ``recovers in ~35733s``（≈9.9h），而调度器仍旧逻辑 ``min(wait, 10.0)``
+    白睡 10 秒再换下一家——每个 ``ds`` 请求都付这 10 秒。
+    """
+    policy = quota_policy()
+    for not_worth in (35733.0, 3600.0, 900.0, 61.0, 10.01):
+        assert policy.worth_waiting(not_worth) == 0.0, not_worth
+    # 边界：恰好等于上限仍算值得（不会多睡，醒来正好能取）
+    assert policy.worth_waiting(10.0) == 10.0
+
+
+def test_nothing_to_wait_on_returns_zero() -> None:
+    policy = quota_policy()
+    assert policy.worth_waiting(None) == 0.0
+    assert policy.worth_waiting(0.0) == 0.0
+    assert policy.worth_waiting(-5.0) == 0.0
+
+
+def test_a_quota_exhausted_429_parks_until_the_next_reset() -> None:
+    """端到端：insufficient balance 触发的冷却 = 距次日 00:00 的整段，且不再排队。"""
+    pool, _ = build_pool()
+    pool.policy.quota_reset_at = "00:00"
+    body = {"error": {"message": "insufficient balance", "type": "quota"}}
+    for key_id in ("k1", "k2", "k3"):
+        pool.report_failure(key_id, CLASSIFIER.classify_status(429, body=body))
+    wait = pool.next_available_in("p1")
+    assert wait is not None
+    assert wait > 600, "离次日重置远时应睡整段，而不是固定的 1800s"
+    assert pool.policy.worth_waiting(wait) == 0.0
+
+
+async def test_the_scheduler_stops_idling_on_a_quota_cooldown() -> None:
+    """调度器调用点：整池额度冷却时必须**不睡**、直接判为等不到。
+
+    这条钉住的是调用方，不只是策略层。曾经的写法
+    ``pause = min(wait, _CREDENTIAL_WAIT_SECONDS)`` 会把 9.9 小时的额度冷却
+    截成 10 秒去睡，醒来那把 Key 还在睡——服务器实测每个 ``ds`` 请求
+    都这么白等 10 秒才换到 sensenova/AMD。策略层改对了而这里还留着
+    ``min`` 的话，测试必须变红。
+    """
+    pool, _ = build_pool()
+    pool.policy.quota_reset_at = "00:00"
+    body = {"error": {"message": "insufficient balance", "type": "quota"}}
+    for key_id in ("k1", "k2", "k3"):
+        pool.report_failure(key_id, CLASSIFIER.classify_status(429, body=body))
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.pool = pool
+    scheduler.policy = RetryPolicy()
+    scheduler.max_request_seconds = 300.0
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    scheduler._sleep = fake_sleep
+    candidate = SimpleNamespace(
+        deployment=SimpleNamespace(provider_id="p1"),
+    )
+    should_retry = await Scheduler._wait_for_credential(scheduler, candidate, time.time())
+    assert should_retry is False
+    assert slept == [], f"额度冷却不该睡，实际睡了 {slept}"
+
+
+async def test_the_scheduler_does_not_idle_on_a_plain_rate_limit_either() -> None:
+    """普通 429（60 秒基数）也不睡：超过 10 秒上限同样立刻换下一家。
+
+    守护上一条：调度器层的「不睡」必须先由策略层判定值得，而不是
+    调度器自己把一切等待砍掉——两条测试分别锁住「额度型」与「限流型」。
+    """
+    pool, _ = build_pool()
+    pool.policy.quota_reset_at = "00:00"
+    for key_id in ("k1", "k2", "k3"):
+        pool.report_failure(key_id, failure(429))  # 普通限流：60s 基数，不是额度
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.pool = pool
+    scheduler.policy = RetryPolicy()
+    scheduler.max_request_seconds = 300.0
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    scheduler._sleep = fake_sleep
+    candidate = SimpleNamespace(
+        deployment=SimpleNamespace(provider_id="p1"),
+    )
+    should_retry = await Scheduler._wait_for_credential(scheduler, candidate, time.time())
+    assert should_retry is False  # 60 秒也超过 10 秒上限，照样立即换下一家
+    assert slept == []
 
 
 def test_probe_failure_takes_only_authentication_seriously() -> None:
