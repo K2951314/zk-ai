@@ -582,3 +582,88 @@ async def test_non_streaming_usage_carries_cache_read_input_tokens(messages_api)
     body = response.json()["usage"]
     assert body["input_tokens"] == 100
     assert body["cache_read_input_tokens"] == 900
+
+
+# --------------------------------------------------------------------------- #
+# 思考档位：``thinking`` / ``output_config`` -> ``reasoning_effort``
+# --------------------------------------------------------------------------- #
+# 2026-11-24 实测：DeepSeek Harness 桌面档配的 ``reasoningEffort: max`` 落在
+# Anthropic 的 ``thinking.budget_tokens`` 上（客户端源码 ``streamSimple`` ->
+# ``thinking: {type: "enabled", budget_tokens: N}``），而网关老版本既不认识这个
+# 字段、也不报错，直接丢掉。客户端以为档位生效了，实际按上游默认档烧额度。
+# 这一组测试钉住「客户端说的档位必须到得了路由请求上」。
+async def test_thinking_budget_becomes_a_reasoning_effort(messages_api) -> None:
+    """``thinking.budget_tokens`` 折成档位并交给下游。
+
+    预算映射表与客户端同款（1024/2048/8192/16384），取不超过所给预算的最高档。
+    16384 是客户端 ``max`` 档落地后的值，必须还原成 ``high``。
+    """
+    client, adapter, _harness = messages_api
+    response = await client.post(
+        "/v1/messages",
+        json=MESSAGES_BODY
+        | {"thinking": {"type": "enabled", "budget_tokens": 16384}},
+    )
+    assert response.status_code == 200, response.text
+    request = adapter.requests[0]
+    assert request.extra_params().get("reasoning_effort") == "high"
+
+
+async def test_a_small_thinking_budget_stays_a_low_tier(messages_api) -> None:
+    """就低不就高：2048 预算只能算 ``low``，不许因为"sending 思考"就抬档。"""
+    client, adapter, _harness = messages_api
+    response = await client.post(
+        "/v1/messages",
+        json=MESSAGES_BODY | {"thinking": {"type": "enabled", "budget_tokens": 2048}},
+    )
+    assert response.status_code == 200, response.text
+    assert adapter.requests[0].extra_params().get("reasoning_effort") == "low"
+
+
+async def test_a_disabled_thinking_switch_wins_over_an_effort(messages_api) -> None:
+    """关掉思考时，客户端顺手带的 ``output_config.effort`` 一律作废。
+
+    关是不可能被"顺手"打开的：``thinking.type == "disabled"`` 是显式意图。
+    """
+    client, adapter, _harness = messages_api
+    response = await client.post(
+        "/v1/messages",
+        json=MESSAGES_BODY
+        | {
+            "thinking": {"type": "disabled"},
+            "output_config": {"effort": "max"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert adapter.requests[0].extra_params().get("reasoning_effort") == "none"
+
+
+async def test_output_config_effort_is_forwarded_verbatim(messages_api) -> None:
+    """``output_config.effort`` 是 Messages 侧的档位写法，原样交给下游。"""
+    client, adapter, _harness = messages_api
+    response = await client.post(
+        "/v1/messages", json=MESSAGES_BODY | {"output_config": {"effort": "max"}}
+    )
+    assert response.status_code == 200, response.text
+    assert adapter.requests[0].extra_params().get("reasoning_effort") == "max"
+
+
+async def test_thinking_without_a_budget_does_not_pick_a_tier(messages_api) -> None:
+    """``{"type": "enabled"}`` 只说"要思考"没说多深 -> 交给部署默认档。
+
+    此时**不能**往请求里塞一个凭空捏出来的档位，那会把部署配置的默认值盖掉。
+    """
+    client, adapter, _harness = messages_api
+    response = await client.post(
+        "/v1/messages", json=MESSAGES_BODY | {"thinking": {"type": "enabled"}}
+    )
+    assert response.status_code == 200, response.text
+    assert "reasoning_effort" not in adapter.requests[0].extra_params()
+
+
+async def test_no_thinking_fields_means_no_effort_at_all(messages_api) -> None:
+    """客户端没提思考 -> 请求里一个档位字段都不该多出来。"""
+    client, adapter, _harness = messages_api
+    response = await client.post("/v1/messages", json=MESSAGES_BODY)
+    assert response.status_code == 200, response.text
+    assert "reasoning_effort" not in adapter.requests[0].extra_params()

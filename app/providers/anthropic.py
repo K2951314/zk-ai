@@ -39,7 +39,7 @@ from app.models.response import (
     ToolCall,
     Usage,
 )
-from app.providers.base import ProviderAdapter, ProviderContext
+from app.providers.base import ProviderAdapter, ProviderContext, _normalize_reasoning_effort
 
 logger = get_logger("provider.anthropic")
 
@@ -86,6 +86,16 @@ def _total_input_tokens(input_tokens: int, cache_read_tokens: int) -> int:
     必须在这里补齐，否则同一条命中 90% 的请求会被算成 45%。
     """
     return max(0, input_tokens) + max(0, cache_read_tokens)
+
+
+#: 表示「关掉思考」的档位写法。Anthropic 侧没有对应的 ``output_config`` 取值，
+#: 只能翻成 ``thinking: {"type": "disabled"}``。
+_OFF_EFFORTS = frozenset({"none", "off", "disabled", "false", "0"})
+
+
+def _is_off_effort(value: Any) -> bool:
+    """这个档位是不是「关思考」而不是某个强度档。"""
+    return isinstance(value, str) and value.strip().lower() in _OFF_EFFORTS
 
 
 class AnthropicAdapter(ProviderAdapter):
@@ -338,8 +348,44 @@ class AnthropicAdapter(ProviderAdapter):
                 unsupported.append(key)
 
         extra = request.extra_params()
+        # 聊天侧的开关是 OpenAI chat wire 的写法，Anthropic 上游的 ``thinking``
+        # 是另一套结构（``{"type": "enabled", "budget_tokens": N}``），直接透传
+        # 会把一个布尔开关变成非法对象。档位不从这里读——它走
+        # ``reasoning_effort``，见下面。
+        extra.pop("thinking", None)
+        extra.pop("enable_thinking", None)
+        # 思考档位：``reasoning_effort`` 是**网关内部**的扁平写法，Anthropic
+        # 上游不认它，原样塞过去会被静默忽略（StepFun 实测如此，见
+        # ``app/models/presets.py`` 里 step-5-preview 的 spec_notes：
+        # 「Messages 用 output_config.effort，传错名会被静默忽略」）。
+        # 所以要在收 ``unsupported`` **之前**摘出来：它会被映射成上游认的字段，
+        # 报成"未映射"会让运营者以为客户端那句档位被丢了。
+        effort = extra.pop("reasoning_effort", None)
         unsupported.extend(extra.keys())
         payload.update(deployment.options)
+
+        # 写入点必须在 ``deployment.options`` **之后**，因为全仓同一条不变量是
+        # 「客户端 > 部署默认 > 不指定」：客户端显式给的档位不能被配置盖掉。
+        if effort is not None:
+            if _is_off_effort(effort):
+                # 「关思考」在 Anthropic 侧只有开关一种写法：``output_config``
+                # 写成 ``effort="none"`` 关不掉（presets 的 deepseek 条目注释）。
+                # 它也是唯一一个**不受部署词表约束**的档位——词表列的是思考
+                # 强度，不该因为词表里没有 "none" 就让"关"失效。
+                payload["thinking"] = {"type": "disabled"}
+            else:
+                level = _normalize_reasoning_effort(effort, deployment)
+                if level is None:
+                    logger.info(
+                        "provider=anthropic 客户端档位 %r 不在部署词表 %s，已省略（model=%s）",
+                        effort,
+                        list(deployment.reasoning_efforts or ()),
+                        deployment.model,
+                    )
+                elif level == "none":
+                    payload["thinking"] = {"type": "disabled"}
+                else:
+                    payload["output_config"] = {"effort": level}
         return payload, sorted(set(unsupported))
 
     # ------------------------------------------------------------------ #

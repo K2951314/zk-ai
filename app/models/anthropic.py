@@ -57,6 +57,61 @@ def strip_context_suffix(model: str) -> str:
     return model.split("[", 1)[0].strip()
 
 
+#: ``thinking.type`` 里明确表示「关掉」的取值。
+_THINKING_OFF_TYPES = frozenset({"disabled", "off"})
+
+#: ``thinking.budget_tokens`` -> 网关档位。表取自 DeepSeek Harness 的
+#: ``DEFAULT_THINKING_BUDGETS``（mini 1024 / low 2048 / medium 8192 / high 16384）：
+#: 网关收到的预算就是按这张表算出来的，用同一张表反推才可能还原客户端意图。
+#: 升序排列，:func:`_tier_for_budget` 取不超过所给预算的**最高**档。
+_THINKING_BUDGET_TIERS: tuple[tuple[str, int], ...] = (
+    ("minimal", 1024),
+    ("low", 2048),
+    ("medium", 8192),
+    ("high", 16384),
+)
+
+
+def _thinking_budget(thinking: dict[str, Any]) -> int | None:
+    """取 ``budget_tokens``；缺失或非法返回 ``None``（= 客户端只说了要思考）。"""
+    raw = thinking.get("budget_tokens")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if raw <= 0:
+        return None
+    return int(raw)
+
+
+def _tier_for_budget(budget: int) -> str:
+    """预算 -> 不超过它的最高档；比最小档还小按最小档算。"""
+    tier = _THINKING_BUDGET_TIERS[0][0]
+    for name, threshold in _THINKING_BUDGET_TIERS:
+        if budget >= threshold:
+            tier = name
+    return tier
+
+
+def _switch_is_off(value: Any) -> bool:
+    """True only for an explicit off switch (missing/``None`` is not "off")."""
+    if value is False:
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "0", "no", "off", "disabled", "none"}
+    return False
+
+
+def _effort_of(config: dict[str, Any] | None) -> str | None:
+    """``output_config: {"effort": "high"}`` -> ``"high"``；取不到返回 ``None``."""
+    if not isinstance(config, dict):
+        return None
+    effort = config.get("effort")
+    if not isinstance(effort, str):
+        return None
+    return effort.strip().lower() or None
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic ``POST /v1/messages`` request body (permissive superset)."""
 
@@ -73,6 +128,46 @@ class AnthropicMessagesRequest(BaseModel):
     stop_sequences: list[str] | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: dict[str, Any] | None = None
+    #: Messages 侧的思考开关。官方形状是
+    #: ``{"type": "enabled", "budget_tokens": N}`` / ``{"type": "disabled"}``；
+    #: 客户端也可能发 ``{"type": "adaptive"}`` 或 ``{"type": "enabled"}`` 不带预算
+    #: （DeepSeek Harness 的 ``streamSimple`` 就往这个分支走）。
+    thinking: dict[str, Any] | None = None
+    #: Messages 侧的档位字段（``{"effort": "high"}``）。与 ``thinking`` 二选一，
+    #: 见 :meth:`reasoning_effort` 的优先级说明。
+    output_config: dict[str, Any] | None = None
+
+    def reasoning_effort(self) -> str | None:
+        """Messages 请求里的思考强度 -> 网关的 ``reasoning_effort`` 档位。
+
+        这是 ``/v1/messages`` 上唯一一处把「Anthropic 的思考写法」翻成
+        「网关的档位词」的地方。**不翻就会静默丢弃**：2026-11-24 实测
+        DeepSeek Harness 桌面档 ``reasoningEffort: max`` 落在
+        ``thinking.budget_tokens`` 上，网关老版本既不认识也没报错，客户端以为
+        生效了，实际按上游默认档跑。
+
+        优先级沿用全仓同一套（2026-11-09 起，见 ``/v1/chat/completions`` 的
+        ``thinking`` / ``enable_thinking`` 处理）：开关优先于档位。
+        ``thinking.type == "disabled"`` 一律 ``"none"``——即便客户端顺手还带了
+        ``output_config.effort``，关掉是不可能被"顺手"打开的。
+
+        ``budget_tokens`` 折档位用的是 ``_THINKING_BUDGET_TIERS`` 这张**客户端
+        同款**表（DeepSeek Harness 的 ``DEFAULT_THINKING_BUDGETS``），取不超过
+        所给预算的最高档。这是有损映射，但方向正确：预算越大档位越高，
+        而且是"就低"而不是"就高"——宁可让上游少想一点，也不要偷偷把成本抬上去。
+        """
+        thinking = self.thinking
+        if isinstance(thinking, dict):
+            kind = str(thinking.get("type") or "").strip().lower()
+            if kind in _THINKING_OFF_TYPES or _switch_is_off(thinking.get("enabled")):
+                return "none"
+            budget = _thinking_budget(thinking)
+            if budget is None:
+                # ``{"type": "enabled"}`` / ``{"type": "adaptive"}`` 不带预算：
+                # 客户端只说了"要思考"没说多深，交给部署默认档而不是替它选。
+                return ""
+            return _tier_for_budget(budget)
+        return _effort_of(self.output_config)
 
     def to_chat_request(
         self, *, default_model: str, fallback_max_tokens: int
@@ -125,7 +220,7 @@ class AnthropicMessagesRequest(BaseModel):
                 if isinstance(tool, dict) and tool.get("name")
             ]
 
-        return ChatCompletionRequest(
+        request = ChatCompletionRequest(
             model=model,
             messages=messages,
             max_tokens=self.max_tokens or fallback_max_tokens,
@@ -138,6 +233,16 @@ class AnthropicMessagesRequest(BaseModel):
             tool_choice=tool_choice,
             stream_options={"include_usage": True} if self.stream else None,
         )
+        effort = self.reasoning_effort()
+        if effort:
+            # Same extra-param channel as /v1/responses (see
+            # ``ResponsesRequest.to_chat_request``): the effort rides along on
+            # ``model_extra`` so every adapter sees it through ``extra_params()``.
+            request.__pydantic_extra__ = {
+                **(request.__pydantic_extra__ or {}),
+                "reasoning_effort": effort,
+            }
+        return request
 
     def estimate_input_tokens(self, *, default_model: str, fallback_max_tokens: int) -> int:
         """Cheap heuristic token estimate for ``/v1/messages/count_tokens``."""

@@ -1062,3 +1062,131 @@ class TestDeveloperRoleMapping:
         for role in ("system", "user", "assistant", "tool"):
             wire = _wire_message(ChatMessage(role=role, content="x"))  # type: ignore[arg-type]
             assert wire["role"] == role
+
+
+class TestAnthropicThinkingEffort:
+    """``reasoning_effort`` -> Anthropic 上游认的 ``thinking`` / ``output_config``.
+
+    2026-11-24 之前这里是一条空路：``AnthropicMessagesRequest`` 从不读
+    ``thinking``，适配器也不认 ``reasoning_effort``。DeepSeek Harness 桌面档
+    配的 ``reasoningEffort: max`` 因此静默作废，按上游默认档烧额度，而两边
+    都不报错。这一组钉住「档位要么生效产出正确字段，要么留下明确痕迹」。
+
+    上游形状取自 ``app/models/presets.py`` 的 spec_notes：Messages 侧档位是
+    ``output_config.effort``，关思考只能走 ``thinking.type = "disabled"``。
+    """
+
+    def _adapter(self, efforts=("low", "medium", "high"), default="high"):
+        from app.providers.anthropic import AnthropicAdapter
+
+        return AnthropicAdapter(
+            ProviderConfig(
+                id="stepfun",
+                type="anthropic",
+                base_url="https://api.stepfun.com/step_plan/v1",
+            )
+        ), DeploymentConfig(
+            id="step-5-preview-stepfun",
+            provider_id="stepfun",
+            model="step-5-preview",
+            max_output_tokens=32768,
+            reasoning_efforts=efforts,
+            reasoning_effort=default,
+        )
+
+    def _payload(self, adapter, deployment, effort):
+        from app.models.request import ChatCompletionRequest, ChatMessage
+
+        request = ChatCompletionRequest(
+            model="ds",
+            messages=[ChatMessage(role="user", content="hi")],
+            max_tokens=32,
+        )
+        request.__pydantic_extra__ = {"reasoning_effort": effort}
+        payload, unsupported = adapter.build_payload(request, deployment)
+        return payload, unsupported
+
+    def test_effort_lands_on_output_config_not_as_a_bare_field(self) -> None:
+        adapter, deployment = self._adapter()
+        payload, _ = self._payload(adapter, deployment, "high")
+
+        assert payload["output_config"] == {"effort": "high"}
+        assert "reasoning_effort" not in payload
+
+
+    def test_off_effort_becomes_the_disabled_switch(self) -> None:
+        """网关的 ``"none"`` -> Anthropic 的 ``thinking.type="disabled"``。
+
+        ``output_config.effort="none"`` 在 Messages 侧关不掉思考（presets 的
+        spec_notes 明写），只有开关写法生效。
+        """
+        adapter, deployment = self._adapter()
+        payload, _ = self._payload(adapter, deployment, "none")
+
+        assert payload["thinking"] == {"type": "disabled"}
+        assert "output_config" not in payload
+
+    def test_an_off_effort_survives_a_vocabulary_that_has_no_none(self) -> None:
+        """部署词表里没写 ``none``，不代表「关思考」这条请求要失效。
+
+        词表列的是思考强度（low/medium/high），关是开关语义，不该被词表驳回。
+        2026-11-24 踩过：先归一化再判关，结果 ``none`` 被当未知档丢掉，
+        客户端要求"别思考"时上游照样思考。
+        """
+        adapter, deployment = self._adapter(efforts=("low", "medium", "high"))
+        payload, unsupported = self._payload(adapter, deployment, "none")
+
+        assert payload["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in unsupported
+
+    def test_an_effort_outside_the_vocabulary_is_dropped(self) -> None:
+        """词表外的档位宁可省略（上游会 400），也不能原样透传。"""
+        adapter, deployment = self._adapter(efforts=("low", "medium", "high"))
+        payload, _ = self._payload(adapter, deployment, "max")
+
+        assert "output_config" not in payload
+        assert "thinking" not in payload
+
+    def test_a_client_effort_beats_the_deployment_default(self) -> None:
+        """客户端 > 部署默认 > 不指定：选了 ``low`` 就不能被默认 ``high`` 盖掉。"""
+        adapter, deployment = self._adapter(default="high")
+        payload, _ = self._payload(adapter, deployment, "low")
+
+        assert payload["output_config"] == {"effort": "low"}
+
+    def test_no_client_effort_leaves_the_deployment_default_alone(self) -> None:
+        """客户端没说档位时，适配器不替它编一个（默认档由部署配置自己负责）。"""
+        from app.models.request import ChatCompletionRequest, ChatMessage
+
+        adapter, deployment = self._adapter(default="medium")
+        request = ChatCompletionRequest(
+            model="ds",
+            messages=[ChatMessage(role="user", content="hi")],
+            max_tokens=32,
+        )
+        payload, unsupported = adapter.build_payload(request, deployment)
+
+        assert "output_config" not in payload
+        assert "thinking" not in payload
+        assert "reasoning_effort" not in unsupported
+
+    def test_chat_wire_thinking_switches_do_not_leak_upstream(self) -> None:
+        """``thinking: true`` 是 chat wire 的开关，不是 Anthropic 的 thinking 对象。
+
+        原样透传会把布尔值变成上游的非法结构（400），所以要摘掉；但摘掉不该
+        报成"未映射"——它本来就不是这个协议里的东西。
+        """
+        from app.models.request import ChatCompletionRequest, ChatMessage
+
+        adapter, deployment = self._adapter()
+        request = ChatCompletionRequest(
+            model="ds",
+            messages=[ChatMessage(role="user", content="hi")],
+            max_tokens=32,
+        )
+        request.__pydantic_extra__ = {"thinking": True, "enable_thinking": True}
+        payload, unsupported = adapter.build_payload(request, deployment)
+
+        assert "thinking" not in payload
+        assert "reasoning_effort" not in unsupported
+
