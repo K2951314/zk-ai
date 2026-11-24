@@ -202,7 +202,7 @@ class ErrorInfo:
     #: ``options.quota_reset_at``。空 = 不知道，按固定长休处理。
     #:
     #: 为什么挂在 ErrorInfo 上而不是 CooldownPolicy 的字段：重置时刻是**供应商**
-    #: 的属性（ModelScope 每日 08:00、商汤 5 小时滚动窗口），而 CooldownPolicy 是
+    #: 的属性（ModelScope 每日 00:00、商汤 5 小时滚动窗口），而 CooldownPolicy 是
     #: 全进程一份。把供应商的值穿过来，`cooldown_for` 才算得出「离窗口翻转还有
     #: 多久」——一个全局字段会让商汤的额度耗尽也去等次日零点。
     quota_reset_at: str = ""

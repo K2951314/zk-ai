@@ -139,7 +139,7 @@ class CooldownPolicy:
         *spec* 是 ``"HH:MM"``，不传则用策略自带的 :attr:`quota_reset_at`。
         供应商级的值（``providers.yaml`` 的 ``options.quota_reset_at``）优先，
         经 ``ErrorInfo.quota_reset_at`` 穿到这里——各家的窗口时刻本来就不同，
-        ModelScope 是每日 08:00（实测，见 providers.yaml 注释），
+        ModelScope 是每日 00:00（运营者确认，见 providers.yaml 注释），
         商汤是 5 小时滚动窗口。
 
         按 :attr:`quota_reset_utc_offset` 指定的时区解释（默认 +8，北京时间）。

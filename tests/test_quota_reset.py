@@ -1,7 +1,7 @@
 """Quota cooldowns wait for the provider's reset moment, not a blind fixed delay.
 
-背景（2026-11-10 实测）：ModelScope 的免费额度是「每日 200 魔粒，北京 08:00
-翻账」。额度用完上游回 ``429 insufficient balance``，网关若按固定长休
+背景（2026-11-24 运营者确认）：ModelScope 的免费额度是「每日 200 魔粒，北京 00:00
+重置，但每日首次登录才发放」。额度用完上游回 ``429 insufficient balance``，网关若按固定长休
 （``quota_cooldown=1800s``）重试，接下来一整天都在白撞 429 —— 运营者的观感
 就是「每天都要手动启用一次，太不智能」。
 
