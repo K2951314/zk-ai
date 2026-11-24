@@ -383,28 +383,21 @@ class Scheduler:
         self,
         decision: Any,
         candidate: RoutingCandidate,
-        *,
-        tried: int,
     ) -> bool:
-        """这条腿是不是**链上唯一还能跑的**。
+        """当前部署之后是否已没有可试的腿。
 
-        判据（全部满足才算）：
-        - 链上候选里，除它之外没有任何一条既 eligible、又没在冷却/隔离中的部署；
-        - 或者它已经是链上最后一条（``tried`` 之后没有别的了）。
-
-        为什么要这个（2026-11-13 实测）：``kimi-k3`` 现在只有一个部署，
-        调度器仍按 ``max_credentials_per_deployment=3`` 截断 Key 池，9 把里
-        6 把从未被试，连撞 3 次 429 就整条请求失败。这是「让渡」逻辑用错了
-        场景：让渡的前提是「还有别的腿可退」，只剩一条时让渡 = 必然失败。
+        只扫描后面的候选：前面的腿即使凭据冷却已到期，本次请求也不会再回到
+        那里，不能把它们当作让渡的理由。否则最后一条腿仍被截断，请求必败。
         """
+        position = next(
+            index for index, other in enumerate(decision.candidates) if other is candidate
+        )
         remaining = [
             other
-            for other in decision.candidates
-            if other is not candidate
-            and other.eligible
+            for other in decision.candidates[position + 1:]
+            if other.eligible
             and not self.deployment_cooling_down(other.deployment.id)
         ]
-        del tried  # 只有「别的腿是否还活着」这一个判据，保留参数便于将来扩展
         return not remaining
 
     def _credentials_for(
@@ -707,9 +700,7 @@ class Scheduler:
             if adapter is None:
                 continue
 
-            only_leg = self._is_only_fallible_leg(
-                decision, candidate, tried=deployments_tried
-            )
+            only_leg = self._is_only_fallible_leg(decision, candidate)
             credentials = self._credentials_for(
                 candidate, session_key=session_key, only_leg=only_leg
             )
@@ -948,9 +939,7 @@ class Scheduler:
             if adapter is None:
                 continue
 
-            only_leg = self._is_only_fallible_leg(
-                decision, candidate, tried=deployments_tried
-            )
+            only_leg = self._is_only_fallible_leg(decision, candidate)
             credentials = self._credentials_for(
                 candidate, session_key=session_key, only_leg=only_leg
             )

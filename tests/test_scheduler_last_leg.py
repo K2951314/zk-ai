@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import pytest
 
+from app.models.provider import AliasStrategy
 from app.models.request import ChatCompletionRequest
 from tests.conftest import (
     Behavior,
+    FakeAdapter,
     build_harness,
     make_alias,
     make_config,
     make_model,
+    make_provider,
 )
 
 
@@ -82,5 +85,39 @@ async def test_a_backup_leg_still_respects_the_credential_cap(provider_config, f
         # 第一条腿只试了 1 把（让渡），然后切到备用腿 —— 不是在同一腿扫 3 把
         creds = [call["credential_id"] for call in harness.all_calls()]
         assert creds[0] != creds[1], f"同一部署上扫了多把 Key：{creds}"
+    finally:
+        await harness.container.shutdown()
+
+
+async def test_the_last_leg_of_a_multi_deployment_chain_scans_the_whole_pool():
+    """前面的腿失败后，最后一条腿不能仍被它们挡住完整扫描。"""
+    first = FakeAdapter(make_provider("first", key_ids=("first-1",)))
+    last = FakeAdapter(make_provider("last", key_ids=("last-1", "last-2", "last-3")))
+    first.queue(Behavior(status=429))
+    last.queue_status(429, 429, 429)
+    config = make_config(
+        providers=[first.config, last.config],
+        models=[
+            make_model("first", provider_id="first", priority=100),
+            make_model("last", provider_id="last", priority=90),
+        ],
+        aliases=[make_alias("zk-chain", ["first", "last"], strategy=AliasStrategy.PRIORITY)],
+    )
+    config.retry.max_credentials_per_deployment = 1
+    config.retry.max_retries_per_credential = 0
+    config.retry.max_total_attempts = 20
+    harness = await build_harness(config, adapters={"first": first, "last": last})
+    try:
+        from app.core.errors import ZKAIError
+
+        with pytest.raises(ZKAIError):
+            await harness.service.chat(_request("zk-chain"), request_id="req-last-in-chain")
+
+        last_creds = {
+            call["credential_id"] for call in last.calls
+        }
+        assert last_creds == {"last-1", "last-2", "last-3"}, (
+            f"最后一条腿没有扫完整池：{sorted(last_creds)}"
+        )
     finally:
         await harness.container.shutdown()
