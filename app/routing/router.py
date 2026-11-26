@@ -313,7 +313,7 @@ class Router:
         # 决定模型间的先后，但不该盖掉模型自己配的 round_robin/weighted——否则
         # 同一模型加的 3 家供应商永远只有 label 最小的那家接活。
         # 只在模型占用的槽位内重排，不改变跨模型顺序，也不动 capability 全局语义。
-        ordered = self._rotate_model_local_pools(ordered, requirement)
+        ordered = self._rotate_model_local_pools(ordered, requirement, strategy.name)
 
         front = self._promote_front_model(ordered, alias, unavailable or set())
 
@@ -403,6 +403,7 @@ class Router:
         self,
         ordered: list[RoutingCandidate],
         requirement: CapabilityRequirement,
+        outer_strategy: str = "",
     ) -> list[RoutingCandidate]:
         """模型内多部署是独立分担池，按模型自己的策略轮转（2026-11-26）。
 
@@ -429,6 +430,13 @@ class Router:
                 continue
             model = self.config.models.get(model_id)
             if model is None or model.strategy not in ("round_robin", "weighted"):
+                continue
+            # 2026-11-26：外层已经用同一策略转过一次时，内层再转一次会把
+            # 游标 +2——双腿模型 +2 mod 2 = 0，永远停在一家（线上 k3.1p
+            # 连续 6 次 preview 都是 m-k3.1p 就是这个形状）。
+            # 只有外层策略不同（如 alias=priority / capability）时，模型内
+            # 才需要补一次轮转。
+            if outer_strategy == model.strategy:
                 continue
             group = [result[position] for position in positions]
             # 健康腿先轮转，停掉的腿留在原位（它们本就在队尾）。

@@ -452,6 +452,33 @@ def test_model_level_round_robin_works_even_under_a_priority_alias() -> None:
     assert set(seen) == {"dep-0", "dep-1", "dep-2"}, "priority 别名下模型内三家仍要轮流接活"
 
 
+def test_direct_round_robin_model_rotates_without_double_rotation() -> None:
+    """2026-11-26：直连模型 + round_robin 不能被内外两层轮转抵消。
+
+    外层 `strategy.order()` 对单模型已经转了一次，若内层
+    `_rotate_model_local_pools` 用同一个 key 再转一次，两次 +1 回到原点——
+    线上 `k3.1p` 连续 6 次 preview 都停在 m-k3.1p，正是这个形状。
+    """
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    multi = make_model("solo", capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0})
+    # 两条腿最能暴露"双重 +1 抵消"：+2 mod 2 = 0，永远停在一家。
+    multi.deployments = [
+        DeploymentConfig(id=f"leg-{i}", provider_id="fake", model="up", priority=100)
+        for i in range(2)
+    ]
+    multi.strategy = "round_robin"
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[multi],
+    )
+    router = Router(config)
+    seen = [router.plan(request_for("solo")).candidates[0].deployment.id for _ in range(6)]
+    assert set(seen) == {"leg-0", "leg-1"}, "直连模型双腿也要轮转，不能被抵消"
+
+
 def test_strategy_registry_and_fallback() -> None:
     assert "capability" in available_strategies()
     assert isinstance(get_strategy("priority"), PrioritySelection)
