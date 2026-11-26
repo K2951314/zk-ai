@@ -698,7 +698,7 @@ ZK-AI/
 │                         # desktop_channels.py（桌面版通道只读盘点，A/B 两层）
 │                         # desktop_acp.py（桌面版 ACP 客户端，支持加载已有会话，见 docs/总控大脑-能力矩阵与差距分析-20261105.md 附录 D/E）
 │                         # 一键换机用外部 Skill 引擎，项目只留 .migrate/manifest.toml（见 §20.1）
-├── tests/                # conftest + 67 个测试模块，1555 个用例，全部 Mock
+├── tests/                # conftest + 69 个测试模块，1565 个用例，全部 Mock
 ├── 使用手册.md            # ⭐ 面向使用者：三步上手、改配置、常见问题（先看这个）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -706,7 +706,7 @@ ZK-AI/
 └── LICENSE               # MIT
 ```
 
-规模：`app/` 123 个文件约 35,664 行，`tests/` 67 个测试模块 1555 个用例（约 27,724 行），
+规模：`app/` 123 个文件约 35,789 行，`tests/` 69 个测试模块 1565 个用例（约 27,860 行），
 `scripts/` 24 个文件约 7,159 行。（口径：`find app tests scripts -name '*.py' | xargs wc -l`；
 用例数由 `tests/test_doc_scale.py` 拿 pytest 真实收集数核对。）
 数字更新至 2026-11-23：harness「经常中断」的第三根因——①心跳 UA 白名单补
@@ -1295,7 +1295,7 @@ X-ZKAI-Fallback: true          # 仅在发生故障转移时出现
 | `GET` | `/admin/router/preview` | **解释**路由决策，不执行 |
 | `GET` | `/admin/health` | 详细健康报告 + 探测历史 |
 | `POST` | `/admin/health/check` | 立即探测（只调 `GET /models`，不消耗推理配额） |
-| `GET` | `/admin/stats` | 用量、成本、错误率、最近请求 |
+| `GET` | `/admin/stats` | 用量、成本、错误率、客户端对比、可选子系统使用量、最近请求 |
 | `GET` | `/admin/requests` | 请求日志：状态/供应商/别名/模型/错误 筛选 + 分页 |
 | `GET` | `/admin/requests/{id}` | 单请求详情 + 全部 attempt（含上游错误原文） |
 | `POST` | `/admin/config/reload` | 重读 YAML，热替换别名与适配器 |
@@ -1470,7 +1470,7 @@ python scripts/benchmark.py --stream --json             # 压流式路径，输�
 
 ## 18. 测试
 
-**1555 个用例，全部通过，零网络、零真实配额。**
+**1565 个用例，全部通过，零网络、零真实配额。**
 
 ```bash
 uv run pytest -q                                   # 全量

@@ -23,6 +23,7 @@ from app.database.repositories._common import (
     EventRecord,
     delete,
     func,
+    iso_utc,
     select,
     update,
     utcnow,
@@ -40,6 +41,18 @@ class EventRepository:
 
     def __init__(self, db: Database) -> None:
         self.db = db
+
+    async def usage_summary(self) -> dict[str, Any]:
+        """事件中台的全量事件数与最后使用时间。"""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(func.count(EventRecord.id), func.max(EventRecord.updated_at))
+            )
+            count, last_used = result.one()
+            return {
+                "events": int(count or 0),
+                "last_used_at": iso_utc(last_used),
+            }
 
     # ------------------------------------------------------------------ #
     # 写入

@@ -618,8 +618,7 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
 1. **UA 名单写错**：名单是 `ds-harness`，线上是 `deepseek-harness/0.2.2-rc.5
    (+https://github.com/deepseek-ai/...) dsh-profile/desktop`——子串对不上，
    服务器 DB 618 条 harness 流式请求**零 ping**。已补 `deepseek-harness`。
-   ⚠ 教训：**这份名单没被任何线上 UA 验证过**就上线了；`claude-cli`/`undici`
-   至今也不在名单里——别以为它们「有」心跳，它们是不靠心跳。
+   ⚠ 教训：**名单没被线上 UA 验证过**就上线了；`undici` 旧判断见下方条目。
 2. **预取期间零字节**：`_stream_response` 为让预检错误返回真状态码，先 `anext`
    再建 `StreamingResponse`，而**故障转移全在这个窗口里**。服务器实测 harness
    首块 p50=8.6s / p90=30s / p99=141s，尾部在客户端看来就是「永远没响应」。
@@ -631,10 +630,12 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
    并以 `SSE_DONE` 收尾（手拼的 `data: {...}` 客户端不认；漏 `[DONE]` 只能靠
    断连结束）；失败分支**绝不发 `response.completed`**（那是宣告成功）。
 
-真机：状态行 10.2s 返回 → `: ping` ×3 → 正文照常；失败分支收到 200 + 心跳 +
-error + `[DONE]`，日志零 `already started`。回归清单见
-`docs/harness中断根因-20261123.md` §6（有效断言是「心跳早于第一个内容块」——
-只看 200 对旧实现也绿）。
+回归清单见 `docs/harness中断根因-20261123.md` §6（有效断言：
+「心跳早于第一个内容块」，只看 200 对旧实现也绿）。
+
+**2026-11-26**：undici 补进心跳白名单（499 = 客户端 60s 超时），
+`cancelled` 改记 `client_disconnected`；**名单必须靠线上 UA 原文验证**。
+多供应商池设计见 `docs/多供应商池与入站中断设计-20261126.md` v2。
 
 ## 华为云两套东西：码道 CLI（可用）vs MaaS provider（已删）
 

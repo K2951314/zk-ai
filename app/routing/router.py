@@ -286,25 +286,35 @@ class Router:
                     )
                     continue
                 card = score_candidate(model=model, deployment=deployment, requirement=requirement)
-                candidates.append(
-                    RoutingCandidate.from_scorecard(
-                        model=model,
-                        deployment=deployment,
-                        provider=provider,
-                        card=card,
-                        target_index=target_index,
-                    )
+                candidate = RoutingCandidate.from_scorecard(
+                    model=model,
+                    deployment=deployment,
+                    provider=provider,
+                    card=card,
+                    target_index=target_index,
                 )
+                # 2026-11-26：冷却/隔离的腿降权到队尾（不删除），让健康的供应商
+                # 先接活。以前 unavailable 只用于 front_model 提升，排序看不到它，
+                # 额度耗尽 9.7h 的腿仍排队首被白跳一次。
+                candidate.penalized = deployment.id in (unavailable or set())
+                candidates.append(candidate)
 
         if not candidates:
             raise ModelNotFoundError(
                 f"模型 '{requested}' 下没有任何可用的部署", model=requested
             )
 
-        # 别名策略 > 模型策略 > 默认 capability
+        # 别名策略 > 模型策略 > 默认 capability（决定**跨模型**顺序）
         strategy_name = alias.strategy if alias else (primary_model.strategy if primary_model else None)
         strategy = get_strategy(strategy_name)
         ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
+
+        # 2026-11-26：模型内多部署是**独立的分担池**。别名策略（如 ds 的 priority）
+        # 决定模型间的先后，但不该盖掉模型自己配的 round_robin/weighted——否则
+        # 同一模型加的 3 家供应商永远只有 label 最小的那家接活。
+        # 只在模型占用的槽位内重排，不改变跨模型顺序，也不动 capability 全局语义。
+        ordered = self._rotate_model_local_pools(ordered, requirement)
+
         front = self._promote_front_model(ordered, alias, unavailable or set())
 
         # Safety valve: per-deployment ``request_requires`` gates can leave a
@@ -326,15 +336,16 @@ class Router:
                     deployment=_without_request_gate(candidate.deployment),
                     requirement=relaxed_req,
                 )
-                relaxed.append(
-                    RoutingCandidate.from_scorecard(
-                        model=candidate.model,
-                        deployment=candidate.deployment,
-                        provider=candidate.provider,
-                        card=card,
-                        target_index=candidate.target_index,
-                    )
+                relaxed_candidate = RoutingCandidate.from_scorecard(
+                    model=candidate.model,
+                    deployment=candidate.deployment,
+                    provider=candidate.provider,
+                    card=card,
+                    target_index=candidate.target_index,
                 )
+                # 兜底也不能把冷却中的腿提到队首（与首次打分同一判据）。
+                relaxed_candidate.penalized = candidate.deployment.id in (unavailable or set())
+                relaxed.append(relaxed_candidate)
             ordered = strategy.order(
                 relaxed, relaxed_req, pin_first=bool(alias and alias.pin_first)
             )
@@ -367,6 +378,9 @@ class Router:
         blocked = [c.deployment.id for c in ordered if not c.eligible]
         if blocked:
             reason_parts.append(f"gated_out={blocked[:3]}")
+        parked = [c.deployment.id for c in ordered if c.penalized]
+        if parked:
+            reason_parts.append(f"parked={parked[:3]}")
 
         decision = RoutingDecision(
             requested_model=requested,
@@ -384,6 +398,50 @@ class Router:
             decision.reason,
         )
         return decision
+
+    def _rotate_model_local_pools(
+        self,
+        ordered: list[RoutingCandidate],
+        requirement: CapabilityRequirement,
+    ) -> list[RoutingCandidate]:
+        """模型内多部署是独立分担池，按模型自己的策略轮转（2026-11-26）。
+
+        背景：`ds` 别名是 ``priority``，而 ``deepseek-flash`` 模型挂了 3 家并配了
+        ``round_robin``。旧逻辑「别名策略 > 模型策略」让模型轮转被完全盖掉，
+        3 家永远按 label 字母序、`a-ds` 一家独大——用户看到的"加了供应商没用"。
+
+        做法：只在**同一模型占用的槽位内**重排，跨模型顺序由外层别名策略决定，
+        保持不动。因此 capability 的全局打分排序语义不受影响（多是单部署模型），
+        priority 别名仍能钉住 targets 顺序。只有模型显式配了 round_robin/weighted
+        且部署数 ≥2 时才轮转，其余模型零改动。
+
+        ⚠ 轮转只作用于**健康腿**：冷却/隔离的候选已被降权到队尾，这里只在它们
+        之外的槽位转，避免把停掉的腿又转回首跳。
+        """
+        # 按模型分组，记住每组在 ordered 中的位置（可能不连续）。
+        slots: dict[str, list[int]] = {}
+        for index, candidate in enumerate(ordered):
+            slots.setdefault(candidate.model.id, []).append(index)
+
+        result = list(ordered)
+        for model_id, positions in slots.items():
+            if len(positions) < 2:
+                continue
+            model = self.config.models.get(model_id)
+            if model is None or model.strategy not in ("round_robin", "weighted"):
+                continue
+            group = [result[position] for position in positions]
+            # 健康腿先轮转，停掉的腿留在原位（它们本就在队尾）。
+            healthy = [c for c in group if not c.penalized]
+            if len(healthy) < 2:
+                continue
+            rotated = get_strategy(model.strategy).order(healthy, requirement)
+            healthy_slots = [
+                position for position in positions if not result[position].penalized
+            ]
+            for position, candidate in zip(healthy_slots, rotated, strict=True):
+                result[position] = candidate
+        return result
 
     def _promote_front_model(
         self,

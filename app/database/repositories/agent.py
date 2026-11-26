@@ -15,6 +15,7 @@ from app.database.repositories._common import (
     Any,
     Database,
     func,
+    iso_utc,
     select,
 )
 
@@ -52,6 +53,18 @@ class AgentRepository:
                 select(AgentSession).order_by(AgentSession.updated_at.desc()).limit(limit)
             )
             return [self._session_dict(row) for row in result.scalars()]
+
+    async def usage_summary(self) -> dict[str, Any]:
+        """任务台的全量会话数与最后使用时间，用于判断是否值得保留。"""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(func.count(AgentSession.id), func.max(AgentSession.updated_at))
+            )
+            count, last_used = result.one()
+            return {
+                "sessions": int(count or 0),
+                "last_used_at": iso_utc(last_used),
+            }
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         async with self.db.session() as session:

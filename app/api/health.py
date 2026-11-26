@@ -56,6 +56,18 @@ async def health(container: ContainerDep) -> dict:
         },
         "credentials": pool_stats,
         "models": len(container.config.models),
+        "runtime": {
+            "stream_idle_timeout": container.settings.stream_idle_timeout,
+            "stream_prefetch_timeout": container.settings.stream_prefetch_timeout,
+            "max_input_tokens": container.settings.max_input_tokens,
+            "max_request_seconds": container.settings.max_request_seconds,
+            "max_credentials_per_deployment": (
+                container.config.retry.max_credentials_per_deployment
+            ),
+            "max_total_attempts": container.config.retry.max_total_attempts,
+            "agent_enabled": container.settings.agent_enabled,
+            "events_enabled": container.settings.events_enabled,
+        },
         # 有几个模型**此刻真的能接活**：部署未被冷却/隔离，且其供应商至少
         # 还有一把可用 Key。2026-11-14 加——`models: 10` 只报数量，
         # 运营者从 /health 看不出「这 10 个里有 7 个是死的」。

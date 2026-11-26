@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+from sqlalchemy import or_
+
 from app.database.repositories._common import (
     Any,
     AttemptOutcome,
@@ -16,6 +18,7 @@ from app.database.repositories._common import (
     RequestAttempt,
     RequestRecord,
     UsageRecord,
+    case,
     cast,
     delete,
     func,
@@ -158,6 +161,117 @@ class RequestRepository:
                 }
                 for row in result.scalars()
             ]
+
+    async def client_summary(self, *, days: int = 7) -> list[dict[str, Any]]:
+        """按客户端 UA 聚合成功率、限流与上下文规模。"""
+        cutoff = utcnow() - dt.timedelta(days=days)
+        user_agent = func.coalesce(RequestRecord.user_agent, "")
+        rate_limited = case(
+            (
+                or_(
+                    RequestRecord.error_type == "rate_limit_error",
+                    RequestRecord.http_status == 429,
+                ),
+                1,
+            ),
+            else_=0,
+        )
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(
+                    user_agent.label("user_agent"),
+                    func.count(RequestRecord.id).label("requests"),
+                    func.sum(
+                        case((RequestRecord.status == "success", 1), else_=0)
+                    ).label("success"),
+                    func.sum(
+                        case((RequestRecord.status == "error", 1), else_=0)
+                    ).label("errors"),
+                    func.sum(
+                        case((RequestRecord.status == "cancelled", 1), else_=0)
+                    ).label("cancelled"),
+                    func.sum(rate_limited).label("rate_limited"),
+                    func.avg(RequestRecord.attempt_count).label("avg_attempts"),
+                    func.avg(
+                        case(
+                            (RequestRecord.input_tokens > 0, RequestRecord.input_tokens),
+                            else_=None,
+                        )
+                    ).label("avg_input_tokens"),
+                    func.max(RequestRecord.input_tokens).label("max_input_tokens"),
+                )
+                .where(RequestRecord.started_at >= cutoff)
+                .group_by(user_agent)
+                .order_by(func.count(RequestRecord.id).desc(), user_agent)
+            )
+            rows: list[dict[str, Any]] = []
+            for row in result.mappings():
+                requests = int(row["requests"] or 0)
+                rows.append(
+                    {
+                        "user_agent": row["user_agent"] or "unknown",
+                        "requests": requests,
+                        "success": int(row["success"] or 0),
+                        "errors": int(row["errors"] or 0),
+                        "cancelled": int(row["cancelled"] or 0),
+                        "success_rate": round(int(row["success"] or 0) / requests, 4)
+                        if requests
+                        else 0.0,
+                        "rate_limited": int(row["rate_limited"] or 0),
+                        "avg_attempts": round(float(row["avg_attempts"] or 0.0), 2),
+                        "avg_input_tokens": round(
+                            float(row["avg_input_tokens"] or 0.0), 1
+                        ),
+                        "max_input_tokens": int(row["max_input_tokens"] or 0),
+                    }
+                )
+            return rows
+
+    async def deployment_summary(self, *, days: int = 7) -> list[dict[str, Any]]:
+        """按部署聚合真实接单情况（2026-11-26）。
+
+        ⚠ 数据源必须是 `request_attempts`，不是 `requests`：线上 11-26 的
+        `cancelled`/`error` 行 `deployment_id` **100% 为 NULL**（meta 还没产出就没了），
+        只有 `success` 行才有值。用 `requests` 聚合会把失败全部漏掉、成功率虚高。
+        `request_attempts` 则每行都有 deployment_id（线上 1118 行零缺失）。
+        """
+        cutoff = utcnow() - dt.timedelta(days=days)
+        rate_limited = case(
+            (RequestAttempt.http_status == 429, 1),
+            else_=0,
+        )
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(
+                    RequestAttempt.provider_id.label("provider_id"),
+                    RequestAttempt.deployment_id.label("deployment_id"),
+                    func.count(RequestAttempt.id).label("attempts"),
+                    func.sum(
+                        case((RequestAttempt.status == "success", 1), else_=0)
+                    ).label("success"),
+                    func.sum(rate_limited).label("rate_limited"),
+                    func.avg(RequestAttempt.latency_ms).label("avg_latency_ms"),
+                )
+                .where(RequestAttempt.started_at >= cutoff)
+                .group_by(RequestAttempt.provider_id, RequestAttempt.deployment_id)
+                .order_by(func.count(RequestAttempt.id).desc())
+            )
+            rows: list[dict[str, Any]] = []
+            for row in result.mappings():
+                attempts = int(row["attempts"] or 0)
+                success = int(row["success"] or 0)
+                rows.append(
+                    {
+                        "provider_id": row["provider_id"] or "",
+                        "deployment_id": row["deployment_id"] or "",
+                        "attempts": attempts,
+                        "success": success,
+                        "success_rate": round(success / attempts, 4) if attempts else 0.0,
+                        "rate_limited": int(row["rate_limited"] or 0),
+                        "avg_latency_ms": round(float(row["avg_latency_ms"] or 0.0), 1),
+                    }
+                )
+            return rows
 
     async def list_requests(
         self,

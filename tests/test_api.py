@@ -557,6 +557,21 @@ def test_keepalive_reaches_the_real_deepseek_harness_user_agent() -> None:
     assert keepalive_interval(120.0, user_agent=real) == 60.0
 
 
+def test_keepalive_reaches_undici_before_the_clients_60s_timeout() -> None:
+    """undici 必须收到心跳：线上 55 条 499 全是它，耗时 59.7~59.9s。
+
+    11-23 的文档判断「undici 不依赖心跳」，11-26 的数据推翻了它——
+    那正是 60 秒硬超时的形状。用线上原文 UA 钉住，防止名单再次漂移。
+    WorkBuddy / ZCode / qoder 在服务器上是独立 UA，不受影响。
+    """
+    assert keepalive_interval(20.0, user_agent="undici") == 10.0
+    assert keepalive_interval(20.0, user_agent="Undici") == 10.0
+    # 工作区里的其他 Node 客户端与不合规客户端仍不发，避免污染输出
+    assert keepalive_interval(20.0, user_agent="WorkBuddy/5.9.4") is None
+    assert keepalive_interval(20.0, user_agent="ZCode/3.18.2 ai-sdk/provider-utils/4.0.39") is None
+    assert keepalive_interval(20.0, user_agent="qoder-cn/0.5.14") is None
+
+
 def test_extra_ua_keywords_extend_the_whitelist_without_code_changes() -> None:
     """配置追加名单：新客户端不用改代码就能收心跳（2026-11-19）。
 

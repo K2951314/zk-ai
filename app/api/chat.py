@@ -97,6 +97,11 @@ _PING_USER_AGENTS = (
     #: 流式请求，零心跳）。两个写法都保留：官方 ID 可能变，别名别丢。
     "deepseek-harness",
     "ds-harness",
+    #: 2026-11-26 修：服务器 DB 2490 条 `undici` 请求，11-26 的 55 条 499
+    #: 全部是它、耗时整齐落在 59.7~59.9s——客户端 60 秒硬超时，不是上游失败。
+    #: 11-23 文档曾判断「undici 不依赖心跳」，被这批数据推翻。已核实服务器上的
+    #: WorkBuddy / ZCode / qoder 都是独立 UA，不是 undici 子串，不会污染输出。
+    "undici",
     "openai-python",  # 旧式 OpenAI Python SDK
     "openai-node",  # 旧式 OpenAI Node SDK
     "openai/python",  # 新版 openai-python（Stainless）

@@ -77,7 +77,34 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
     # 市场「＋添加」同一模型的第二个供应商就走这条路。
     existing = container.config.models.get(payload.id)
     if payload.merge and existing is not None:
+        # 2026-11-26：合并分支以前跳过全部校验——市场「＋添加」第二个供应商时
+        # 拼错的 provider_id 会安静落盘，运行时被 router.py 用 debug 静默跳过，
+        # 运营者看到的就是「加了供应商但永远没用」。补齐与非 merge 分支同款校验。
+        unknown_providers = sorted(
+            {
+                str(dep.get("provider_id"))
+                for dep in raw["deployments"]
+                if dep.get("provider_id") not in container.config.providers
+            }
+        )
+        if unknown_providers:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "message": f"未知的供应商：{'、'.join(unknown_providers)}",
+                        "type": "invalid_model",
+                        "known_providers": sorted(container.config.providers),
+                    }
+                },
+            )
         seen = {d.id for d in existing.deployments}
+        incoming_ids = [str(dep.get("id")) for dep in raw["deployments"]]
+        if len(incoming_ids) != len(set(incoming_ids)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"message": "部署 ID 重复", "type": "invalid_model"}},
+            )
         for dep_raw in raw["deployments"]:
             if dep_raw.get("id") not in seen:
                 existing.deployments.append(_Dep(**dep_raw))

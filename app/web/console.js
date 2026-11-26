@@ -1458,7 +1458,9 @@ async function loadModels() {
   if (!(state.providers || []).length) {
     try { state.providers = (await api("/admin/providers")).data || []; } catch (e) {}
   }
-  const [m, al] = await Promise.all([api("/admin/models"), api("/admin/aliases")]);
+  const [m, al, stats] = await Promise.all([
+    api("/admin/models"), api("/admin/aliases"), api("/admin/stats?days=7&recent=0"),
+  ]);
   state.modelsCache = m.data || [];
   state.aliasesCache = al.data || {};
   const modelRows = (m.data || []).map(x => {
@@ -1487,6 +1489,18 @@ async function loadModels() {
   const warnings = (m.config_warnings || []).length
     ? `<div class="toolbar"><span class="pill amber">⚠ 配置警告 ${m.config_warnings.length} 条</span>
        <details class="raw grow"><summary>展开</summary><pre>${m.config_warnings.map(esc).join("\n")}</pre></details></div>` : "";
+  // 2026-11-26：每家部署真实接了多少单。数据源是 request_attempts——
+  // requests 表在 cancelled/error 时 deployment_id 全 NULL，用它算成功率会虚高。
+  const depStats = stats.deployments || [];
+  const depStatRows = depStats.map(d => `<tr>
+    <td class="mono">${esc(d.provider_id || "-")}</td>
+    <td class="mono">${esc(d.deployment_id || "-")}</td>
+    <td class="n">${num(d.attempts)}</td>
+    <td class="n">${num(d.success)}</td>
+    <td class="n">${(Number(d.success_rate || 0) * 100).toFixed(1)}%</td>
+    <td class="n">${num(d.rate_limited)}</td>
+    <td class="n">${Number(d.avg_latency_ms || 0).toFixed(0)}</td>
+  </tr>`).join("");
   $("#view-models").innerHTML = `
     <div class="view-head">
       <h2>模型</h2>
@@ -1503,6 +1517,14 @@ async function loadModels() {
       <button class="primary" id="al-new">➕ 新建别名</button></div>
     <div class="tablewrap"><table><thead><tr><th scope="col" class="acts">操作</th><th scope="col">别名</th><th scope="col">策略</th><th scope="col">目标链</th><th scope="col">接口模型</th><th scope="col">解析结果</th><th scope="col">状态</th></tr></thead>
       <tbody>${aliasRows}</tbody></table></div>
+    <h4 class="sec">各部署真实接单（近 7 天）</h4>
+    <div class="card">
+      <div class="tablewrap"><table><thead><tr><th scope="col">供应商</th><th scope="col">部署</th>
+        <th scope="col">尝试</th><th scope="col">成功</th><th scope="col">成功率</th>
+        <th scope="col">限流</th><th scope="col">平均延迟 ms</th></tr></thead>
+        <tbody>${depStatRows || '<tr><td colspan="7" class="muted">暂无数据</td></tr>'}</tbody></table></div>
+      <div class="note">按每次上游尝试统计，失败与取消也算在内——"部署配了但从没接过单"会直接显示为 0。</div>
+    </div>
     <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
     <div class="card"><div class="row-flex">
       <input id="pv-model" size="16" value="zk-auto" placeholder="模型/别名">
@@ -1522,11 +1544,12 @@ async function loadModels() {
     const plan = (r.plan || []).map((c, i) => `
       <tr><td>${rankBadge(Number(c.order ?? i + 1))}</td><td>${esc(c.deployment_id || c.id || "-")}</td>
       <td>${esc(c.provider_id || c.provider || "-")}</td><td>${esc(c.model || "-")}</td>
-      <td>${c.eligible ? pill("healthy") : pill("disabled")}</td></tr>`).join("");
+      <td>${c.penalized ? '<span class="pill amber">冷却中</span>' : (c.eligible ? pill("healthy") : pill("disabled"))}</td>
+      <td class="small">${c.penalized ? "冷却/隔离中，已降到队尾" : ""}</td></tr>`).join("");
     $("#pv-out").innerHTML = `
       <div class="small muted" style="margin-bottom:6px">${esc(r.reason || "")}
       ${r.alias ? ` · 别名 ${esc(r.alias)}` : ""} · 策略 ${esc(strategyLabel(r.strategy))}</div>
-      <div class="tablewrap"><table><thead><tr><th scope="col">#</th><th scope="col">部署</th><th scope="col">供应商</th><th scope="col">上游模型</th><th scope="col">入选</th></tr></thead>
+      <div class="tablewrap"><table><thead><tr><th scope="col">#</th><th scope="col">部署</th><th scope="col">供应商</th><th scope="col">上游模型</th><th scope="col">状态</th><th scope="col">说明</th></tr></thead>
       <tbody>${plan}</tbody></table></div>
       <details class="raw"><summary>原始数据</summary><pre>${esc(JSON.stringify(r, null, 1).slice(0, 4000))}</pre></details>`;
   };
@@ -3685,6 +3708,30 @@ function reportRender(stats, reqs, days, models) {
     <div class="k-label">${l}</div><div class="k-value">${v}</div>
     <div class="k-sub">${esc(s || "")}</div></div>`;
 
+  const clients = stats.clients || [];
+  const clientRows = clients.map(c => `<tr>
+    <td class="mono">${esc(c.user_agent || "unknown")}</td>
+    <td class="n">${num(c.requests)}</td>
+    <td class="n">${(Number(c.success_rate || 0) * 100).toFixed(1)}%</td>
+    <td class="n">${num(c.rate_limited)}</td>
+    <td class="n">${num(c.avg_input_tokens)}</td>
+    <td class="n">${num(c.max_input_tokens)}</td>
+    <td class="n">${Number(c.avg_attempts || 0).toFixed(1)}</td>
+  </tr>`).join('');
+  const subsystems = stats.subsystems || {};
+  const lastUsed = value => value
+    ? new Date(value).toLocaleString("zh-CN", { hour12: false })
+    : "从未";
+  const subsystemRows = [
+    ["Agent 任务台", subsystems.agent],
+    ["事件中台", subsystems.events],
+  ].map(([name, item]) => {
+    const data = item || {};
+    const count = data.sessions ?? data.events ?? 0;
+    return `<tr><td>${name}</td><td>${data.enabled ? "启用" : "停用"}</td>
+      <td class="n">${num(count)}</td><td>${esc(lastUsed(data.last_used_at))}</td></tr>`;
+  }).join('');
+
   $('#report-out').innerHTML = `
   <div class="grid kpis">
     <div class="report-kpis-head">① 这段时间的大脉</div>
@@ -3720,11 +3767,29 @@ function reportRender(stats, reqs, days, models) {
   </div>
 
   <div class="card">
-    <h4 class="sec">④ 这套链为什么这样排（从当前配置实时推导）</h4>
+    <h4 class="sec">④ 客户端谁在掉链子</h4>
+    <div class="mscrl"><table><thead><tr><th scope="col">客户端</th><th scope="col">请求数</th>
+      <th scope="col">成功率</th><th scope="col">限流</th><th scope="col">平均上下文</th>
+      <th scope="col">最大上下文</th><th scope="col">平均尝试</th></tr></thead>
+      <tbody>${clientRows || '<tr><td colspan="7" class="muted">暂无数据</td></tr>'}</tbody></table></div>
+    <div class="note">同一模型在不同客户端上的成功率可能完全不同：上下文大小、是否自动重试、
+      是否经过本地熔断，都会改变体感。这里按用户代理分开统计，不再把所有人混成一个平均数。</div>
+  </div>
+
+  <div class="card">
+    <h4 class="sec">⑤ 可选子系统使用量</h4>
+    <div class="mscrl"><table><thead><tr><th scope="col">子系统</th><th scope="col">状态</th>
+      <th scope="col">累计数量</th><th scope="col">最后使用</th></tr></thead>
+      <tbody>${subsystemRows}</tbody></table></div>
+    <div class="note">先看真实使用量，再决定删减还是保留；代码行数本身不是删除依据。</div>
+  </div>
+
+  <div class="card">
+    <h4 class="sec">⑥ 这套链为什么这样排（从当前配置实时推导）</h4>
     ${routingFactsHtml(models)}
   </div>
 
-  <details><summary class="sec" style="cursor:pointer;font-size:var(--fs-13);font-weight:600">⑤ 我想看更技术的（一次请求的完整决策过程）</summary>
+  <details><summary class="sec" style="cursor:pointer;font-size:var(--fs-13);font-weight:600">⑦ 我想看更技术的（一次请求的完整决策过程）</summary>
     <div class="card" style="margin-top:10px">
       <p class="small muted">在项目目录跑这句，把任意一句话的决策打出来——选了谁、挡了谁、各多少分：</p>
       <pre class="mono">.venv\\Scripts\\python.exe -c "

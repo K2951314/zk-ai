@@ -418,11 +418,17 @@ class RequestService:
                 cost_usd=stream_cost,
             )
         else:
+            # 2026-11-26 修归因：客户端断开时原先一律记 `no_stream_meta`，
+            # 把「流没产出 meta」和「客户端主动断开」混成一个类型——线上 55 条
+            # 499 全被记成 no_stream_meta，排查方向被带偏。现在 cancelled 如实记
+            # `client_disconnected`；`no_stream_meta` 只留给非取消且确实没有 meta
+            # 的情况。控制台的 ERR_TYPE_ZH 已有该词的中文映射。
             await self.requests.finish(
                 request_id,
                 status="cancelled" if cancelled else "error",
                 http_status=499 if cancelled else (error_status if failed else 502),
-                error_type=error_type or "no_stream_meta",
+                error_type=error_type
+                or ("client_disconnected" if cancelled else "no_stream_meta"),
                 attempt_count=len(attempts),
                 # 没有 meta 也要记总时长：客户端断开时 meta 仍是 None，
                 # 而「它跑了多久才断」正是排查要看的那个数。

@@ -455,6 +455,16 @@ def test_report_page_live_region_has_real_markup() -> None:
     # 历史区必须真的画出模型表（6 列），空态 colspan 要跟列数走。
     assert 'colspan="6"' in text, "模型表空态 colspan 要跟列数一致"
 
+def test_report_page_shows_client_and_subsystem_observability() -> None:
+    """体检页必须把客户端差异和可选子系统使用量摆出来。"""
+    text = _html("index.html")
+    assert "stats.clients" in text
+    assert "stats.subsystems" in text
+    assert "esc(c.user_agent" in text
+    for phrase in ("客户端", "成功率", "限流", "平均上下文", "最后使用"):
+        assert phrase in text, f"体检页缺少「{phrase}」"
+
+
 def test_console_links_to_the_report_page() -> None:
     """控制台要有一个入口，否则这页只能靠背路径。
 

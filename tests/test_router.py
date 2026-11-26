@@ -366,6 +366,25 @@ def test_priority_strategy_keeps_the_alias_order() -> None:
     assert [c.model.id for c in decision.candidates] == ["thinker", "coder"]
 
 
+def test_cooling_deployment_is_demoted_to_the_tail_not_dropped() -> None:
+    """2026-11-26：冷却的腿降权到队尾，健康腿先接活，但整条链仍保留。
+
+    线上额度耗尽 9.7h 的魔搭腿以前排队首、被调度器跳过、白费一次首跳判断；
+    `unavailable` 以前只用于 front_model 提升，排序策略根本看不到它。
+    """
+    router = build_router()
+    all_ids = [c.deployment.id for c in router.plan(request_for("zk-all")).candidates]
+    assert len(all_ids) >= 2
+    parked_id = all_ids[0]
+
+    decision = router.plan(request_for("zk-all"), unavailable={parked_id})
+    ids = [c.deployment.id for c in decision.candidates]
+    assert ids[-1] == parked_id, "冷却的腿必须降到队尾"
+    assert set(ids) == set(all_ids), "降权不是删除——全冷却时仍要有完整链"
+    assert any(c.penalized for c in decision.candidates)
+    assert "parked=" in decision.reason and parked_id in decision.reason, "运营者要能看见谁被降权"
+
+
 def test_cost_strategy_prefers_the_cheapest_capable_model() -> None:
     router = build_router()
     decision = router.plan(request_for("zk-cheapx"))
@@ -376,6 +395,61 @@ def test_speed_strategy_prefers_the_fastest_model() -> None:
     router = build_router()
     decision = router.plan(request_for("zk-fastx"))
     assert decision.candidates[0].model.id == "sprinter"
+
+
+def test_round_robin_spreads_across_every_model() -> None:
+    """2026-11-26：分担的基本性质——同一池连续 N 次必须覆盖每一家。
+
+    审核时曾怀疑 cursor 用 `eligible[0].model.id` 会随轮转漂移；实测推翻：
+    `order()` 里先排序再取 key，首位是确定性的，不漂移。这条测试保留下来
+    钉住「确实在轮转」这个用户可感知的性质，不再基于错误假设改 cursor。
+    """
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[
+            make_model("m1", capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0}),
+            make_model("m2", capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0}),
+            make_model("m3", capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0}),
+        ],
+        aliases=[make_alias("pool", ["m1", "m2", "m3"], strategy=AliasStrategy.ROUND_ROBIN)],
+    )
+    router = Router(config)
+    seen = [router.plan(request_for("pool")).candidates[0].model.id for _ in range(6)]
+    assert set(seen) == {"m1", "m2", "m3"}, "6 次轮转必须覆盖三家"
+    assert seen == ["m1", "m2", "m3", "m1", "m2", "m3"], "顺序轮转，不漂移"
+
+
+def test_model_level_round_robin_works_even_under_a_priority_alias() -> None:
+    """2026-11-26 核心回归：别名是 priority，模型内多部署仍要分担。
+
+    现网 `ds` 别名是 `priority`，而 `deepseek-flash` 模型挂了 3 家供应商并配了
+    `round_robin`。`router.py:305` 的「别名策略 > 模型策略」让模型轮转被完全
+    盖掉——3 家永远按 label 字母序，`a-ds` 一家独大。
+    修复后：跨模型顺序仍由别名决定，模型内 3 家按自己的策略轮转。
+    """
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    multi = make_model("multi", capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0})
+    multi.deployments = [
+        DeploymentConfig(id=f"dep-{i}", provider_id="fake", model="up", priority=100)
+        for i in range(3)
+    ]
+    multi.strategy = "round_robin"
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[multi],
+        aliases=[make_alias("ds-like", ["multi"], strategy=AliasStrategy.PRIORITY)],
+    )
+    router = Router(config)
+    seen = [
+        router.plan(request_for("ds-like")).candidates[0].deployment.id for _ in range(6)
+    ]
+    assert set(seen) == {"dep-0", "dep-1", "dep-2"}, "priority 别名下模型内三家仍要轮流接活"
 
 
 def test_strategy_registry_and_fallback() -> None:

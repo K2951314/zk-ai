@@ -83,3 +83,29 @@ async def test_cancelled_stream_still_records_how_long_it_ran(harness) -> None:
     row = await _latest_request_row(harness)
     assert row["status"] == "cancelled"
     assert row["stream_duration_ms"] > 0, "被取消的流也要留下它跑了多久"
+
+
+async def test_cancelled_stream_is_attributed_to_the_client_not_missing_meta(harness) -> None:
+    """2026-11-26：499 断开不得再记成 `no_stream_meta`。
+
+    线上 55 条 499 全被记成 no_stream_meta，看起来像"网关没产出 meta"，
+    实际是客户端 60 秒硬超时。归因错了排查方向就错了——这是可观测性 bug，
+    不修的话下次还会照着错误的类型去翻路由代码。
+    """
+    harness.adapter.queue(Behavior(chunks=5, delay=0.4))
+    stream = harness.service.stream(
+        ChatCompletionRequest(
+            model="fake-model",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+        ),
+        request_id="cancel-attribution",
+    )
+    iterator = stream.__aiter__()
+    await anext(iterator)
+    await stream.aclose()
+
+    row = await _latest_request_row(harness)
+    assert row["status"] == "cancelled"
+    assert row["error_type"] == "client_disconnected"
+    assert row["error_type"] != "no_stream_meta"

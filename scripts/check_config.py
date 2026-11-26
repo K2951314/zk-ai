@@ -117,6 +117,29 @@ def _check_alias_provider_breadth(config: AppConfig, warnings: list[str]) -> Non
             )
 
 
+def _check_model_pool_strategy(config: AppConfig, warnings: list[str]) -> None:
+    """同一模型多部署却没配分担策略 = 永远只有一家接活（2026-11-26）。
+
+    `ds` 别名是 `priority`，`deepseek-flash` 挂了 3 家却没配 `round_robin` 时，
+    三家按 label 字母序决胜——`a-ds` 一家独大，另外两家等于白加。
+    这是**只读告警**，不自动改策略：静默改策略会改变成本结构，且
+    YAML / DB 镜像两处同步容易漏。
+    """
+    for model in sorted(config.models.values(), key=lambda m: m.id):
+        if not model.enabled or len(model.deployments) < 2:
+            continue
+        if model.strategy in ("round_robin", "weighted"):
+            continue
+        providers = {dep.provider_id for dep in model.deployments if dep.enabled}
+        if len(providers) < 2:
+            continue
+        warnings.append(
+            f"模型 {model.id} 有 {len(model.deployments)} 个部署、跨 {len(providers)} 家供应商，"
+            f"但未配置分担策略（strategy 为空）——默认按 label 排序，只有一家接活；"
+            "建议设 strategy: round_robin（本脚本不自动改）"
+        )
+
+
 def _check_stale_files(warnings: list[str]) -> None:
     """有人在外面改过配置、网关还没 reload —— 控制台一保存就会覆盖回去。"""
     from app.core import config_writer
@@ -414,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_unreachable_models(config, warnings)
     _check_credential_rotation_ceiling(config, warnings)
     _check_alias_provider_breadth(config, warnings)
+    _check_model_pool_strategy(config, warnings)
     _check_credential_envs(config, warnings)
     _check_shadowed_envs(warnings)
     _check_events_rules(REPO_ROOT, errors, warnings)

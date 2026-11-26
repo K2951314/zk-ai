@@ -18,12 +18,22 @@ async def stats(
 ) -> dict[str, Any]:
     """Token usage, cost estimate, error rates and recent request history."""
     usage = await container.usage_service.summary(days=days)
+    agent_usage = await container.agent_repository.usage_summary()
+    event_usage = await container.event_repository.usage_summary()
     return {
         "window_days": days,
         "uptime_seconds": round(container.uptime(), 2),
         "pool": container.pool.stats(),
         "usage": usage,
         "daily": await container.usage_service.daily(days=min(days, 30)),
+        "clients": await container.request_repository.client_summary(days=days),
+        # 2026-11-26：每家部署的真实接单——数据源是 request_attempts（失败行在
+        # requests 表里 deployment_id 全 NULL，不能用它算成功率）。
+        "deployments": await container.request_repository.deployment_summary(days=days),
+        "subsystems": {
+            "agent": {"enabled": container.settings.agent_enabled, **agent_usage},
+            "events": {"enabled": container.settings.events_enabled, **event_usage},
+        },
         "error_rates": await container.health_repository.error_rate(minutes=60),
         "recent_requests": await container.request_repository.recent(limit=recent) if recent else [],
     }

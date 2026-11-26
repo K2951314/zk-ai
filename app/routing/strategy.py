@@ -29,6 +29,10 @@ class RoutingCandidate:
     eligible: bool = True
     gates_failed: list[str] = field(default_factory=list)
     order: int = 0
+    #: 2026-11-26：调度器当前拒绝调用的部署（短冷却 / 自动隔离）。
+    #: 只降权、不过滤——保留完整故障转移链，避免"全冷却时零候选"。
+    #: 值来自 Router.plan(unavailable=...)，Router 依旧不做 I/O。
+    penalized: bool = False
     #: Position of the candidate's model inside the alias target list. Alias order
     #: is an explicit operator decision, so ``priority`` selection honours it first.
     target_index: int = 0
@@ -63,6 +67,7 @@ class RoutingCandidate:
             "target_index": self.target_index,
             "score": self.score,
             "eligible": self.eligible,
+            "penalized": self.penalized,
             "gates_failed": self.gates_failed,
             "reason": self.reason(),
         }
@@ -123,6 +128,21 @@ class SelectionStrategy(ABC):
             candidate.order = index
         return candidates
 
+    @staticmethod
+    def _demote_penalized(
+        candidates: list[RoutingCandidate],
+    ) -> list[RoutingCandidate]:
+        """冷却/隔离的候选排到队尾，**不删除**。
+
+        2026-11-26：以前 `unavailable` 只用于 front_model 提升，`strategy.order()`
+        根本看不到它——额度耗尽 9.7 小时的腿仍排队首，被调度器跳过后白费一次
+        首跳判断。现在所有策略共用这一个降权步骤：健康腿在前、被停的腿在后，
+        但整条链仍在（全冷却时不会零候选）。稳定分区，不改变组内相对顺序。
+        """
+        healthy = [c for c in candidates if not c.penalized]
+        parked = [c for c in candidates if c.penalized]
+        return healthy + parked
+
 
 class PrioritySelection(SelectionStrategy):
     """Static order: alias target position first, then deployment priority.
@@ -142,7 +162,7 @@ class PrioritySelection(SelectionStrategy):
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (c.target_index, -c.deployment.priority, c.label))
         blocked.sort(key=lambda c: (c.target_index, -c.deployment.priority, c.label))
-        return self._number(eligible + blocked)
+        return self._number(self._demote_penalized(eligible + blocked))
 
 
 class CapabilitySelection(SelectionStrategy):
@@ -169,7 +189,7 @@ class CapabilitySelection(SelectionStrategy):
         else:
             eligible.sort(key=lambda c: (-c.score, -c.deployment.priority, c.label))
         blocked.sort(key=lambda c: c.label)
-        return self._number(eligible + blocked)
+        return self._number(self._demote_penalized(eligible + blocked))
 
 
 class CostSelection(SelectionStrategy):
