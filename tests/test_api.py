@@ -782,6 +782,29 @@ async def test_prefetch_timeout_emits_first_ping_without_waiting_an_interval(
     assert min(pings) < first_data
 
 
+async def test_undici_receives_ping_before_the_clients_60s_timeout(api) -> None:
+    """2026-11-26：undici UA 端到端必须收到心跳，不再 58s 硬超时。
+
+    线上 55 条 499 全是它。前面的 `keepalive_interval` 单测只钉名单，
+    这条走完整 HTTP 流路径——名单错了/没接进 chat 层都会红。
+    """
+    client, harness = api
+    harness.container.settings.stream_prefetch_timeout = 0.05
+    harness.adapter.queue(Behavior(chunks=1, first_delay=0.3))
+
+    response = await client.post(
+        "/v1/chat/completions",
+        json={**CHAT_BODY, "stream": True},
+        headers={"User-Agent": "undici"},
+    )
+    assert response.status_code == 200
+    lines = response.text.splitlines()
+    pings = [i for i, line in enumerate(lines) if line == ": ping"]
+    assert pings, "undici 必须收到心跳，否则客户端 60s 后主动断（499）"
+    first_data = next(i for i, line in enumerate(lines) if line.startswith("data: "))
+    assert min(pings) < first_data, "心跳必须早于第一个内容块"
+
+
 async def test_failure_after_the_prefetch_window_becomes_an_error_event(api) -> None:
     """窗口外失败必须变流内 error 事件，且不许让框架报 already started。
 
