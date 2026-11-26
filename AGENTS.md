@@ -22,22 +22,22 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 - **`.cmd`/`.bat` 必须纯 ASCII + CRLF**：中文会让 cmd 字节错位误解析（生成乱码文件/跳行）；
   CRLF 由 `.gitattributes` 强制，ASCII 靠自觉；中文文案放对应 Python 脚本里
 - 文档入口：`使用手册.md`（面向使用）→ `README.md`（全量参考）
-- `docs/` 放**一次性的排查/审查报告**（带日期的 `*.md`），不是常读文档——
-  结论该沉淀的往上写进本文件或 `使用手册.md`，报告本身只作过程留档。
-  另有三份**从本文件拆出的流程文档**（规则文件超 65,536 字节预算）：
-  `docs/服务器同步.md`、`docs/部署与运维坑.md`、`docs/控制台前端约定.md`——
-  只做对应的事时才翻，规则以本文件为准。
-  第四份 `docs/消耗器内部机制.md`：消耗器已停用（见「当前状态」），内部实现细节不再需要每次会话都看。
-  `docs/模型市场与预设.md`：加模型/动预设表时翻。**外部 CLI 执行体的模型清单也在
-  那份文档里**——重点不是「哪个源对」，而是**任何清单都不能当权限用**：
-  `codebuddy --help` 26 个名字 17 个不存在；桌面缓存 65 个 id 只有 35 个是对话模型；
-  wb-proxy `/v1/models` 14 个有 8 个调不通。现在只有 `probe_models()` 真发请求算数
-  （坑：`max_tokens=1` 会误杀所有推理模型，实测 16/39）。
-  另：改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检
-  （悬空部署、不可解析 target、启用了但 0 可用部署、外部改动未 reload）。
-  第五份 `docs/排查过程详述.md`（2026-11-13 拆出、2026-11-19 扩充）：「已知坑」里
-  七条最长的**逐项排除过程** + **入站断连四根因的定位过程与实现坑** + mixin 搬运坑。
-  AGENTS.md 里保留结论与索引，**排查同类问题时才翻这份**。
+- `docs/` 分两类：**带日期的一次性排查/审查报告**（只作过程留档，结论往上沉淀）
+  与**常读的主题文档**（从本文件拆出；规则仍以本文件为准，做对应的事时才翻）：
+  - `docs/额度与限流.md`：429 的 rpm/tpm 判据、商汤额度窗口、扫池与整池真空、墙钟与
+    AMD 冷 prefill。
+  - `docs/部署与运维坑.md`：配置热加载/回写、heredoc、venv、DB 串行化、迁移包纪律。
+  - `docs/模型市场与预设.md`：加模型/预设、模型 ID 与「目录 ≠ 能调」、NVIDIA 权限、
+    华为云两套东西。**外部 CLI 的模型清单也在这里**——任何清单都不能当权限用，只有
+    `probe_models()` 真发请求算数（`max_tokens=1` 会误杀推理模型）。
+  - `docs/免费档执行体-20261025.md`：CLI 运行形态、审批档、@ 语义、任务信封、续跑。
+  - `docs/事件中台.md`：事件流设计、规则字段、状态机与「会写错的细节」。
+  - `docs/排查过程详述.md`：已知坑的逐项排除过程、入站断连定位、mixin 搬运、代码体量。
+  - `docs/控制台前端约定.md`、`docs/服务器同步.md`：做对应的事时才翻。
+  - `docs/当前状态.md`：**会过时的运营状态**（消耗器停用、额度翻倍、已删供应商）。
+  - `docs/消耗器内部机制.md`：消耗器已停用，内部实现不再每次会话都看。
+  改完 `config/*.yaml` 跑 `scripts/check_config.py` 做自洽性体检（悬空部署、不可解析
+  target、启用了但 0 可用部署、外部改动未 reload）。
 - `config/*.bak-*` 是人工备份，每个文件**只留「最早（基线）+ 最新（可回滚点）」**，
   中间态及时删——堆到 18 个时已经分不清哪个能回滚。
   ⚠ 纯 `.bak`（不带日期）是 `config_writer.atomic_write` 的**滚动备份，功能性，别删**。
@@ -87,40 +87,13 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   撞 tpm/rpm 429。**诊断网关 429 先看消耗器是否在烧**，这不是网关的错。
   ⚠ **2026-10-27 起消耗器已灰色停用**（`burner.yaml` 的 `disabled: true`），
   所以现在看到 429 就是**纯 tpm 容量问题**，别再往消耗器上想。停用原因见下条。
-- **探针能判「这个 ID 能不能调」，判不了「你要的产品是哪个 ID」**（2026-09-29
-  被用户当面纠正）：`deepseek-v4.1-flash` 403 之后，我据一篇 **09-04 的二手文章**
-  断言「正确 id 是 deepseek-v4-flash」。用户拿出 **09-22 的官方公告**：
-  「DeepSeek V4.1 Flash 正式上线，**Model ID：deepseek-flash**」——我是错的，
-  而且 `deepseek-flash` 就在我拉到的 `/v1/models` 列表**第一行**，我看漏了。
-  **两条教训**：①查资料先看**发布日期**，二手转述会被官方公告推翻；
-  ②`/v1/models` 里同名家族的多个条目（deepseek-flash / -v4-flash / -v4-pro /
-  -v4.1-flash）必须逐个实测，不能只看一个就下结论。
-  **真正的缺口是产品名↔ID 的映射**：预设表原来只有 `deepseek-v4-flash`，
-  没有 `deepseek-flash`，于是市场把它显示成裸 ID，没人知道它就是 V4.1 Flash。
-  已补 `deepseek-flash → DeepSeek V4.1 Flash`、`qwen3.8-flash-next`、
-  `deepseek-v4-pro`（标注 2026-10-08 下线）三条预设，并加回归测试。
-  另：市场**探测后自动验证**（目录 ≤20 个时），不再等运营者手动点——
-  死 ID 和可用 ID 长得一样，必须替他把结论摆出来。
-- **`deepseek-v4-pro` 于 2026-10-08 下线**：过渡期内平台自动把它重定向到
-  `deepseek-flash`。现役配置未用它。
-- **核对官方文档后修正的三个 model id**（2026-09-29，先实测再查官方，两者缺一不可）：
-  | 配置里的 | 官方/上游正确的 | 症状 |
-  |---|---|---|
-  | `deepseek-v4.1-flash` | **`deepseek-v4-flash`** | 403 套餐无权限 |
-  | `qwen38-flash-next` | **`Qwen/Qwen3.8-Flash-Next`**（缺 `Qwen/` 前缀） | 400 Invalid model id |
-  | `z-ai/glm-5.3` | 名字对，但**账号没权限**（见下条） | 挂死 / 404 |
-  商汤公测**可调用列表**（官方文档）：`deepseek-v4-pro`、`deepseek-v4-flash`、
-  `glm-5.2`、`kimi-k3`、`sensenova-6.8-flash-lite`、`sensenova-u1-fast`、
-  `sensenova-u1.5-lite` —— **没有** `deepseek-v4.1-flash`，但目录里列了它。
-  顺带证实积分规则当时是「5h 6 万 / 周 60 万」——**2026-10-27 已翻倍为 12 万 / 120 万**。
-  已把 `glm-5.2`（实测 200）加进链，补 NVIDIA 失效后的 GLM 档位。
-- **NVIDIA 404「Function Not Found」是账号权限问题，不是模型问题**（2026-09-29
-  查官方 + 论坛确认）：官方 developer.nvidia.com/nim 明确写「**Developer Program
-  会员**才能用 NVIDIA-hosted NIM API」；论坛同名帖
-  「Request to enable Public API Endpoints ... 404 Function Not Found」讲的是
-  组织需要开通 Public API Endpoints。实测佐证：`/v1/models` 正常（鉴权 OK），
-  但**全部 81 个模型**（不只是 glm-5.3）要么 404 要么挂死 → 账号级失效。
-  **这修不了配置，得去 build.nvidia.com 查账号/组织权限。**
+- **模型 ID 与「目录 ≠ 能调」**：探针只能判「这个 ID 能不能调」，判不了「你要的产品
+  是哪个 ID」，查资料先看发布日期。`/v1/models` 是目录，不是账号权限——只有
+  verify/probe 真发请求算数。核对官方文档修正过三个 id（`deepseek-v4-flash` /
+  `Qwen/Qwen3.8-Flash-Next` / NVIDIA 账号无权限），`deepseek-v4-pro` 2026-10-08
+  下线。**NVIDIA 404/挂死是账号权限问题，改配置无用**（需 build.nvidia.com 开
+  Public API Endpoints）。健康检查必须真跑一次推理，只查目录会一直假绿。
+  细节与实测见 `docs/模型市场与预设.md`「模型 ID、目录与能调用的边界」。
 - **部署级自动隔离：连续失败才屏蔽，偶发事件不误伤**（2026-09-29，运营者要求
   「总是检测失败的模型应该自动屏蔽，而不是每次都重新检测，但要智能一些」）：
   旧逻辑只有 `_deployment_cooldowns` 的**单次 30s 冷却**，于是 NVIDIA 的 glm-5.3
@@ -137,93 +110,23 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   `quarantined_deployments()` 暴露到 `/health` + 控制台顶部横幅——
   隔离是自动的，**必须让运营者看见谁被屏蔽、为什么、还有多久**，否则渠道悄悄消失
   会被当成路由 bug 去查。回归测试 8 例（含端到端「隔离后不再调用它一次」）。
-- **健康检查必须真跑一次推理，不能只查目录**（2026-09-29 修）：`health_check` 原来只调
-  `list_models()`（即 `GET /v1/models`），只证明「鉴权通过、目录可达」。NVIDIA 推理
-  **100% 不可用**（glm-5.3 挂死、kimi-k3 报 `Function not found`、换 5 个家族全废），
-  健康检查却**一直报绿灯** → 它留在所有故障转移链上，累计烧掉 **60.9 小时**纯等待。
-  **和「模型市场只看目录」是同一个错**：把「目录里有」当成了「能调用」。同一会话里
-  修了市场那处却漏了健康检查这处。现在目录通了再对前 N 个模型各发一次
-  `max_tokens=1` 真实推理，**任意一个成功即健康**（目录可能混着无权限条目，
-  只探一个会误报），全失败则如实报红。`health_probe_models=0` 回到旧行为。
-- **NVIDIA 挂死/404 不是网关配置问题**（2026-09-29 逐项排除，见
-  `docs/NVIDIA排查-20260929.md`）：适配器 payload 与裸请求逐字一致、官方文档
-  原始示例同样超时（49.7s）、两个 Key 完全相同地失败且报**同一个 function id**、
-  有无代理都超时、`/v1/models` 正常而推理全废 → **账号/组织的 NVCF function
-  未部署**。论坛同名帖「Request to enable **Public API Endpoints** ... 404 Function
-  Not Found」；官方页写明需 **Developer Program 会员**。改配置解决不了，
-  要去 build.nvidia.com 查权限。
-- **外部改配置文件曾会被长命进程静默回滚**（2026-09-29 实测，同类 bug 本会话第 2 次）：
-  历史上网关不监听配置文件，内存里是启动时的值；控制台表单**用内存值渲染**，
-  保存时把旧值写回文件。实测：08:20 在文件里禁用 nvidia，09:15 运营者在控制台
-  打开 nvidia 页签并保存 → `enabled` 被改回 true（日志：
-  `provider nvidia upserted via console` + `config file updated`）。
-  **同日同型**：消耗器把 `burn_state.json` 的费率 761/2292 写回 830/2500。
-  共同点：长命进程把内存状态写回文件，外部编辑在它看来不存在。
-  已修（两道防线）：
-  ①`config_writer` 陈旧检测闸（`ConfigStaleError`）——`load_app_config` 记 mtime，
-    写前比对，文件更新过就**拒绝写入**并返回 **409 + 「先 reload」指引**；
-    写后刷新记录，自己写的不会被自己判陈旧。`stale_config_files()` 供体检/健康检查用。
-  ②`app/core/config_watch.py`（`ConfigWatcher`）——lifespan 启动后每 2s stat 轮询
-    `AppConfig.source_files`，签名（mtime_ns, size）稳定 settle 窗口后自动 reload。
-    改完 YAML **自动生效**，不再需要手动 reload 或重启。坏 YAML 保留旧配置 + 记
-    `last_error`，改好后自动接上。`ZKAI_WATCH_CONFIG` / `ZKAI_WATCH_CONFIG_INTERVAL` 可控。
-    `/health` 暴露 `config_watch`，控制台状态行显示「配置自动生效（已自动 reload N 次）」。
-    纯标准库 stat 轮询（不引 watchdog/inotify），监听名单 = loader 真正读过的文件（不是 glob）。
-- **热加载完整性（2026-11-19 重构，取代「deploy:/retry: 段不热加载」两条旧坑）**：
-  `reload_config` 现在逐字段比对 Settings：`RUNTIME_RELOADABLE_FIELDS` 里的
-  **原地 setattr 到同一个 Settings 对象**（持有引用的服务一起看到新值），并重建
-  `scheduler.policy`（retry: 段）/调度器旋钮/`request_service.trim_history_tokens`/
-  `pool.set_rotation`（credential_rotation: 段）。`STARTUP_ONLY_FIELDS`
-  （host/port/db/log/两个并发闸/max_request_body_mb/watch_config）改了**不应用**，
-  在 reload 返回值与 `/health` 的 `config.restart_required` 点名「需重启」，
-  控制台「需要处理」面板有对应行。两集合必须覆盖全部字段（test_config.py 守卫），
-  新字段不分类就红。顺带修掉死键：`deploy.burner_dir`、顶层 `watch_config`/
-  `watch_config_interval` 曾在示例里声明却没桥接；`request.max_input_tokens`/
-  `max_request_seconds` 补桥接。**死键守卫** `test_every_example_config_key_is_consumed`
-  逐键核对 config.example.yaml 都有消费方。测试注意：容器级测试要挡
-  `load_dotenv_file`（真实 .env 的 ZKAI_* 会按「环境变量优先」契约盖掉 YAML）。
-  ⚠ 保留旧结论两条：①`only_leg` 让「指定模型且只有一个部署」的请求扫完整池，
-  是 2026-11-13 的正确设计，不是上限没生效；②`max_credentials_per_deployment`
-  曾本机 3、服务器遗留 9（attempts=26 扫 11 把），换服务器后专门核对。
-- **规则写进文档 ≠ 会执行；要工具化**（2026-09-29 自我反省）：我上一轮在本文档亲手写下
-  「改完 YAML 必须跑 `load_app_config()` 验证」，下一轮自己没执行——禁用 nvidia 后
-  只 `grep` 看到注释在就宣布完成，而实际值仍是 `enabled: true`。
-  已建 `scripts/check_config.py`：改完配置跑一次，查悬空部署、不可解析 target、
-  **模型 enabled 但 0 可用部署**、别名单供应商、外部改动未 reload。
-  它本可以第一时间抓住我误删 `deepseek-v4.1-flash` 模型块那次事故。
-- **别用 shell heredoc 写含转义序列的脚本**（本会话栽了四次）：Git-Bash 会改写
-  heredoc 里的反斜杠——反斜杠-d 变斜杠-d（Python 正则静默失效，害我得出过错误结论）、
-  反斜杠-n 变斜杠-n（YAML 首行坏掉）、内容被重复追加（测试文件三次重复定义 F811）。
-  **第四次就发生在这条注释本身**：我用 heredoc 写这段文字时，`\n` 被替换成了真实换行，
-  于是文档里出现了一个断成两行的反引号。**改用 Write / Edit 工具，不经 shell。**
-- **供应商的 `/v1/models` 是「目录」不是「你账号能调的」**（2026-09-29 实测，
-  补上缺失的验证环节）：市场原来只看目录，于是死模型被加进来，直到第一次真请求
-  才暴露。三个真实反例，三个都通过了目录检查：
-  | 供应商 | 模型 | 目录里有 | 实际调用 |
-  |---|---|---|---|
-  | 商汤 | `deepseek-v4.1-flash` | ✅ | 403 `model is not available in the current token plan` |
-  | NVIDIA | `z-ai/glm-5.3` | ✅ | **挂死**（121s 无响应，不是慢） |
-  | NVIDIA | `moonshotai/kimi-k3` | ✅ | 404 `Function id ... Not Found` |
-  | 魔搭 | `qwen38-flash-next` | ✅ | 400 `Invalid model id` |
-  新增 `POST /admin/providers/{id}/models/verify`：对每个模型发一次
-  200 token 的真实请求（`_VERIFY_MAX_TOKENS`；2026-11-11 从 `max_tokens=1`
-  提上来——推理模型把 token 全花在思考上，1 token 会把它们全部误杀，
-  与执行体探测 `_PROBE_MAX_TOKENS` 同一个坑），短超时（默认 20s，
-  「挂死」本身就是结论），
-  返回 `ok / hang / not_found / no_entitlement / rate_limited / error`。
-  控制台「🧺 模型市场 → 🔬 验证可调用」按结论标注并禁用「＋ 添加」。
-  **一次扫描查出 9 个部署里 5 个是死的。**
-- **NVIDIA 实测 0/3 全死，但运营者决定保持启用**（2026-09-29）：推理全废
-  （glm-5.3 挂死 121s、kimi-k3 报 `Function not found`、换 5 个家族全废），
-  而 `/v1/models` 正常——**不是网关配置问题**（见上面「NVIDIA 挂死/404」那条的
-  逐项排除）。历史代价：超时 3,313 次 × 均 66s = **60.9 小时纯等待**。
-  `providers.yaml` 的 `enabled` 保持 `true`（运营者要求「不要着急限制，先排查」），
-  但要恢复真正可用得去 build.nvidia.com 开账号/组织的 Public API Endpoints 权限。
-  **现在靠自动隔离兜底**（连续 3 次失败即屏蔽，见「部署级自动隔离」那条），
-  所以它不会再像以前那样每个请求白等 60 秒。`glm-5.3`/`glm-5.3-flash` 当前
-  **不在任何别名链里**，要用就点名模型名。
-- **moonshot 已整块删除**（无 Key，3,102 次尝试 0 成功，纯 `no_available_credential`
-  噪音）。要恢复需同时加回 providers.yaml 的供应商与 models.yaml 的部署。
+- **外部改配置会被长命进程静默回滚，热加载有完整性要求**：已修两道防线
+  （`config_writer` 陈旧检测闸 + `config_watch` 2s 轮询自动 reload）；改完 YAML
+  **自动生效**，坏 YAML 保留旧配置。`reload_config` 用
+  `RUNTIME_RELOADABLE_FIELDS` / `STARTUP_ONLY_FIELDS` 两集合分类，**新字段不分类
+  就红**，`config.restart_required` 会点名需重启的项。改完配置跑
+  `scripts/check_config.py`（悬空部署 / 不可解析 target / 0 可用部署 / 未 reload）。
+  过程与守卫见 `docs/部署与运维坑.md`「配置热加载」。
+- **别用 shell heredoc 写含转义序列的脚本**：Git-Bash 会改写反斜杠（正则失效、
+  YAML 首行坏掉、内容重复追加）。改用 Write / Edit 工具，不经 shell。
+- **健康检查必须真跑一次推理，不能只查目录**（2026-09-29 修）：NVIDIA 推理 100%
+  不可用却一直报绿灯，累计烧掉 **60.9 小时**纯等待。现在目录通了再对前 N 个模型
+  各发一次真实推理，任意成功即健康；`health_probe_models=0` 回旧行为。
+- **市场只认实测**：目录 ≠ 权限，`POST /admin/providers/{id}/models/verify` 真发
+  请求才作数（一次扫描 9 个部署里 5 个是死的）；NVIDIA 是账号级失效（目录正常、
+  推理全废），`glm-5.3*` 不在链里，服务器 `n-k3.1p` 已 `enabled: false`（可回滚）。
+  moonshot 已整块删除（无 Key，3,102 次尝试 0 成功）。详见
+  `docs/模型市场与预设.md`「/v1/models 是目录不是权限」。
 - **接口模型 `front_model`：永远排第一、手动指定、随时可改**（2026-09-28 新增，
   `ModelAliasConfig.front_model`）。**当前值以 `config/models.yaml` 为准**
   （2026-11-14 核对：`zk-auto` 是 `deepseek-flash`；`zk-long` 早已不存在）——
@@ -242,10 +145,9 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   按 targets 顺序的优先级策略，看起来像「关闭开关没生效」，其实是策略不同。
   与 `pin_first` 的区别：`pin_first` 钉 `targets[0]` 且由控制台热切换托管，
   `front_model` 独立于 targets 顺序，换它不用重排列表。
-- **费率优先级「命令行 > burner.yaml > 账本」的来龙去脉见
-  `docs/消耗器内部机制.md`**。规则本体仍有效且通用：**账本/缓存不许覆盖显式配置**
-  ——记忆盖掉明确意图 = bug（同一类坑在 config 热重载上也犯过）。
-  当前费率 `rate_in: 761` / `rate_out: 2292`。
+- **账本/缓存不许覆盖显式配置**（费率优先级「命令行 > burner.yaml > 账本」，
+  同类坑在 config 热重载上也犯过）。费率数值以 `config/burner.yaml` 为准，
+  细节见 `docs/消耗器内部机制.md` 与 `docs/额度与限流.md`。
 - **`ModelAliasConfig.front_model` 以控制台为准，且会写回 `models.yaml`**：
   `POST /admin/aliases` 走 `_write_alias_file()` 落盘，所以「配置文件里是 A、实际
   生效是 B」通常不是 bug，而是有人在控制台改过。排查前先 `grep front_model= data/gateway.log`
@@ -266,78 +168,29 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
   市场合成逻辑是 **探测 > 预设 > 空**；两路都没有才是「不支持调档」。
   deepseek-flash 另有兼容映射 `minimal→low, medium/xhigh→high, ultra→max`
   （`reasoning_effort_aliases`）。档位未知时表单给手填入口，不许是死胡同。
-- **`max_total_attempts` 是次数上限，不是时间上限**（2026-09-28 补
-  `ZKAI_MAX_REQUEST_SECONDS`，默认 300s）：20 次尝试 × 60s（nvidia read timeout）
-  = 最坏 20 分钟。实测一次请求磨了十几分钟、客户端一个字节都没收到——每次尝试单独看
-  都没超时，所以次数闸认为还有预算。墙钟预算只在**两次尝试之间**检查，不会打断已在
-  飞的流（那会截断客户端还能读的响应）。默认 300s = 现役最大上游超时（商汤 300s），
-  一次成功的慢生成不会被误杀。
-- **AMD 的 DeepSeek 流式：冷 prefill 静默 50-70s，60s 读超时掐死整轮**（2026-10-24
-  服务器实锤，ds harness 反复报「流式读取中途超时」的根因）：
-  `developer.amd.com.cn` 的 DeepSeek-V4.1-Flash 在**未命中缓存**时，113k token 的
-  prefill 全程不吐一个字节、实测 50-70 秒；`timeout: 60` 的读超时把这类轮次掐死在
-  中途——流式一旦开头发送就**无法重试**，客户端整轮报废。判定特征：中途超时的尝试
-  总时长 ≈ X + 60s（X 是卡死前已流式的时间；实测 60.3/78.4/82.5/122.7/151.2s，
-  全部落差恰为 60）。对照：命中缓存的轮次 prefill 秒过（cached=100% 的行总时长
-  45-69s 全是生成时间）。已修（服务器+本机 providers.yaml）：`timeout: 60→300`
-  （对齐商汤现役最大值）、`max_retries: 2→0`（NVIDIA 同款教训：挂起交给上层
-  冷却+换渠道）。⚠ 粘性会话的**首轮（缓存冷启动）恰恰就是长 prefill 轮**——
-  读超时太紧等于专挑粘性的第一枪打，修缓存粘性必须同步检查上游超时预算。
-- **429 不能再默认「换一把兄弟 Key」**（2026-09-28 修）：分类器按正文分出
-  `ThrottleKind`（`quota` 额度用尽 / `throughput` tpm / `frequency` rpm·rps /
-  `unknown`），`cooldown.throttle_scopes` 决定冷却覆盖到哪：
-  `credential` 只冷却这把（rpm 类，NVIDIA 按 Key 计 40rpm 就属这类）、
-  `account` 同 `account-*` 标签一起冷、`provider` 整个供应商一起冷并**直接故障转移**。
-  现役 `quota` 是 `account`、`throughput` 是 `credential`（2026-10-08 改：
-  9 把 Key = 9 个独立账号，一把 429 只冷这把，让其余 8 把继续被试）。
-  判「换 Key 还是换部署」只看 `CredentialPool.effective_throttle_scope()` 一个方法，
-  池子与调度器共用，否则两边判断会漂移。
-- **商汤公测账号的 rpm 桶极小，且越线会转入长冷却**（2026-10-13 实测，
-  服务器 DB + 本机 DB 双口径）：服务器近 3 小时每把 Key 每分钟被打 3~6 次，
-  **429 率 80%、04:56 起连续 3 小时无一把 Key 恢复**；本机 7 天 459 次成功里
-  每 Key 实际通过的 rpm **中位 2、p90 6、p99 8、最大 8**，从没突破 8。
-  且 429 时 prompt 中位数不足 5k tokens——**不是 tpm 打爆，是账号级 rpm 惩罚**。
-  你换成官方 API 也一样：限流按账号算，不是按入口算。
-  **已加主动 rpm 闸**（`providers.yaml` 的 `options.rate_limits`：
-  `{scope: account, window_seconds: 60, max_requests: 3}`）——
-  **事前**让配额见底的 Key 出列去换下一把，而不是撞了 429 才事后惩罚。
-  取 3 不取 6：超发会被商汤惩罚数小时，保守的代价只是排队几十秒。
-  扩容新 Key 时按同比例上调（每把 Key 独立计，互不挤占）。
-  回归测试 `tests/test_limits.py` 的 `test_sensenova_has_a_tuned_rpm_rule_in_real_config`
-  与 `test_the_rpm_rule_actually_gates_in_the_limiter` 钉住「规则必须存在、数值=3、
-  第 4 个请求必须被拦、换账号不受牵连」。
-  ⚠ **但「rpm 惩罚」不能解释 2026-10-24~25 的整池瘫痪**（2026-10-27 复查推翻
-  这条的适用范围）：那两天每把 Key 每分钟只发 **1.2 次**（远在 rpm 3 之下），
-  可是 9 把从 04:29 到 15:33 **连续 429、一次都没恢复**（每把 81~91 次）。
-  同批请求平均 **18.7 万 token**，`tpm/rpm` 混合报错 577 次。
-  结论：**小 prompt 时是 rpm 惩罚，长上下文时是 tpm**；同一个 `max_requests: 3`
-  对后者无效。判据是「每分钟请求数 vs 每请求 token 量」，别只量前者。
-- **一个请求扫满整池 Key，会让后续并发请求连一个上游都发不出去**（2026-10-27
-  修）：`retry.max_credentials_per_deployment` 曾是 **9**（等于池大小），
-  一个请求按序扫完 9 把、每把 429 挂 60s 冷却 → **整池瞬间真空**。紧接着的
-  请求在 `/credential` 阶段就空转返回，`no_available_credential` **0.01 秒**
-  命中、上游一次没发。实测 154 条失败请求里 **55 条（35.7%）是这个形状**。
-  已降到 **3**：单请求不再有资格独占整池。容量本来就够（商汤 9×3=27 req/min
-  vs 客户端峰值 10 req/min），缺的是让渡，不是总量。
-  回归测试 `tests/test_limits.py` 钉「配置值是 3」。
-- **墙钟预算只在两次尝试之间检查，单条慢腿能吃光整个请求**（2026-10-27 修）：
-  `_check_wall_clock` 刻意不打断在飞的请求（截断会毁掉客户端还能读的响应），
-  于是实测**一次 AMD 尝试跑 701 秒**，而请求预算只有 300 秒——48 条失败
-  （31%）就这么死的，其余供应商全程没被试。
-  已加 `retry.attempt_timeout_floor`（默认 20s）+ `attempt_timeout_margin`（5s）：
-  每次尝试的读超时 = min(provider 超时, 剩余墙钟 ÷ 剩余部署数 - margin)。
-  **floor 是硬下限**：给 100k prefill 切 15 秒等于「每家都失败」，比原来的病更糟。
-  `attempt_timeout_floor: 0` 回到旧行为。
-  误杀评估：商汤 227 次成功**全部在 30 秒内**，145 秒时间片误杀率 0%。
-  ⚠ **它管不了链上最后一条腿**——最后一条按定义拿剩余全额预算。
-  `ds` 链实际只有 2 条可用腿（`ds4.1m` 停用），AMD 是最后一条，所以
-  「静默等 AMD 300 秒」只能靠降 provider 超时解决：压到 120s 会丢 59 次慢成功
-  （235→176），是产品决策。
-- **整池冷却时排队，而不是瞬时 503**（2026-10-27 加）：`_wait_for_credential`
-  在上游无可用 Key 时先等（上限 10s、不越过墙钟）再重取。
-  ⚠ **实测救 0 条**：那 55 条瞬时 503 之后，下一个商汤成功的中位等待是
-  **333 秒**——整池是真的真空，不是差一点。所以它只是兜底（避免 0.01s 空跑），
-  **不是解药**；真解药是容量（充值/加账号/分流）。别把这条当成已解决。
+- **`max_total_attempts` 是次数上限，不是时间上限**（`ZKAI_MAX_REQUEST_SECONDS`，
+  默认 300s）：墙钟预算只在**两次尝试之间**检查，不打断在飞的流。**单条慢腿能吃光
+  整个请求**（实测 AMD 701s 吃光 300s 预算，48 条失败）→
+  `attempt_timeout_floor`（20s）+ `margin`（5s）按剩余预算均分读超时，floor 是硬
+  下限；它管不了链上最后一条腿。
+- **AMD 冷 prefill 静默 50-70s**（2026-10-24 服务器实锤）：未命中缓存时 113k token
+  prefill 不吐字节，60s 读超时掐死整轮且流式无法重试。已设 `timeout: 300`、
+  `max_retries: 0`。⚠ 粘性会话首轮恰是长 prefill 轮，别把读超时压太紧。
+  判定特征、误杀评估与调参见 `docs/额度与限流.md`。
+- **429 先分清 rpm 还是 tpm，再决定换 Key 还是换部署**：现役
+  `throttle_scopes` 是 `quota=account`、`throughput=credential`，判据只看
+  `CredentialPool.effective_throttle_scope()` 一个方法（池子与调度器共用）。
+  商汤 rpm 桶极小（实测中位 2、p99 8），已加主动闸 `max_requests: 3`；
+  **小 prompt 是 rpm 惩罚，长上下文（18.7 万 token）是 tpm**，同一闸对后者无效。
+  实测数字与回归见 `docs/额度与限流.md`「rpm 桶与主动闸」。
+- **单请求不许扫满整池**：`max_credentials_per_deployment=3`（曾 9，等于池大小 →
+  一个请求扫完 9 把、每把 429 冷却 60s → 整池瞬间真空；实测 154 条失败里 55 条
+  （35.7%）是 0.01s `no_available_credential`）。`only_leg` 让链上最后一条可用腿
+  扫完整池（让渡的前提是还有别的腿可退）。回归 `tests/test_limits.py` 钉值 = 3。
+- **整池冷却时排队，而不是瞬时 503**：`_wait_for_credential` 先等（上限 10s、不越过
+  墙钟）再重取。⚠ **实测救 0 条**（之后下一个商汤成功的中位等待 333 秒）——整池是真
+  真空，它只是兜底，**不是解药**；解药是容量（充值/加账号/分流）。
+  细节见 `docs/额度与限流.md`。
 - **K3 的 `request_requires: {reasoning: 4.0}` 已删除**（2026-09-28）：它拿
   `capability.py` 的**关键词命中**当硬门槛，而 zk-auto 别名地板把 reasoning 权重
   钉在 2.0，于是非推理关键词请求永远 `gated_out`——「你好」、短代码、工具回执
@@ -409,86 +262,28 @@ FastAPI + httpx + SQLAlchemy 2.x + pydantic-settings；Python ≥ 3.12；uv。
 `config/cli_tools.yaml`（gitignore），模板同步在 `*example.yaml`。
 实测报告：`docs/免费档执行体-20261025.md`。
 
-- **npm 装的 CLI 在 Windows 上不能直接 exec**：`shutil.which("codebuddy")` 过得了
-  注册表校验（返回 `.cmd`），但 `create_subprocess_exec` 走 CreateProcess 会
-  `FileNotFoundError`——qwen/claude/codex/codebuddy/qoder 全中，只是以前没人在
-  Windows 上真跑过委派。已加 `app/services/agent/cli/launcher.py`：读 shim 里
-  固定的 `"%dp0%\node_modules\..."` 行，换成 `node + 入口脚本`。
-  **不要退回 `shell=True`**：那会把模型给的任务文本重新交给 cmd 解析，正好破坏
-  「argv 直传、不经 shell」的安全前提；解析不出来就明确报错，不静默降级。
-- **`proc.returncode` 要 `await proc.wait()` 之后才可信**：只等两路读流到 EOF 就读
-  退出码，asyncio 的子进程回调可能还没跑，`returncode is None` → **成功的委派被判
-  失败**（实测 gemini 已吐出完整 JSON，结果仍报【执行失败】、`exit=None`）。
-  现写法是 `gather(读 stdout, 读 stderr, proc.wait())`，超时分支照旧 kill。
-- **Gemini 的 `plan` 档不产出正文**：它把结果写进 `~/.gemini/tmp/<proj>/plans/*.md`，
-  stdout 只回一句"已保存"。机械改写要用 `default`，`plan` 只适合只读分析。
-  无头还必须 `GEMINI_CLI_TRUST_WORKSPACE=true`（**字面量 `true`，写 `1` 不认**）
-  + `HTTPS_PROXY`；Node 的 fetch 默认不读代理，适配器补 `NODE_USE_ENV_PROXY=1`。
-- **Qoder 的 `--permission-mode` 没有 plan 档**（default/accept_edits/
-  bypass_permissions/dont_ask/auto），适配器把 `plan` 映射成 `dont_ask`：
-  不弹审批、未预授权一律拒绝。直接透传 `default` 会在无头场景等审批等到超时
-  （runner 的 stdin 是 DEVNULL）。
-- **CodeBuddy/Qoder 的 CLI 登录态与桌面端不共享**：桌面端明明已登录，CLI 仍报
-  `Authentication required` / `Not logged in`，首次要交互式 `/login`、`qoder login`。
-  这两种原文已补进 AUTH 特征（`base.py`），否则会被当普通失败让父模型白重试。
-- **控制台 `@` = 执行体直跑，不是聊天**：`@` 在输入框**任意位置**都能点名
-  （`/` 只认行首，避免和路径打架），**一条消息可点名多个、按顺序串行**——
-  `POST /zkadmin/agent/delegations`（`items` 最多 10 段，带 `session_id` 则追加）；
-  第一段失败即停。分隔符含中文标点（`，。；、：`）；段首尾连接词（用/然后/再/并/和）
-  会连剥多次，第一个 `@` 前的文字并进第一段。**每段在分段面板里单独选模型/思考/
-  上下文**（默认展开可收起，默认值取自配置；改文本时同位置同角色保留选择）。
-  单段直跑用 `POST /zkadmin/agent/executors`。数据源 `GET /executors`（读
-  `cli_tools.yaml` 的 `models`/`free_models`）；模型清单优先用 CLI 自己的口径
-  （`GET /executors/{role}/models`），免费标记只能手工维护。
-  改 Python 要重启网关；只改 yaml 不用（每次新任务重读花名册）。
-  ✅ 「停止」会 kill 子进程（`_Running.cancel_event` + runner watchdog，2026-11-12 修）；
-  实时日志走 `cli_log` SSE（本地转发，不额外耗额度），超时/取消回显已产生的输出。
-- **`--model` 可选值以 `codebuddy --help` 为准**（glm-5.3 / kimi-k3 /
-  deepseek-v4.1-flash 都在列），但"在列"不等于"免费"——**以 JSON 里的
-  `total_cost_usd` 为准**，这是唯一客观口径。
+**规则速记**（具体形态、报错原文与实测数字见 `docs/免费档执行体-20261025.md`）：
 
-执行体各家 CLI 的**具体形态、报错原文与实测数字**（Windows shim 不能直接 exec、
-CodeBuddy 未登录退出码 0、json 是事件数组、Qoder 登录态不共享、模型名口径、
-Claude 只能走 CC Switch、免费额度的形状）已拆到
-`docs/免费档执行体-20261025.md` 的**附录**——排查具体执行体时才翻。
-**留在本文件的都是规则**：审批档映射、@ 委派语义、产品决策。
+- **Windows 上 npm CLI 不能直接 exec**：走 `app/services/agent/cli/launcher.py` 解
+  shim 成 `node + 入口脚本`，**不要退回 `shell=True`**（argv 直传是安全前提）。
+- **`proc.returncode` 要 `await proc.wait()` 之后才可信**，否则成功的委派会被判失败。
+- **审批档映射**：`plan` 在各 CLI 里对应不同档（Gemini 的 plan 不产出正文、Qoder 没有
+  plan 档映射 `dont_ask`）；CodeBuddy/Qoder 的 CLI 登录态与桌面端不共享。
+- **`@` = 执行体直跑，不是聊天**：可多点名串行（`POST /zkadmin/agent/delegations`，
+  最多 10 段）；每段独立选模型/思考/上下文；改 Python 要重启网关，改 yaml 不用。
+- **费用以 CLI 自报的 `total_cost_usd` 为准**，"在 --help 列表里"不等于免费。
 
 ### 2026-11-13 委派层对标 Claude Code / Codex 后的九条（都是实测）
 
-这层此前只做到「把一段字符串 argv 传进子进程、再把 stdout **头部** 8000 字返回」。
-九条都配了变异验证过的回归测试（`test_agent_cli.py` / `test_agent_prompting.py` /
-`test_agent.py`）。别再退回旧写法：
-
-- **审批卡必须展示真正要执行的命令**：提权原来只在 runner 里做、预览用未提权的
-  config 渲染 → 批的是「只读」，跑起来是 `--dangerously-skip-permissions`。
-  已抽 `delegate.escalated()` 让**预览与执行共用同一判定**，`approval_mode` 进审批
-  消息。同时**模型发起的 `delegate_cli` 一律不提权**——`agent_permission_mode: bypass`
-  的语义只是「任务空间内不弹审批卡」，不是「把外部 CLI 的沙箱也关掉」。
-- **任务信封**（`cli/prompting.py::build_task_prompt`）：**在哪**（绝对路径，任务
-  空间不是工作区根）、**交什么**（结论写最后一段、落盘进 `outputs/` 并列出路径）、
-  **能不能问**（不能，按假设继续并列出假设——这句最省额度）。MCP 后端**不套信封**
-  （task 是结构化入参），`envelope=False` 可回退。
-- **段间交接**（`with_context`）：多段 @ 此前只共享目录不共享上下文，「先让 A 查、再
-  让 B 审」的 B 在审空气。现在上一段结论（截 2000 字）注入下一段。别拼整段历史——
-  一次委派光 CLI 脚手架就 3.6 万 prompt tokens。
-- **截断一律保尾**（`clip_output` / `failure_output`）：堆栈、pytest 摘要、结论都在
-  末尾。失败详情改成 **stderr 在前**（诊断在 stderr，stdout 多是进度噪音）+ 退出码。
-- **超时 / 取消不能归成 FAILED**（新增 `FailureKind.TIMEOUT` / `CANCELLED`）：FAILED
-  的建议是「调整任务描述后重试」，对超时是**反向建议**。现在明说「可能已改文件，重试前先看」。
-- **`idle_timeout` 改成逐执行体配置**（默认 0 = 不判空闲）：原来全局写死 180s，而
-  claude/codex/gemini/codebuddy/qoder 都是「结束才一次性吐输出」，静默是常态 →
-  300s timeout 被 180s 空闲判死提前截断（claude 实测 130s）。现役只有 codearts 配 180。
-- **claude 走 `--output-format json`**（字段 `result`/`is_error`/`usage`/`total_cost_usd`
-  /`session_id`）：收费档最贵的一条，此前账本对它永远空白。`session_ref` 落
-  `state.json` 的 `handoff_session`，为 `--resume` 留口。codebuddy 的 `is_error: true`
-  也从「挂备注」改成 `fatal_output` 判失败——上游的结论字段不是正文的一部分。
-- **预算闸 `daily_calls` / `daily_cost_usd`**（0 = 不限）：额度是**事前**拦，不是撞了
-  429 才解释（Gemini 免费档实测 40 分钟打空）。成本只累加**自报**的行——没自报的算 0
-  会让熔断永不触发。
-- **免打扰按「工具:角色」记**（`SessionApprovals._key`）：放行免费档不该等于放行
-  `cli-claude`（收费 + bypass）。`write_file`/`run_command` 仍按工具名。
-- **产物清单**：任务空间承诺「产物落 outputs/」却从没人读过——控制台永远「（暂无）」。
-  现在三条派单路径都列 `outputs/` 并写 `state.json` 的 artifacts / handoff_brief。
+规则速览（每条都有变异验证过的回归；完整细节见 `docs/免费档执行体-20261025.md`）：
+①**审批卡展示真正要执行的命令**，预览与执行共用 `delegate.escalated()`；模型发起的
+`delegate_cli` 一律不提权（`bypass` 只是任务空间内不弹卡，不是关外部沙箱）。②任务
+信封交代「在哪 / 交什么 / 能不能问」。③段间交接只注入上一段结论（截 2000 字）。
+④截断一律保尾，失败详情 stderr 在前 + 退出码。⑤超时/取消用 `TIMEOUT`/`CANCELLED`，
+不归 FAILED。⑥`idle_timeout` 逐执行体配置（默认 0；只有 codearts 配 180）。⑦claude
+走 `--output-format json`，`session_ref` 落 `handoff_session`。⑧预算闸
+`daily_calls`/`daily_cost_usd` 事前拦，成本只累加自报的行。⑨免打扰按「工具:角色」记；
+三条派单路径都列 `outputs/`。
 
 
 
@@ -523,50 +318,19 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
 - 入口：控制台侧栏「事件流」（内置视图，独立路由 `/ui/events` 仍可用）、`scripts/event_watch.py`（采信号）、
   `scripts/agent_worker.py`（接单）。`ZKAI_EVENTS_ENABLED=false` 整体下线。
 
-### 2026-11-03 复查补的六条（都是实测出来的）
+### 复查与借鉴补的硬规矩（2026-11-03 / 11-04，实测）
 
-详细记录见 `docs/事件中台.md` §7.1 / §10，这里只留会写错的地方：
-
-- **审批是闭环不是终点**：`decide()` 默认派生一条 `<父类型>.decided` 事件重走
-  规则引擎（`followup: false` = 我自己去办）。**新加一条流水线 = 补一条
-  `types: [xxx.decided]` 的规则**，不用改代码。
-- **`.env` 不会自动进进程环境**：`ZKAI_ADMIN_TOKEN` 只在 `load_app_config()`
-  之后才在 `os.environ` 里，而 argparse 的 `default` 在 `parse_args` 时求值。
-  **新写的脚本要先加载再取令牌**，否则调用被 401 静默拒掉，
-  而 `/health` 不需要令牌 → 很容易误判成「连通性正常、这轮没异常」。
-- **`parallel` 是假并行**：worker 单循环串行，`parallel` 只限制同组 running 条数。
-  设 3 不会快 3 倍，反会让排队事件被 `reclaim_stale` 当超时回收。
-  **要真并行就多开 worker 进程**（claim 原子取一条，多进程安全）。
-- **事件规则必须被机器校验**：`check_config.py` 会查 skill 是否存在、`to` 是否
-  在花名册、`cwd` 是否存在、**规则监听的事件类型有没有产出方**。改完必跑。
-- **`ZKAI_EVENTS_MAX_ATTEMPTS`（默认 3）**：认领 N 次仍没交活判 `failed`，
-  不再无限重投刷手机。
-- **`budget_cny` 目前是死字段，成本恒为 0**：worker 交活不带成本，
-  `CliResult` 也没有成本字段。控制台与卡片上的花费数字**不可信**。
-  **先接成本，再谈熔断。**
-
-### 2026-11-04 借鉴 Agent-Autoloop 后定的四条硬规矩
-
-卡兹克开源了 [agent-autoloop](https://github.com/KKKKhazix/agent-autoloop)。
-**没照搬架构**（Node + 零依赖 + 无数据库服务；本项目有 FastAPI / SQLite / 控制台 /
-路由层），细节见 `docs/事件中台.md` §10。
-
-- **跳数熔断的深度由中台算**：`events.hops` 只从 `parent_id` 推导，事件体里写的
-  **一律忽略**（执行体不能自己赦免自己）。上限 `ZKAI_EVENTS_MAX_HOPS`（默认 8）。
-  ⚠ 派生事件的去重键必须带 `parent_id|hops`，否则同对象链路会被 30 分钟去重窗口
-  吃掉、`hops` 停在 0，熔断形同虚设。**人工拍板也算一跳、不清零。**
-- **`complete()` 必须幂等**：已结束 + 结论相同 = 同一次交活，只回一声不重复推送；
-  结论不同**不覆盖**。重交绝不能把 `cost_tokens` 清零。
-- **回执标记只有一处定义**（`RECEIPT_MARKER`）：提示词教的和解析器认的必须是
-  同一个字面量，两处各写一份 = 配置漂移（系统照常跑，只是永远没人回执）。
-- **SQLite 的 DateTime 列丢时区**：写 `03:48+00:00` 读出是 naive 的 `03:48`，
-  而仓库层比较全用 `utcnow()`（UTC）。**任何参与时间比较的新列都必须存 UTC**，
-  否则凭空差出时区偏移（实测差 8 小时 → 复查永不到期）。
-
-⚠ **它的 `askFirst` 别照抄**：那是语义词拼进提示词，靠模型自己判断
-「我干的算不算删数据」；它同时有执行体的 `access`（read/edit/full）才是真权限档，
-**两套没绑定**。要做决策边界就该绑：`tell: needed` 的规则，
-`to` 必须指向 `approval_mode: plan` 的执行体。
+- **审批是闭环**：`decide()` 派生 `<父类型>.decided` 重走规则；新流水线 = 补一条
+  `types: [xxx.decided]` 规则，不改代码。人工拍板也算一跳、不清零。
+- **`.env` 不会自动进进程环境**：脚本必须先 `load_app_config()` 再取
+  `ZKAI_ADMIN_TOKEN`，否则 401 静默拒（`/health` 不需要令牌，极易误判）。
+- **`parallel` 是假并行**：worker 单循环串行，要真并行就多开进程（claim 原子安全）。
+- **事件规则必须机器校验**：`check_config.py` 查 skill / `to` / `cwd` / 事件类型
+  有没有产出方，改完必跑。
+- **`complete()` 幂等**；回执标记只有一处定义 `RECEIPT_MARKER`；`hops` 只从
+  `parent_id` 推导，去重键必须带 `parent_id|hops`；**DateTime 列必须存 UTC**。
+- **`budget_cny` 仍是死字段**（成本恒 0），先接成本再谈熔断。
+  细节与 autoloop 的 `askFirst` 教训见 `docs/事件中台.md`「会写错的细节」。
 
 ## 手机版控制台改造
 
@@ -611,128 +375,55 @@ Claude 只能走 CC Switch、免费额度的形状）已拆到
 - 上游 429 正文里的「多少秒后再来」没有解析（只认 `Retry-After` 头）。加「从自由文本
   猜秒数」有误判风险，**刻意不做**。
 
-### 2026-11-23：harness「经常中断」的第三个根因（已修，真机验证过）
+### 2026-11-23 / 11-26：harness 与 undici 的心跳缺口（已修，真机验证过）
 
-**11-13 那条心跳，对 harness 从来没生效过。** 三个并列缺口：
-
-1. **UA 名单写错**：名单是 `ds-harness`，线上是 `deepseek-harness/0.2.2-rc.5
-   (+https://github.com/deepseek-ai/...) dsh-profile/desktop`——子串对不上，
-   服务器 DB 618 条 harness 流式请求**零 ping**。已补 `deepseek-harness`。
-   ⚠ 教训：**名单没被线上 UA 验证过**就上线了；`undici` 旧判断见下方条目。
-2. **预取期间零字节**：`_stream_response` 为让预检错误返回真状态码，先 `anext`
-   再建 `StreamingResponse`，而**故障转移全在这个窗口里**。服务器实测 harness
-   首块 p50=8.6s / p90=30s / p99=141s，尾部在客户端看来就是「永远没响应」。
-   新增 `request.stream_prefetch_timeout`（默认 10s，可热更）：超时**不取消**
-   在飞的 `anext`，先发 200 + 心跳，事件稍后照常到达。
-3. **配套坑（自己引入、真机抓到）**：窗口外抛出的 `ZKAIError` 会被 Starlette 报
-   `already started` 并**吞掉客户端唯一的错误信号**。三条路径都改成转成
-   **流内 error 事件**。⚠ responses 那条**不能手拼**：走 `assembler.failed()`
-   并以 `SSE_DONE` 收尾（手拼的 `data: {...}` 客户端不认；漏 `[DONE]` 只能靠
-   断连结束）；失败分支**绝不发 `response.completed`**（那是宣告成功）。
-
-回归清单见 `docs/harness中断根因-20261123.md` §6（有效断言：
-「心跳早于第一个内容块」，只看 200 对旧实现也绿）。
-
-**2026-11-26**：undici 补进心跳白名单（499 = 客户端 60s 超时），
-`cancelled` 改记 `client_disconnected`；**名单必须靠线上 UA 原文验证**。
-多供应商池设计见 `docs/多供应商池与入站中断设计-20261126.md` v2。
+三个并列缺口：①UA 名单写错（`ds-harness` vs 线上 `deepseek-harness`，618 条零 ping）；
+②预取窗口零字节（`stream_prefetch_timeout=10s`，超时**不取消**在飞的 `anext`）；
+③窗口外 `ZKAIError` 被 Starlette 吞掉 → 三条路径都转成流内 error（responses 走
+`assembler.failed()` + `SSE_DONE`，失败分支**绝不发** `response.completed`）。
+2026-11-26：undici 补进白名单（55 条 499 全部是它、59.7~59.9s），`cancelled` 改记
+`client_disconnected`；**名单必须靠线上 UA 原文验证**。完整证据与回归见
+`docs/harness中断根因-20261123.md`；多供应商池见
+`docs/多供应商池与入站中断设计-20261126.md` v2。
 
 ## 华为云两套东西：码道 CLI（可用）vs MaaS provider（已删）
 
-**别把这两个混成一个**——它们凭据、协议、状态完全不同：
+码道 CLI 走 **AK/SK**（`CODEARTS_CLI_AK/SK`，现役 `cli-codearts`，实测可用）；
+MaaS provider 走 `HW_API_KEY_01`（OpenAI 兼容），推理 **403**，2026-11-14 已从服务器
+删除（欠费）。**别把两者混成一个**。AK/SK 只在 `load_app_config()` 之后进
+`os.environ`，独立脚本先加载配置再取凭据。删 HW 时 `ds` 别名自动收敛成
+`ds4.1m → deepseek-flash → ds4.1`。细节见 `docs/模型市场与预设.md`。
 
-| | 码道 CLI（codearts） | MaaS provider（HW） |
-|---|---|---|
-| 凭据 | 华为云 **AK/SK**（`CODEARTS_CLI_AK/SK`） | `HW_API_KEY_01`（API Key） |
-| 协议 | 码道自己的 CLI 协议 | OpenAI 兼容 `/openai/v1` |
-| 实测 | ✅ 可用（GLM-5.2 / kimi-k3.1-pro，最快 32.7s） | ❌ 推理 **403**（目录 200 但无权限） |
-| 现状 | 现役执行体 `cli-codearts` | **2026-11-14 已从服务器删除**（欠费） |
+## 代码体量与开发流程（2026-11-14）
 
-- 删 HW 时连带删了它独占的模型 `deepseek-v4.1-flash-1017`，`ds` 别名自动收敛成
-  `ds4.1m → deepseek-flash → ds4.1`（三条腿全部真实可达）。备份在
-  `config/*.bak-20261114-delHW`。
-- **码道 CLI 的 AK/SK 只在 `load_app_config()` 之后才进 `os.environ`**：
-  独立脚本里直接 `run_delegation` 会报「认证失败，没有设置环境变量
-  CODEARTS_CLI_AK/SK」——先加载配置再取凭据（同「`.env` 不会自动进进程环境」条）。
-- **codex 续接是子命令 `exec resume <id>`，且 resume 不接受 `-s/--sandbox`**
-  （2026-11-14 真机：带了就退出码 2）。续接时沙箱沿用该会话首次创建时的策略，
-  这正是想要的语义。真机验过上下文确实延续（问「刚才让你记住的词」答对）。
-- qoder 的 json 输出**没有 session id**（只能 `--list-sessions` 事后查，
-  并发时无法确定哪条是刚才的）→ 刻意不实现续接。codearts 的 `--format json`
-  会触发「文件夹未被信任」→ 也不做。**宁可没有，也不要接错。**
+- `agent/service.py` 已拆成 6 文件（门面 + 四个 mixin + common）：**加方法按职责进
+  对应 mixin，别堆回门面**；mixin 用 `if TYPE_CHECKING:` 写类级注解给 mypy 看。
+- **burner 配置键单一来源 `config/burner_keys.json`**，加新键只改 JSON
+  （`test_burner_key_single_source.py` 三向比对）。
+- **迭代期用 `scripts/quick_test.py` 挑测试，提交前必须跑全量**；横切文件与未登记
+  路径强制回落全量。它不是门禁替代品。细节见 `docs/排查过程详述.md`。
+- `AGENTS.md` 65,536 字节预算由 `test_doc_scale.py` 守着（余量 < 2KB 就红）；
+  撞墙时「结论上提、过程下沉」，不删规则。
+- 消耗器代码保留不删（停用时零运行开销，随时可能恢复）。
 
-## 代码体量与拆分（2026-11-14）
+## 流式耗时与委派续跑（2026-11-13）
 
-- **`agent/service.py` 已从 1,818 行拆成 6 个文件**：`service.py`(78) 只做门面，
-  `service_session/loop/delegate/child.py` 是四个 mixin，`service_common.py`
-  放共享常量与 `_Running`。**44 个方法体逐字节未改**（sha256 比对过），
-  对调用方/测试/行为零影响。再往里加方法时按职责进对应 mixin，别再堆回门面。
-- **mixin 搬运的两个坑**（装饰器在 ast lineno 之前、monkeypatch 要指向真实模块
-  别做 re-export）见 `docs/排查过程详述.md`，再做同类搬运时才翻。
-- **mypy 需要类型声明**：mixin 组合后静态检查器看不到 `self` 成员，
-  在每个 mixin 里用 `if TYPE_CHECKING:` 写类级注解（运行期零开销）。
-- **burner 配置键是单一来源 `config/burner_keys.json`**：脚本
-  (`_CONFIG_KEYS`) 与 `config_io.CONFIG_KEYS` 都读它，脚本另留一份兜底
-  （`_FALLBACK_CONFIG_KEYS`，保持独立运行）。**加新键只改 JSON**——
-  测试 `test_burner_key_single_source.py` 三向比对（JSON/脚本/兜底）。
-- **迭代期用 `scripts/quick_test.py` 挑测试，提交前才跑全量**（2026-11-14 实测：
-  全量 136 秒 vs 改路由只跑相关 17 秒，**8 倍**）。它按 `git status` 的改动路径
-  映射到测试文件；`app/main.py`/`container.py`/`errors.py`/`conftest.py` 这类
-  横切文件**强制回落全量**，没登记的路径也回落全量（宁可慢，不许静默漏跑）。
-  映射表本身有测试（`test_quick_test_map.py`：指向的文件必须真实存在）——
-  第一版我就写错两个文件名，是它抓出来的。**它不是门禁替代品**。
-- **AGENTS.md 65,536 字节预算现在有测试守着**：`test_doc_scale.py` 的两条，
-  余量 < 2,048 就红。**规则写进文档 ≠ 会执行**，这次终于工具化了。
-  撞墙时的正确做法是「结论上提、过程下沉」（见 `docs/排查过程详述.md`），不是删规则。
-- **消耗器代码保留不删**（2026-11-14 修正上一轮的判断）：停用时零运行开销
-  （无后台任务，只在打开控制台页时走 HTTP），而它随时可能恢复；
-  删了会让恢复变大工程 + 控制台「消耗器」页全废。
+- `requests.stream_duration_ms`（整条流墙钟）≠ `latency_ms`（首块延迟，别改语义）；
+  `client_disconnected` 的 `latency_ms=0.0` 是「没拿到首块」。
+- 委派续跑：`session_ref` 落 `state.json`，**同任务空间 + 同执行体**才复用；目前只有
+  claude 实测可 `--resume`，其余旗标未实测默认 `[]`——**别凭文档瞎拼**。详见
+  `docs/免费档执行体-20261025.md`「委派续跑」。
+- **轮换上限 3 vs 9 是两地有意不同**（本地让渡、服务器账号多），`check_config` 只报
+  可疑关系，不评判取值。
 
-## 流式耗时与委派续跑（2026-11-13，B-3/B-4）
+## 当前状态
 
-- **`requests.stream_duration_ms` ≠ `latency_ms`**：后者是**首块延迟**（别改语义，
-  控制台和历史统计都按它读），前者是**整条流墙钟**。`client_disconnected` 那批行
-  `latency_ms=0.0` 是「没拿到首块」，不是「0 秒跑完」——排查断裂要看新字段。
-  迁移：`Database._COLUMN_MIGRATIONS` 加一行幂等 ADD COLUMN。
-- **委派续跑**（`CliAdapter.resume_args` + `resume_ref`）：`session_ref` 落
-  `state.json` 的 `handoff_session` + `handoff_tool`，**同任务空间 + 同执行体**才复用
-  （claude 的 uuid 给 codex 没意义）。目前只有 claude 映射 `--resume`（位置在 `-p`
-  之前）；codex/qoder/codearts 的旗标未实测，`resume_args` 默认返回 `[]`——
-  **别凭文档瞎拼**，实测通过再开。
-- **轮换上限 3 vs 9 是两地有意不同**（本地让渡、服务器账号多），`check_config`
-  现在会打印当前值 + 池规模，只报可疑关系（>池大小、或 =1 而池≥3），不评判取值。
+运营状态与会过时的事实见 `docs/当前状态.md`（消耗器停用、额度翻倍三处同步、
+Flash-Lite 404、`.env` 与迁移包纪律、11-26 多供应商池进展）。
 
-## 当前状态（持续整理：2026-10-07）
-
-- **`.env` 是运营配置，不是测试夹具**：绝不用 `read_text()` 读写它（CRLF 会被悄悄
-  归一成 LF，半 LF 半 CRLF 混着写就是事故）；要么全程字节，要么 `open(..., newline="")`。
-  门禁跑不了就停下来问，别为了跑测试改它。`malformed_env_names()` 是现成体检入口，
-  返回空才算健康。2026-09-24 换机后那份 `.env` 115 行全 `\r\r\n`，症状是网关 bind
-  失败却报 `getaddrinfo failed`——排查方法见「已知坑」。
-- **战略判断：别再往 `/v1/*` 层加编排**。已量化过：四段编排（分工→规划→执行→审核）
-  会让 Codex 周成本从 $653 涨到 $3,277（5 倍，44.7% 的工具回执也在付编排费），
-  与用户「省 token」的核心诉求方向相反。要高质量产出走 `/ui/agent` 任务台
-  （一次任务付一次编排成本），不走对外路径。**真正管 token 的是客户端侧**：
-  claude-cli 每轮重发全量历史，网关分工管不了它，杠杆是「适时开新会话」。
-- 主干功能完整。**消耗器 2026-10-27 起已灰色停用**（`burner.yaml` 的
-  `disabled: true`）：商汤当天下线 Flash-Lite **消费返赠**，而消耗器的全部意义
-  是「烧专属池 → 1:1 回充成 kimi-k3 积分」，返赠没了继续烧就是净消耗一份
-  带到期日（2026-11-09）的固定余额。配置与启动按钮都保留，恢复只需改回
-  `disabled: false`，**但恢复前先核实返赠机制是否回来**。
-  moonshot 已整块删除（2026-09-29，无 Key，3,102 次尝试 0 成功），要恢复需同时加回
-  providers.yaml 的供应商与 models.yaml 的部署；`kimi-k3-nvidia` 仍保留，靠自动隔离兜底。
-- **商汤额度 2026-10-27 翻倍，改配置时必须同步三处**：5h 窗口 6万→**12 万**积分、
-  周窗口 60万→**120 万**。公告同时说明会统一重置当前可用额度至新上限。
-  三处是：①`providers.yaml` 的 `rate_limits`（token 口径，5h 3亿→**6 亿**、
-  周 30亿→**60 亿**）②`burner.yaml` 的 `window_credits`/`weekly_credits`
-  ③`scripts/burn_sensenova.py` 的 `DEFAULT_WINDOW_CREDITS`/`DEFAULT_WEEKLY_CREDITS`
-  （status/reconcile 的兜底来源）。**只改前两处不够**——配置键缺失时会回落到
-  代码常量，两者不一致就会出现「控制台按旧线画、脚本按旧线停」。
-  顺带修掉 `config.get(x) or 默认值` 把合法的 **0** 当成缺失换掉的坑
-  （额度写 0 是「不限制」的明确意图），改用 `is None` 判缺失。
-- **Flash-Lite 现在连调都调不通**（2026-10-27 实测）：`sensenova-6.8-flash-lite`
-  仍躺在 `/v1/models` 目录里，但实际调用返回 **404 `model route not found`**；
-  `6.7-flash-lite`、`u1.5-lite` 同样 404，而 `deepseek-flash` 返回 429（说明有效）。
-  所以「把那 119 万专属池余额当执行体免费后端」这条路**走不通**，
-  已实测否决。又一处「目录里有 ≠ 能调用」（同 §已知坑 的三反例表）。
+- **战略：别再往 `/v1/*` 层加编排**（四段编排让 Codex 周成本 ×5）；要高质量产出走
+  `/ui/agent` 任务台，真正管 token 的是客户端侧（适时开新会话）。
+- **`.env` 是运营配置不是测试夹具**：绝不用 `read_text()` 读写它（CRLF 会被悄悄
+  归一），要么全程字节，要么 `open(..., newline="")`。门禁跑不了就停下来问，
+  别为了跑测试改它。`malformed_env_names()` 返回空才算健康。
 
