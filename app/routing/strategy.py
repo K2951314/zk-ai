@@ -124,9 +124,15 @@ class SelectionStrategy(ABC):
 
     @staticmethod
     def _number(candidates: list[RoutingCandidate]) -> list[RoutingCandidate]:
-        for index, candidate in enumerate(candidates):
+        # 降权在**唯一出口**统一做：六个策略都以 `_number` 收尾，在这里分区
+        # 才能保证「路由计划 = 调度器将执行的顺序」这条不变量对任何策略成立。
+        # 2026-11-26 审查：此前只有 priority/capability 显式调用
+        # `_demote_penalized`，round_robin/weighted/cost/speed 的冷却腿仍可能
+        # 排队首——线上 zk-auto 恰好是 round_robin，降权在主链路上形同虚设。
+        ordered = SelectionStrategy._demote_penalized(candidates)
+        for index, candidate in enumerate(ordered):
             candidate.order = index
-        return candidates
+        return ordered
 
     @staticmethod
     def _demote_penalized(
@@ -138,6 +144,7 @@ class SelectionStrategy(ABC):
         根本看不到它——额度耗尽 9.7 小时的腿仍排队首，被调度器跳过后白费一次
         首跳判断。现在所有策略共用这一个降权步骤：健康腿在前、被停的腿在后，
         但整条链仍在（全冷却时不会零候选）。稳定分区，不改变组内相对顺序。
+        由 `_number` 统一调用，各策略不要再自己调一次（幂等，但两处写必然漂移）。
         """
         healthy = [c for c in candidates if not c.penalized]
         parked = [c for c in candidates if c.penalized]
@@ -162,7 +169,7 @@ class PrioritySelection(SelectionStrategy):
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (c.target_index, -c.deployment.priority, c.label))
         blocked.sort(key=lambda c: (c.target_index, -c.deployment.priority, c.label))
-        return self._number(self._demote_penalized(eligible + blocked))
+        return self._number(eligible + blocked)
 
 
 class CapabilitySelection(SelectionStrategy):
@@ -189,7 +196,7 @@ class CapabilitySelection(SelectionStrategy):
         else:
             eligible.sort(key=lambda c: (-c.score, -c.deployment.priority, c.label))
         blocked.sort(key=lambda c: c.label)
-        return self._number(self._demote_penalized(eligible + blocked))
+        return self._number(eligible + blocked)
 
 
 class CostSelection(SelectionStrategy):

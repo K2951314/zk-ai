@@ -174,8 +174,20 @@ async def test_stats_aggregates_each_deployment_from_attempt_rows(observability_
     assert response.status_code == 200
     rows = {r["deployment_id"]: r for r in response.json()["deployments"]}
     assert rows["dep-a"]["attempts"] == 1
+    assert rows["dep-a"]["requests"] == 1
     assert rows["dep-a"]["success"] == 1
     assert rows["dep-a"]["success_rate"] == 1.0
+    assert rows["dep-b"]["attempts"] == 1
+    assert rows["dep-b"]["requests"] == 1
     assert rows["dep-b"]["success"] == 0
     assert rows["dep-b"]["rate_limited"] == 1
     assert rows["dep-b"]["success_rate"] == 0.0
+
+def test_attempt_outcome_started_at_defaults_to_the_current_time() -> None:
+    """2026-11-26 审查：漏传 started_at 的 attempt 不能再从部署统计里消失。
+
+    默认 0.0 表示 1970 年，会被 `deployment_summary` 的 7 天 cutoff 静默过滤——
+    统计少一条且没有任何报错。调度器虽然每处都显式赋值，但默认值不该是个陷阱。
+    """
+    outcome = AttemptOutcome(attempt_number=1, provider="fake", model="upstream")
+    assert outcome.started_at >= time.time() - 5.0

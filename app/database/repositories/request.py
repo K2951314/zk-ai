@@ -246,6 +246,9 @@ class RequestRepository:
                     RequestAttempt.provider_id.label("provider_id"),
                     RequestAttempt.deployment_id.label("deployment_id"),
                     func.count(RequestAttempt.id).label("attempts"),
+                    # 请求级口径：同一请求的多次尝试只算一次。attempts 是「尝试次数」，
+                    # 两者并排显示才能分清「接单少」和「同一单反复重试」。
+                    func.count(func.distinct(RequestAttempt.request_id)).label("requests"),
                     func.sum(
                         case((RequestAttempt.status == "success", 1), else_=0)
                     ).label("success"),
@@ -265,6 +268,7 @@ class RequestRepository:
                         "provider_id": row["provider_id"] or "",
                         "deployment_id": row["deployment_id"] or "",
                         "attempts": attempts,
+                        "requests": int(row["requests"] or 0),
                         "success": success,
                         "success_rate": round(success / attempts, 4) if attempts else 0.0,
                         "rate_limited": int(row["rate_limited"] or 0),

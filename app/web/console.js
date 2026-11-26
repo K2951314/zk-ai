@@ -1495,6 +1495,7 @@ async function loadModels() {
   const depStatRows = depStats.map(d => `<tr>
     <td class="mono">${esc(d.provider_id || "-")}</td>
     <td class="mono">${esc(d.deployment_id || "-")}</td>
+    <td class="n">${num(d.requests)}</td>
     <td class="n">${num(d.attempts)}</td>
     <td class="n">${num(d.success)}</td>
     <td class="n">${(Number(d.success_rate || 0) * 100).toFixed(1)}%</td>
@@ -1520,10 +1521,10 @@ async function loadModels() {
     <h4 class="sec">各部署真实接单（近 7 天）</h4>
     <div class="card">
       <div class="tablewrap"><table><thead><tr><th scope="col">供应商</th><th scope="col">部署</th>
-        <th scope="col">尝试</th><th scope="col">成功</th><th scope="col">成功率</th>
+        <th scope="col">请求</th><th scope="col">尝试</th><th scope="col">成功</th><th scope="col">成功率</th>
         <th scope="col">限流</th><th scope="col">平均延迟 ms</th></tr></thead>
-        <tbody>${depStatRows || '<tr><td colspan="7" class="muted">暂无数据</td></tr>'}</tbody></table></div>
-      <div class="note">按每次上游尝试统计，失败与取消也算在内——"部署配了但从没接过单"会直接显示为 0。</div>
+        <tbody>${depStatRows || '<tr><td colspan="8" class="muted">暂无数据</td></tr>'}</tbody></table></div>
+      <div class="note">「请求」按去重后的客户端请求计；「尝试」含同一请求的重试与换腿。成功率 = 成功尝试 ÷ 尝试次数，失败与取消也算在内——"部署配了但从没接过单"会直接显示为 0。</div>
     </div>
     <h4 class="sec">路由预览（不改配置直接看某个请求会怎么走）</h4>
     <div class="card"><div class="row-flex">

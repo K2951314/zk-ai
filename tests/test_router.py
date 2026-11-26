@@ -479,6 +479,148 @@ def test_direct_round_robin_model_rotates_without_double_rotation() -> None:
     assert set(seen) == {"leg-0", "leg-1"}, "直连模型双腿也要轮转，不能被抵消"
 
 
+def test_every_strategy_demotes_penalized_candidates_to_the_tail() -> None:
+    """2026-11-26 审查：降权必须对**所有**策略一致成立，而非只有 priority/capability。
+
+    此前只有这两个策略调用 `_demote_penalized`，round_robin/weighted/cost/speed
+    的冷却腿仍可能排队首——线上 zk-auto 恰好是 round_robin，主链路等于没降权。
+    现在统一在 `_number`（每个策略的唯一出口）做；遍历策略注册表，新策略自动被覆盖。
+    """
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoutingCandidate
+
+    model = make_model("m", capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0})
+    provider = make_provider("fake", key_ids=("k1",))
+
+    def candidate(index: int, *, penalized: bool = False) -> RoutingCandidate:
+        return RoutingCandidate(
+            model=model,
+            deployment=DeploymentConfig(
+                id=f"dep-{index}", provider_id="fake", model="up", priority=100
+            ),
+            provider=provider,
+            score=float(index),
+            penalized=penalized,
+        )
+
+    for name in available_strategies():
+        ordered = get_strategy(name).order(
+            [candidate(1), candidate(2, penalized=True), candidate(3)]
+        )
+        assert len(ordered) == 3, f"{name}: 降权不是删除，故障转移链必须完整"
+        assert ordered[-1].penalized is True, f"{name}: 冷却的腿必须降到队尾"
+        assert not any(c.penalized for c in ordered[:-1]), f"{name}: 健康腿在前"
+        assert [c.order for c in ordered] == [0, 1, 2], f"{name}: order 编号要连续"
+
+
+def test_safety_valve_still_rotates_the_model_local_pool() -> None:
+    """2026-11-26 审查：全门槛失败的兜底路径也要走模型内轮转。
+
+    兜底此前只有 strategy.order + front 提升，丢掉了 `_rotate_model_local_pools`——
+    多供应商分担恰好在「配置过紧、全部 gated」这种最出问题的时刻悄悄失效。
+    """
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    multi = make_model("gated", capabilities={"coding": 5.0, "reasoning": 1.0})
+    multi.deployments = [
+        DeploymentConfig(
+            id=f"leg-{i}",
+            provider_id="fake",
+            model="up",
+            priority=100,
+            request_requires={"reasoning": 4.0},
+        )
+        for i in range(2)
+    ]
+    multi.strategy = "round_robin"
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[multi],
+        aliases=[make_alias("gated-alias", ["gated"], strategy=AliasStrategy.PRIORITY)],
+    )
+    router = Router(config)
+    seen = [
+        router.plan(request_for("gated-alias")).candidates[0].deployment.id for _ in range(4)
+    ]
+    assert set(seen) == {"leg-0", "leg-1"}, "兜底路径也要让模型内两家轮流接活"
+
+
+def test_safety_valve_reports_the_front_model_it_actually_promoted() -> None:
+    """2026-11-26 审查：兜底重排后 reason 必须报**实际**顺序。
+
+    主路径全 gated 时 front_model 提升不发生（没有 eligible 候选）；兜底放宽后
+    提升才成功。旧代码丢弃了兜底提升的返回值，reason 里永远没有
+    `front_model=...`，而调度器确实把它放在了队首——计划与日志各说各话。
+    """
+    from app.models.provider import DeploymentConfig
+
+    front = make_model("front", capabilities={"coding": 5.0, "reasoning": 1.0})
+    front.deployments = [
+        DeploymentConfig(
+            id="front-dep", provider_id="fake", model="up",
+            request_requires={"reasoning": 4.0},
+        )
+    ]
+    other = make_model("other", capabilities={"coding": 5.0, "reasoning": 1.0})
+    other.deployments = [
+        DeploymentConfig(
+            id="other-dep", provider_id="fake", model="up",
+            request_requires={"reasoning": 4.0},
+        )
+    ]
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[other, front],
+        aliases=[
+            make_alias(
+                "guarded", ["other", "front"],
+                strategy=AliasStrategy.PRIORITY, front_model="front",
+            )
+        ],
+    )
+    decision = Router(config).plan(request_for("guarded"))
+    assert decision.candidates[0].model.id == "front"
+    assert "front_model=front" in decision.reason, "reason 必须反映兜底后的真实提升"
+
+
+def test_multi_model_alias_with_same_round_robin_strategy_still_rotates_model_pools() -> None:
+    """多模型别名与模型都用 round_robin 时，模型内的腿也必须轮流。
+
+    外层 `strategy.order()` 对整个 eligible 列表整体位移，多模型时位移会把
+    同一模型的相邻腿带到不同位置；内层 `_rotate_model_local_pools` 因
+    `outer_strategy == model.strategy` 跳过补转，避免 +2 mod 2 抵消。
+    这条测试钉住「跳过补转」之后多模型场景仍然分担——2026-11-26 复审补的
+    端到端用例（此前只测了单模型直连与 priority 别名两种形态）。
+    """
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    m1 = make_model("m1", priority=100, capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0})
+    m1.deployments = [
+        DeploymentConfig(id=f"m1-leg-{i}", provider_id="fake", model="up", priority=100)
+        for i in range(2)
+    ]
+    m1.strategy = "round_robin"
+    m2 = make_model("m2", priority=90, capabilities={"coding": 5.0, "speed": 5.0, "cost": 5.0})
+    m2.deployments = [DeploymentConfig(id="m2-leg", provider_id="fake", model="up", priority=90)]
+    m2.strategy = "round_robin"
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[m1, m2],
+        aliases=[make_alias("pool", ["m1", "m2"], strategy=AliasStrategy.ROUND_ROBIN)],
+    )
+    router = Router(config)
+    seen: list[str] = []
+    for _ in range(12):
+        first = router.plan(request_for("pool")).candidates[0]
+        if first.model.id == "m1":
+            seen.append(first.deployment.id)
+    assert set(seen) == {"m1-leg-0", "m1-leg-1"}, "多模型同策略时模型内两腿也要轮流接活"
+
+
 def test_strategy_registry_and_fallback() -> None:
     assert "capability" in available_strategies()
     assert isinstance(get_strategy("priority"), PrioritySelection)

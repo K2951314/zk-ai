@@ -356,7 +356,9 @@ class AttemptOutcome(BaseModel):
     model: str
     credential_id: str | None = None
     deployment_id: str | None = None
-    started_at: float = 0.0
+    # 默认取当前墙钟：0.0 会被 `deployment_summary` 的 7 天 cutoff 静默过滤，
+    # 一条漏传 started_at 的 attempt 就从「各部署真实接单」里消失了（2026-11-26 审查）。
+    started_at: float = Field(default_factory=time.time)
     finished_at: float = 0.0
     latency_ms: float = 0.0
     status: Literal["success", "error", "cancelled"] = "success"

@@ -349,11 +349,15 @@ class Router:
             ordered = strategy.order(
                 relaxed, relaxed_req, pin_first=bool(alias and alias.pin_first)
             )
+            # 兜底路径也必须走与主路径**完全相同**的排序工序：模型内轮转 +
+            # front_model 提升，且提升结果要回写 ``front``——否则 reason 报的是
+            # 主路径的顺序，调度器执行的却是兜底顺序（同一条「计划=执行」不变量）。
+            ordered = self._rotate_model_local_pools(ordered, relaxed_req, strategy.name)
             # The front-line model must survive the safety valve too: if it were
             # dropped here, a request whose gates all fail would silently lose the
             # only model that answers, which is exactly the case where the
             # operator needs it most.
-            self._promote_front_model(ordered, alias, unavailable or set())
+            front = self._promote_front_model(ordered, alias, unavailable or set())
             logger.warning(
                 "alias '%s' left no eligible deployment (all request_requires gates failed); "
                 "falling back to the ungated ranking - this usually means the deployment "
