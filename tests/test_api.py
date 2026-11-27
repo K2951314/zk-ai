@@ -2239,6 +2239,45 @@ async def test_hot_swap_sets_the_front_model(api) -> None:
     assert alias is not None and alias.front_model == "fake-smart"
 
 
+async def test_alias_update_preserves_omitted_runtime_fields(api) -> None:
+    """省略字段=保留；显式 null/false 才清除，控制台保存不能重置热切换状态。"""
+    client, harness = api
+    first = await client.post(
+        "/zkadmin/aliases",
+        json=_alias_body(
+            front_model="fake-smart",
+            pin_first=True,
+            fallback_to_local=True,
+        ),
+        headers=BURNER_HEADERS,
+    )
+    assert first.status_code == 200, first.text
+
+    second = await client.post(
+        "/zkadmin/aliases",
+        json=_alias_body(),
+        headers=BURNER_HEADERS,
+    )
+    assert second.status_code == 200, second.text
+    alias = harness.container.router.aliases.get("zk-test")
+    assert alias is not None
+    assert alias.front_model == "fake-smart"
+    assert alias.pin_first is True
+    assert alias.fallback_to_local is True
+
+    cleared = await client.post(
+        "/zkadmin/aliases",
+        json=_alias_body(front_model=None, pin_first=False, fallback_to_local=False),
+        headers=BURNER_HEADERS,
+    )
+    assert cleared.status_code == 200, cleared.text
+    alias = harness.container.router.aliases.get("zk-test")
+    assert alias is not None
+    assert alias.front_model is None
+    assert alias.pin_first is False
+    assert alias.fallback_to_local is False
+
+
 async def test_front_model_outside_targets_is_rejected(api) -> None:
     """接口模型不同时是链上成员 = 没有可用部署，必须当场报错。"""
     client, _harness = api

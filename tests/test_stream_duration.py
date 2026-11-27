@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from app.models.request import ChatCompletionRequest
 from tests.conftest import Behavior
 
@@ -83,6 +85,78 @@ async def test_cancelled_stream_still_records_how_long_it_ran(harness) -> None:
     row = await _latest_request_row(harness)
     assert row["status"] == "cancelled"
     assert row["stream_duration_ms"] > 0, "被取消的流也要留下它跑了多久"
+
+
+async def test_cancelled_stream_after_meta_is_attributed_to_the_client(harness) -> None:
+    """已经收到 meta 后客户端断开，也不能留下 error_type=NULL。"""
+    harness.adapter.queue(Behavior(chunks=5, delay=0.2))
+    stream = harness.service.stream(
+        ChatCompletionRequest(
+            model="fake-model",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+        ),
+        request_id="cancel-after-meta",
+    )
+    async for event in stream:
+        if event.type == "meta":
+            break
+    await stream.aclose()
+
+    row = await _latest_request_row(harness)
+    assert row["status"] == "cancelled"
+    assert row["error_type"] == "client_disconnected"
+
+
+async def test_cancelled_stream_after_upstream_error_is_client_disconnected(harness, monkeypatch) -> None:
+    """取消状态优先归因客户端断开，不能保留上游 error_type。"""
+    original = harness.adapter.stream
+
+    async def failing_stream(request, ctx):
+        async for chunk in original(request, ctx):
+            yield chunk
+            raise RuntimeError("midstream broken")
+
+    monkeypatch.setattr(harness.adapter, "stream", failing_stream)
+    stream = harness.service.stream(
+        ChatCompletionRequest(
+            model="fake-model",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+        ),
+        request_id="cancel-after-error",
+    )
+    async for event in stream:
+        if event.type == "error":
+            break
+    await stream.aclose()
+
+    row = await _latest_request_row(harness)
+    assert row["status"] == "cancelled"
+    assert row["error_type"] == "client_disconnected"
+
+
+async def test_cancelled_non_stream_request_persists_attempt_row(harness) -> None:
+    """非流式取消时，调度器已记录的取消 attempt 必须落库。"""
+    harness.adapter.queue(Behavior(delay=1))
+    request = ChatCompletionRequest(
+        model="fake-model",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+    )
+    task = asyncio.create_task(harness.service.chat(request, request_id="cancel-chat"))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    row = await _latest_request_row(harness)
+    attempts = await harness.container.request_repository.attempts_for("cancel-chat")
+    assert row["status"] == "cancelled"
+    assert row["error_type"] == "client_disconnected"
+    assert row["attempts"] == 1
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "cancelled"
 
 
 async def test_cancelled_stream_is_attributed_to_the_client_not_missing_meta(harness) -> None:

@@ -139,6 +139,57 @@ def test_rotation_ceiling_of_one_with_a_pool_is_flagged():
     assert warnings and "兄弟 Key" in warnings[0]
 
 
+def test_explicit_model_strategy_is_not_reported_as_missing():
+    """显式 priority 是有意配置，不能写成 strategy 为空并让 --strict 误红。"""
+    from scripts.check_config import _check_model_pool_strategy
+
+    model = ModelConfig(
+        id="m1",
+        strategy="priority",
+        deployments=[
+            DeploymentConfig(id="a", provider_id="p1", model="up"),
+            DeploymentConfig(id="b", provider_id="p2", model="up"),
+        ],
+    )
+    config = make_config(providers=[_provider("p1"), _provider("p2")], models=[model])
+    warnings: list[str] = []
+    _check_model_pool_strategy(config, warnings)
+    assert warnings == []
+
+
+def test_missing_model_strategy_still_warns_for_multi_supplier_pool():
+    from scripts.check_config import _check_model_pool_strategy
+
+    model = ModelConfig(
+        id="m1",
+        deployments=[
+            DeploymentConfig(id="a", provider_id="p1", model="up"),
+            DeploymentConfig(id="b", provider_id="p2", model="up"),
+        ],
+    )
+    config = make_config(providers=[_provider("p1"), _provider("p2")], models=[model])
+    warnings: list[str] = []
+    _check_model_pool_strategy(config, warnings)
+    assert len(warnings) == 1
+    assert "strategy 为空" in warnings[0]
+
+
+def test_disabled_second_supplier_does_not_trigger_pool_warning():
+    from scripts.check_config import _check_model_pool_strategy
+
+    model = ModelConfig(
+        id="m1",
+        deployments=[
+            DeploymentConfig(id="a", provider_id="p1", model="up", enabled=True),
+            DeploymentConfig(id="b", provider_id="p2", model="up", enabled=False),
+        ],
+    )
+    config = make_config(providers=[_provider("p1"), _provider("p2")], models=[model])
+    warnings: list[str] = []
+    _check_model_pool_strategy(config, warnings)
+    assert warnings == []
+
+
 def test_a_deliberate_partial_ceiling_is_not_flagged():
     """3 vs 9 是**有意的让渡**（本地负载轻、服务器账号多）——不该报。"""
     from scripts.check_config import _check_credential_rotation_ceiling

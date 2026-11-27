@@ -151,6 +151,7 @@ class AliasRegistry:
                 "description": alias.description,
                 "front_model": alias.front_model,
                 "pin_first": alias.pin_first,
+                "fallback_to_local": alias.fallback_to_local,
             }
             for alias in self.all()
         }

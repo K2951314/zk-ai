@@ -268,6 +268,8 @@ class AliasUpsertRequest(BaseModel):
     description: str | None = None
     weights: dict[str, float] = Field(default_factory=dict)
     requires: dict[str, float] = Field(default_factory=dict)
+    pin_first: bool | None = None
+    fallback_to_local: bool | None = None
     #: 接口模型（永远排第一）。不传 = 不改动；传 null = 清除，交还能力路由。
     #: 走同一个 POST /admin/aliases 就能热改，不用重排 targets、不用重启——
     #: 这就是运营者「随时调整」的入口。

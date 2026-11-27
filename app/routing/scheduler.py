@@ -657,7 +657,11 @@ class Scheduler:
     # Non-streaming execution
     # ------------------------------------------------------------------ #
     async def execute(
-        self, request: ChatCompletionRequest, *, request_id: str
+        self,
+        request: ChatCompletionRequest,
+        *,
+        request_id: str,
+        attempts_sink: list[AttemptOutcome] | None = None,
     ) -> ExecutionResult:
         """Run *request* to completion, retrying and failing over as configured."""
         decision = self.router.plan(request, unavailable=self.unavailable_deployments())
@@ -673,7 +677,7 @@ class Scheduler:
         )
         if sticky:
             logger.info("session %s sticky deployment: %s", (session_key or "")[:20], sticky)
-        attempts: list[AttemptOutcome] = []
+        attempts = attempts_sink if attempts_sink is not None else []
         errors: list[ErrorInfo] = []
         attempt_number = 0
         deployments_tried = 0

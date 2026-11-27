@@ -128,7 +128,7 @@ def _check_model_pool_strategy(config: AppConfig, warnings: list[str]) -> None:
     for model in sorted(config.models.values(), key=lambda m: m.id):
         if not model.enabled or len(model.deployments) < 2:
             continue
-        if model.strategy in ("round_robin", "weighted"):
+        if model.strategy is not None:
             continue
         providers = {dep.provider_id for dep in model.deployments if dep.enabled}
         if len(providers) < 2:

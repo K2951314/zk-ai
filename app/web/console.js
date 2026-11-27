@@ -1543,10 +1543,10 @@ async function loadModels() {
     const r = await api("/admin/router/preview?" + p.toString());
     if (r.error) { $("#pv-out").innerHTML = `<span class="pill red">${esc(r.error.message)}</span>`; return; }
     const plan = (r.plan || []).map((c, i) => `
-      <tr><td>${rankBadge(Number(c.order ?? i + 1))}</td><td>${esc(c.deployment_id || c.id || "-")}</td>
+      <tr><td>${rankBadge(Number(c.order ?? i + 1))}</td><td>${esc(c.deployment || c.deployment_id || c.id || "-")}</td>
       <td>${esc(c.provider_id || c.provider || "-")}</td><td>${esc(c.model || "-")}</td>
-      <td>${c.penalized ? '<span class="pill amber">冷却中</span>' : (c.eligible ? pill("healthy") : pill("disabled"))}</td>
-      <td class="small">${c.penalized ? "冷却/隔离中，已降到队尾" : ""}</td></tr>`).join("");
+      <td>${c.penalized ? '<span class="pill amber">当前不可用</span>' : (c.eligible ? pill("healthy") : pill("disabled"))}</td>
+      <td class="small">${c.penalized ? "冷却/隔离或无可用凭据，已降到队尾" : ""}</td></tr>`).join("");
     $("#pv-out").innerHTML = `
       <div class="small muted" style="margin-bottom:6px">${esc(r.reason || "")}
       ${r.alias ? ` · 别名 ${esc(r.alias)}` : ""} · 策略 ${esc(strategyLabel(r.strategy))}</div>
@@ -2216,9 +2216,11 @@ function openAliasModal(name) {
       targets: $("#am-targets").value.split("\n").map(s => s.trim()).filter(Boolean),
       weights: parseKV("#am-weights"),
       requires: parseKV("#am-requires"),
+      pin_first: !!a.pin_first,
+      fallback_to_local: !!a.fallback_to_local,
     };
-    // 接口模型：只在开关打开时送。关闭 = 不送 = 越过首位用正常权重模型。
-    if (fmOn.checked && fmModel.value) payload.front_model = fmModel.value;
+    payload.front_model = fmOn.checked ? (fmModel.value || null) : null;
+    if (fmOn.checked && !fmModel.value) { toast("接口模型已开启，但没有可选的模型目标", "err"); return; }
     if (!payload.name) { toast("别名不能为空", "err"); return; }
     if (payload.front_model && !payload.targets.includes(payload.front_model)) {
       toast("接口模型必须是目标链里的一员，否则它没有可用部署", "err");

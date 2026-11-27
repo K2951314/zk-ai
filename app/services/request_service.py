@@ -178,9 +178,10 @@ class RequestService:
         self._guard_input_size(request)
         await self._start(request_id, request, client_ip=client_ip, user_agent=user_agent)
 
+        attempts: list[AttemptOutcome] = []
         try:
             result: ExecutionResult = await self.scheduler.execute(
-                request, request_id=request_id
+                request, request_id=request_id, attempts_sink=attempts
             )
         except ZKAIError as exc:
             await self._finalize_failure(
@@ -195,7 +196,7 @@ class RequestService:
                 request_id,
                 error=ClientDisconnected("client disconnected before completion"),
                 http_status=499,
-                attempts=[],
+                attempts=attempts,
             )
             raise
 
@@ -407,7 +408,7 @@ class RequestService:
                 resolved_model=meta.resolved_model,
                 alias=meta.alias,
                 credential_id=meta.credential_id,
-                error_type=error_type,
+                error_type="client_disconnected" if cancelled else (error_type or None),
                 attempt_count=meta.attempt,
                 fallback_used=meta.fallback_used,
                 routing_reason=meta.routing_reason,
@@ -427,8 +428,9 @@ class RequestService:
                 request_id,
                 status="cancelled" if cancelled else "error",
                 http_status=499 if cancelled else (error_status if failed else 502),
-                error_type=error_type
-                or ("client_disconnected" if cancelled else "no_stream_meta"),
+                error_type="client_disconnected"
+                if cancelled
+                else (error_type or "no_stream_meta"),
                 attempt_count=len(attempts),
                 # 没有 meta 也要记总时长：客户端断开时 meta 仍是 None，
                 # 而「它跑了多久才断」正是排查要看的那个数。

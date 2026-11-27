@@ -105,21 +105,50 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": {"message": "部署 ID 重复", "type": "invalid_model"}},
             )
+        merged = existing.model_copy(deep=True)
         for dep_raw in raw["deployments"]:
             if dep_raw.get("id") not in seen:
-                existing.deployments.append(_Dep(**dep_raw))
+                merged.deployments.append(_Dep(**dep_raw))
             else:
-                # 同 ID 的部署更新字段（如 priority 被手动改了）
-                for i, d in enumerate(existing.deployments):
-                    if d.id == dep_raw["id"]:
-                        existing.deployments[i] = _Dep(**dep_raw)
+                for i, deployment in enumerate(merged.deployments):
+                    if deployment.id == dep_raw["id"]:
+                        merged.deployments[i] = _Dep(**dep_raw)
                         break
-        _write_model_file(container, existing)
-        await container.config_repository.upsert_model(existing)
+        deployment_keys: dict[tuple[str, str], str] = {}
+        for deployment in merged.deployments:
+            key = (deployment.provider_id, deployment.model)
+            previous_deployment = deployment_keys.get(key)
+            if previous_deployment is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": {
+                            "message": (
+                                f"部署 {previous_deployment} 与 {deployment.id} 的供应商和上游模型完全相同，"
+                                "不能重复添加"
+                            ),
+                            "type": "invalid_model",
+                        }
+                    },
+                )
+            deployment_keys[key] = deployment.id
+
+        synced = None
+        try:
+            synced = _write_model_file(container, merged)
+            await container.config_repository.upsert_model(merged)
+        except Exception:
+            if synced is not None:
+                try:
+                    _write_model_file(container, existing)
+                except Exception:
+                    logger.exception("模型合并失败后回滚 YAML 失败：%s", existing.id)
+            raise
+        container.config.models[payload.id] = merged
         return {
             "object": "model",
             "merged": True,
-            "data": container.model_service.describe(existing.id),
+            "data": container.model_service.describe(merged.id),
         }
 
     try:
@@ -156,16 +185,16 @@ async def upsert_model(payload: ModelUpsertRequest, container: ContainerDep) -> 
     # 先改内存立即生效（下一次请求就能看到），再落盘。
     # 落盘失败则回滚内存，保持文件与内存一致——编辑场景要恢复旧值，
     # 不能一 pop 了之（那会让旧模型从内存里消失，与文件里的条目不一致）。
-    previous = container.config.models.get(model.id)
+    previous_model = container.config.models.get(model.id)
     container.config.models[model.id] = model
     try:
         synced = _write_model_file(container, model)
         await container.config_repository.upsert_model(model)
     except Exception:
-        if previous is None:
+        if previous_model is None:
             container.config.models.pop(model.id, None)
         else:
-            container.config.models[model.id] = previous
+            container.config.models[model.id] = previous_model
         raise
     return {
         "object": "model",
@@ -242,7 +271,13 @@ async def router_preview(
         response_format={"type": "json_object"} if json_mode else None,
         max_tokens=max_tokens,
     )
-    preview = container.router.preview(request)
+    unavailable = set(container.scheduler.unavailable_deployments())
+    provider_ok = container.pool.provider_availability()
+    for model_config in container.config.models.values():
+        for deployment in model_config.deployments:
+            if deployment.enabled and not provider_ok.get(deployment.provider_id, False):
+                unavailable.add(deployment.id)
+    preview = container.router.preview(request, unavailable=unavailable)
     preview["pool"] = {
         provider_id: container.pool.describe_selection(provider_id)
         for provider_id in container.config.providers
@@ -253,8 +288,14 @@ async def router_preview(
 @router.post("/aliases", summary="新建或替换别名")
 async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> dict[str, Any]:
     """Hot-swap an alias - clients keep sending the same model name."""
+    existing = container.config.aliases.get(payload.name)
+    if existing is None:
+        alias_data = payload.model_dump(exclude_none=True)
+    else:
+        alias_data = existing.model_dump()
+        alias_data.update(payload.model_dump(exclude_unset=True))
     try:
-        alias = ModelAliasConfig(**payload.model_dump())
+        alias = ModelAliasConfig(**alias_data)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -298,8 +339,6 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
         )
 
     synced = _write_alias_file(container, alias)
-    container.router.aliases.upsert(alias)
-    container.config.aliases[alias.name] = alias
     await container.config_repository.upsert_alias(
         alias.name,
         targets=list(alias.targets),
@@ -307,8 +346,11 @@ async def upsert_alias(payload: AliasUpsertRequest, container: ContainerDep) -> 
         enabled=alias.enabled,
         weights=dict(alias.weights),
         requires=dict(alias.requires),
+        fallback_to_local=alias.fallback_to_local,
         description=alias.description,
     )
+    container.router.aliases.upsert(alias)
+    container.config.aliases[alias.name] = alias
     return {
         "object": "alias",
         "synced": synced,

@@ -450,6 +450,9 @@ def test_model_level_round_robin_works_even_under_a_priority_alias() -> None:
         router.plan(request_for("ds-like")).candidates[0].deployment.id for _ in range(6)
     ]
     assert set(seen) == {"dep-0", "dep-1", "dep-2"}, "priority 别名下模型内三家仍要轮流接活"
+    assert "alias_strategy=priority overrides model_strategy=round_robin" in router.plan(
+        request_for("ds-like")
+    ).reason
 
 
 def test_direct_round_robin_model_rotates_without_double_rotation() -> None:
@@ -640,6 +643,111 @@ def test_unknown_alias_strategy_falls_back_to_capability() -> None:
 # --------------------------------------------------------------------------- #
 # Preview + description
 # --------------------------------------------------------------------------- #
+def test_final_order_is_renumbered_after_front_model_promotion() -> None:
+    """front_model 提升后 order 必须反映真实位置，否则 fallback_used 会误报。"""
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    front = make_model("front")
+    front.deployments = [
+        DeploymentConfig(id=f"front-{i}", provider_id="fake", model="up", priority=100)
+        for i in range(2)
+    ]
+    front.strategy = "round_robin"
+    others = [make_model(f"m{i}", priority=100 - i) for i in range(4)]
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[front, *others],
+        aliases=[
+            make_alias(
+                "pool",
+                ["front", *[model.id for model in others]],
+                strategy=AliasStrategy.ROUND_ROBIN,
+                front_model="front",
+            )
+        ],
+    )
+    router = Router(config)
+    decisions = [router.plan(request_for("pool")) for _ in range(12)]
+
+    for decision in decisions:
+        assert [candidate.order for candidate in decision.candidates] == list(
+            range(len(decision.candidates))
+        ), "最终排序后 order 必须连续，且首跳必须是 0"
+    assert decisions[0].candidates[0].order == 0
+
+
+def test_front_model_supplier_pool_has_its_own_fair_cursor() -> None:
+    """front_model 不能靠全局排序后的第一条腿，否则多供应商会长期偏斜。"""
+    from collections import Counter
+
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    front = make_model("front")
+    front.deployments = [
+        DeploymentConfig(id=f"front-{i}", provider_id="fake", model="up", priority=100)
+        for i in range(2)
+    ]
+    front.strategy = "round_robin"
+    others = [make_model(f"m{i}", priority=100 - i) for i in range(4)]
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[front, *others],
+        aliases=[
+            make_alias(
+                "pool",
+                ["front", *[model.id for model in others]],
+                strategy=AliasStrategy.ROUND_ROBIN,
+                front_model="front",
+            )
+        ],
+    )
+    router = Router(config)
+    seen = [
+        router.plan(request_for("pool")).candidates[0].deployment.id
+        for _ in range(12)
+    ]
+
+    assert Counter(seen) == Counter({"front-0": 6, "front-1": 6})
+
+
+def test_preview_does_not_advance_front_model_cursor() -> None:
+    """预览只展示下一跳，不能把真实请求的轮转游标消耗掉。"""
+    from app.models.provider import DeploymentConfig
+    from app.routing.strategy import RoundRobinSelection
+
+    RoundRobinSelection._cursor.clear()
+    front = make_model("front")
+    front.deployments = [
+        DeploymentConfig(id=f"front-{i}", provider_id="fake", model="up", priority=100)
+        for i in range(2)
+    ]
+    front.strategy = "round_robin"
+    config = make_config(
+        providers=[make_provider("fake", key_ids=("k1",))],
+        models=[front],
+        aliases=[
+            make_alias(
+                "pool",
+                ["front"],
+                strategy=AliasStrategy.ROUND_ROBIN,
+                front_model="front",
+            )
+        ],
+    )
+    router = Router(config)
+    request = request_for("pool")
+    first = router.plan(request).candidates[0].deployment.id
+    preview = router.preview(request)
+    second = router.plan(request).candidates[0].deployment.id
+
+    assert preview["plan"][0]["deployment"] != first
+    assert second != first
+
+
 def test_preview_reports_plan_scores_and_reasons() -> None:
     router = build_router()
     preview = router.preview(

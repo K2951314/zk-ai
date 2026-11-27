@@ -109,6 +109,7 @@ class SelectionStrategy(ABC):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         """Return eligible candidates first, in attempt order."""
 
@@ -165,6 +166,7 @@ class PrioritySelection(SelectionStrategy):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (c.target_index, -c.deployment.priority, c.label))
@@ -182,6 +184,7 @@ class CapabilitySelection(SelectionStrategy):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         if pin_first:
@@ -209,6 +212,7 @@ class CostSelection(SelectionStrategy):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(
@@ -232,6 +236,7 @@ class SpeedSelection(SelectionStrategy):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (-(c.breakdown.get("speed", 0.0)), -c.score, c.label))
@@ -259,6 +264,7 @@ class RoundRobinSelection(SelectionStrategy):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         eligible.sort(key=lambda c: (-c.deployment.priority, -c.score, c.label))
@@ -266,7 +272,8 @@ class RoundRobinSelection(SelectionStrategy):
             key = eligible[0].model.id
             offset = RoundRobinSelection._cursor.get(key, 0) % len(eligible)
             eligible = eligible[offset:] + eligible[:offset]
-            RoundRobinSelection._cursor[key] = (offset + 1) % len(eligible)
+            if advance:
+                RoundRobinSelection._cursor[key] = (offset + 1) % len(eligible)
         blocked.sort(key=lambda c: c.label)
         return self._number(eligible + blocked)
 
@@ -281,6 +288,7 @@ class WeightedSelection(SelectionStrategy):
         candidates: list[RoutingCandidate],
         requirement: CapabilityRequirement | None = None,
         pin_first: bool = False,
+        advance: bool = True,
     ) -> list[RoutingCandidate]:
         eligible, blocked = self._partition(candidates)
         bands: dict[int, list[RoutingCandidate]] = {}
@@ -291,7 +299,11 @@ class WeightedSelection(SelectionStrategy):
             bucket = list(bands[priority])
             while bucket:
                 weights = [max(0.001, item.deployment.weight) for item in bucket]
-                chosen = self.rng.choices(bucket, weights=weights, k=1)[0]
+                rng = self.rng
+                if not advance:
+                    rng = random.Random()  # noqa: S311
+                    rng.setstate(self.rng.getstate())
+                chosen = rng.choices(bucket, weights=weights, k=1)[0]
                 ordered.append(chosen)
                 bucket.remove(chosen)
         blocked.sort(key=lambda c: c.label)

@@ -83,6 +83,16 @@ def test_round_robin_rotation_cycles() -> None:
     assert set(first) == {"k1", "k2", "k3"}
 
 
+def test_introspection_does_not_advance_round_robin_cursor() -> None:
+    """健康检查与预览不能消耗真实凭据轮转次数。"""
+    pool, _ = build_pool(rotation="round_robin", keys=(("k1", 100), ("k2", 100), ("k3", 100)))
+    first = [c.id for c in pool.candidates("p1")]
+    pool.provider_availability()
+    pool.describe_selection("p1")
+    second = [c.id for c in pool.candidates("p1")]
+    assert second != first
+
+
 def test_weighted_rotation_is_seeded_and_covers_every_key() -> None:
     pool, _ = build_pool(rotation="weighted", keys=(("k1", 100), ("k2", 100)))
     pool._rotation.rng = random.Random(42)  # deterministic ordering for the assertion

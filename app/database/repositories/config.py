@@ -266,6 +266,7 @@ class ConfigRepository:
         enabled: bool = True,
         weights: dict[str, float] | None = None,
         requires: dict[str, float] | None = None,
+        fallback_to_local: bool | None = None,
         description: str | None = None,
     ) -> None:
         async with self.db.session() as session:
@@ -278,6 +279,8 @@ class ConfigRepository:
             row.enabled = enabled
             row.weights = dict(weights or {})
             row.requires = dict(requires or {})
+            if fallback_to_local is not None:
+                row.fallback_to_local = fallback_to_local
             row.description = description
 
     async def upsert_model(self, model: Any) -> None:

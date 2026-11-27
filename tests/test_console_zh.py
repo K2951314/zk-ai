@@ -121,6 +121,29 @@ def _html(name: str) -> str:
     return text
 
 
+def test_router_preview_reads_the_backend_deployment_field() -> None:
+    text = (PROJECT_ROOT / "app" / "web" / "console.js").read_text(encoding="utf-8")
+    assert "c.deployment || c.deployment_id || c.id" in text
+
+
+def test_router_preview_uses_neutral_unavailable_label() -> None:
+    text = (PROJECT_ROOT / "app" / "web" / "console.js").read_text(encoding="utf-8")
+    assert "当前不可用" in text
+    assert "无可用凭据" in text
+
+
+def test_alias_editor_preserves_hot_swap_fields() -> None:
+    text = (PROJECT_ROOT / "app" / "web" / "console.js").read_text(encoding="utf-8")
+    assert "pin_first: !!a.pin_first" in text
+    assert "fallback_to_local: !!a.fallback_to_local" in text
+    assert "payload.front_model = fmOn.checked ? (fmModel.value || null) : null" in text
+    assert (
+        'if (fmOn.checked && !fmModel.value) { toast("接口模型已开启，但没有可选的模型目标", '
+        '"err"); return; }'
+        in text
+    )
+
+
 def _raw_html(name: str) -> str:
     """Read the file as-is, without inlining external CSS/JS (for asset checks)."""
     path = _WEB / name

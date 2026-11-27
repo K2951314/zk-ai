@@ -25,7 +25,11 @@ class CredentialRotation(ABC):
         self.rng = rng or random.Random()  # noqa: S311
 
     @abstractmethod
-    def order(self, credentials: Sequence[CredentialRuntime]) -> list[CredentialRuntime]:
+    def order(
+        self,
+        credentials: Sequence[CredentialRuntime],
+        advance: bool = True,
+    ) -> list[CredentialRuntime]:
         """Return credentials in the order they should be attempted."""
 
     # ------------------------------------------------------------------ #
@@ -50,7 +54,11 @@ class PriorityRotation(CredentialRotation):
 
     name = "priority"
 
-    def order(self, credentials: Sequence[CredentialRuntime]) -> list[CredentialRuntime]:
+    def order(
+        self,
+        credentials: Sequence[CredentialRuntime],
+        advance: bool = True,
+    ) -> list[CredentialRuntime]:
         import time
 
         now = time.time()
@@ -66,7 +74,11 @@ class RoundRobinRotation(CredentialRotation):
         super().__init__(rng)
         self._cursor: dict[str, int] = {}
 
-    def order(self, credentials: Sequence[CredentialRuntime]) -> list[CredentialRuntime]:
+    def order(
+        self,
+        credentials: Sequence[CredentialRuntime],
+        advance: bool = True,
+    ) -> list[CredentialRuntime]:
         if not credentials:
             return []
         grouped: dict[int, list[CredentialRuntime]] = {}
@@ -77,7 +89,8 @@ class RoundRobinRotation(CredentialRotation):
             bucket = sorted(grouped[priority], key=lambda c: c.id)
             start = self._cursor.get(str(priority), 0) % len(bucket)
             ordered.extend(bucket[start:] + bucket[:start])
-            self._cursor[str(priority)] = (start + 1) % len(bucket)
+            if advance:
+                self._cursor[str(priority)] = (start + 1) % len(bucket)
         return ordered
 
 
@@ -86,7 +99,11 @@ class WeightedRotation(CredentialRotation):
 
     name = "weighted"
 
-    def order(self, credentials: Sequence[CredentialRuntime]) -> list[CredentialRuntime]:
+    def order(
+        self,
+        credentials: Sequence[CredentialRuntime],
+        advance: bool = True,
+    ) -> list[CredentialRuntime]:
         grouped: dict[int, list[CredentialRuntime]] = {}
         for credential in credentials:
             grouped.setdefault(credential.priority, []).append(credential)
@@ -95,7 +112,11 @@ class WeightedRotation(CredentialRotation):
             bucket = list(grouped[priority])
             while bucket:
                 weights = [max(0.001, c.weight) for c in bucket]
-                chosen = self.rng.choices(bucket, weights=weights, k=1)[0]
+                rng = self.rng
+                if not advance:
+                    rng = random.Random()  # noqa: S311
+                    rng.setstate(self.rng.getstate())
+                chosen = rng.choices(bucket, weights=weights, k=1)[0]
                 ordered.append(chosen)
                 bucket.remove(chosen)
         return ordered
@@ -106,7 +127,11 @@ class LeastFailuresRotation(CredentialRotation):
 
     name = "least_failures"
 
-    def order(self, credentials: Sequence[CredentialRuntime]) -> list[CredentialRuntime]:
+    def order(
+        self,
+        credentials: Sequence[CredentialRuntime],
+        advance: bool = True,
+    ) -> list[CredentialRuntime]:
         return sorted(
             credentials,
             key=lambda c: (
@@ -124,7 +149,11 @@ class FastestRotation(CredentialRotation):
 
     name = "fastest"
 
-    def order(self, credentials: Sequence[CredentialRuntime]) -> list[CredentialRuntime]:
+    def order(
+        self,
+        credentials: Sequence[CredentialRuntime],
+        advance: bool = True,
+    ) -> list[CredentialRuntime]:
         return sorted(
             credentials,
             key=lambda c: (

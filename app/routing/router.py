@@ -125,6 +125,7 @@ class Router:
         self.config = config
         self.aliases = alias_registry or AliasRegistry(config.aliases.values())
         self._adapters: dict[str, ProviderAdapter] = {}
+        self._front_model_cursor: dict[str, int] = {}
         self._build_adapters()
 
     # ------------------------------------------------------------------ #
@@ -232,6 +233,7 @@ class Router:
         request: ChatCompletionRequest,
         *,
         unavailable: set[str] | None = None,
+        dry_run: bool = False,
     ) -> RoutingDecision:
         """Build the ordered attempt plan for *request*.
 
@@ -307,15 +309,20 @@ class Router:
         # 别名策略 > 模型策略 > 默认 capability（决定**跨模型**顺序）
         strategy_name = alias.strategy if alias else (primary_model.strategy if primary_model else None)
         strategy = get_strategy(strategy_name)
-        ordered = strategy.order(candidates, requirement, pin_first=bool(alias and alias.pin_first))
+        ordered = strategy.order(
+            candidates,
+            requirement,
+            pin_first=bool(alias and alias.pin_first),
+            advance=not dry_run,
+        )
 
         # 2026-11-26：模型内多部署是**独立的分担池**。别名策略（如 ds 的 priority）
         # 决定模型间的先后，但不该盖掉模型自己配的 round_robin/weighted——否则
         # 同一模型加的 3 家供应商永远只有 label 最小的那家接活。
         # 只在模型占用的槽位内重排，不改变跨模型顺序，也不动 capability 全局语义。
-        ordered = self._rotate_model_local_pools(ordered, requirement, strategy.name)
+        ordered = self._rotate_model_local_pools(ordered, requirement, strategy.name, dry_run=dry_run)
 
-        front = self._promote_front_model(ordered, alias, unavailable or set())
+        front = self._promote_front_model(ordered, alias, unavailable or set(), dry_run=dry_run)
 
         # Safety valve: per-deployment ``request_requires`` gates can leave a
         # request with zero eligible deployments (e.g. every deployment on the
@@ -347,17 +354,24 @@ class Router:
                 relaxed_candidate.penalized = candidate.deployment.id in (unavailable or set())
                 relaxed.append(relaxed_candidate)
             ordered = strategy.order(
-                relaxed, relaxed_req, pin_first=bool(alias and alias.pin_first)
+                relaxed,
+                relaxed_req,
+                pin_first=bool(alias and alias.pin_first),
+                advance=not dry_run,
             )
             # 兜底路径也必须走与主路径**完全相同**的排序工序：模型内轮转 +
             # front_model 提升，且提升结果要回写 ``front``——否则 reason 报的是
             # 主路径的顺序，调度器执行的却是兜底顺序（同一条「计划=执行」不变量）。
-            ordered = self._rotate_model_local_pools(ordered, relaxed_req, strategy.name)
+            ordered = self._rotate_model_local_pools(
+                ordered, relaxed_req, strategy.name, dry_run=dry_run
+            )
             # The front-line model must survive the safety valve too: if it were
             # dropped here, a request whose gates all fail would silently lose the
             # only model that answers, which is exactly the case where the
             # operator needs it most.
-            front = self._promote_front_model(ordered, alias, unavailable or set())
+            front = self._promote_front_model(
+                ordered, alias, unavailable or set(), dry_run=dry_run
+            )
             logger.warning(
                 "alias '%s' left no eligible deployment (all request_requires gates failed); "
                 "falling back to the ungated ranking - this usually means the deployment "
@@ -365,12 +379,25 @@ class Router:
                 alias_name,
             )
 
+        for index, candidate in enumerate(ordered):
+            candidate.order = index
+
         reason_parts = [
             f"requested={requested}",
             f"alias={alias_name or '-'}",
             f"strategy={strategy.name}",
             f"order={[c.deployment.id for c in ordered if c.eligible][:4]}",
         ]
+        if (
+            alias is not None
+            and primary_model is not None
+            and primary_model.strategy
+            and alias.strategy.value != primary_model.strategy
+        ):
+            reason_parts.append(
+                f"alias_strategy={alias.strategy.value} overrides "
+                f"model_strategy={primary_model.strategy}"
+            )
         if rewrite.changed:
             reason_parts.append(f"agent_auto={rewrite.rewritten}({rewrite.reason})")
         if front.applied:
@@ -408,6 +435,8 @@ class Router:
         ordered: list[RoutingCandidate],
         requirement: CapabilityRequirement,
         outer_strategy: str = "",
+        *,
+        dry_run: bool = False,
     ) -> list[RoutingCandidate]:
         """模型内多部署是独立分担池，按模型自己的策略轮转（2026-11-26）。
 
@@ -447,7 +476,9 @@ class Router:
             healthy = [c for c in group if not c.penalized]
             if len(healthy) < 2:
                 continue
-            rotated = get_strategy(model.strategy).order(healthy, requirement)
+            rotated = get_strategy(model.strategy).order(
+                healthy, requirement, advance=not dry_run
+            )
             healthy_slots = [
                 position for position in positions if not result[position].penalized
             ]
@@ -460,6 +491,8 @@ class Router:
         ordered: list[RoutingCandidate],
         alias: ModelAliasConfig | None,
         unavailable: set[str] | None = None,
+        *,
+        dry_run: bool = False,
     ) -> FrontModelOutcome:
         """Float *alias.front_model* to the head of the attempt order.
 
@@ -492,32 +525,47 @@ class Router:
             return FrontModelOutcome(None, None)
         wanted = alias.front_model
         parked: list[str] = []
-        for index, candidate in enumerate(ordered):
+        pool: list[RoutingCandidate] = []
+        for candidate in ordered:
             if candidate.model.id != wanted or not candidate.eligible:
                 continue
             if unavailable and candidate.deployment.id in unavailable:
                 parked.append(candidate.deployment.id)
                 continue
-            if index == 0:
-                return FrontModelOutcome(wanted, None)  # already leading
-            ordered.insert(0, ordered.pop(index))
-            return FrontModelOutcome(wanted, None)
-        if parked:
+            pool.append(candidate)
+        if not pool:
+            if parked:
+                logger.debug(
+                    "alias '%s' front_model '%s' is parked (cooldown/quarantine: %s); "
+                    "keeping the routed order",
+                    alias.name,
+                    wanted,
+                    "、".join(parked),
+                )
+                return FrontModelOutcome(None, f"{wanted}(隔离/冷却中，未提升)")
             logger.debug(
-                "alias '%s' front_model '%s' is parked (cooldown/quarantine: %s); "
+                "alias '%s' front_model '%s' is not an eligible candidate; "
                 "keeping the routed order",
                 alias.name,
                 wanted,
-                "、".join(parked),
             )
-            return FrontModelOutcome(None, f"{wanted}(隔离/冷却中，未提升)")
-        logger.debug(
-            "alias '%s' front_model '%s' is not an eligible candidate; "
-            "keeping the routed order",
-            alias.name,
-            wanted,
-        )
-        return FrontModelOutcome(None, None)
+            return FrontModelOutcome(None, None)
+
+        chosen = pool[0]
+        model = self.config.models.get(wanted)
+        if model is not None and model.strategy == "round_robin" and len(pool) > 1:
+            pool = sorted(pool, key=lambda c: (c.deployment.priority, c.deployment.id))
+            key = f"{alias.name}:{wanted}"
+            with self._lock:
+                index = self._front_model_cursor.get(key, 0)
+                chosen = pool[index % len(pool)]
+                if not dry_run:
+                    self._front_model_cursor[key] = index + 1
+        if chosen is ordered[0]:
+            return FrontModelOutcome(wanted, None)
+        index = next(index for index, candidate in enumerate(ordered) if candidate is chosen)
+        ordered.insert(0, ordered.pop(index))
+        return FrontModelOutcome(wanted, None)
 
     def eligible_candidates(self, decision: RoutingDecision) -> list[RoutingCandidate]:
         """Eligible candidates in attempt order."""
@@ -527,10 +575,15 @@ class Router:
     # ------------------------------------------------------------------ #
     # Admin preview
     # ------------------------------------------------------------------ #
-    def preview(self, request: ChatCompletionRequest) -> dict[str, Any]:
+    def preview(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        unavailable: set[str] | None = None,
+    ) -> dict[str, Any]:
         """Explain routing without executing anything (``/admin/router/preview``)."""
         try:
-            decision = self.plan(request)
+            decision = self.plan(request, unavailable=unavailable, dry_run=True)
         except (ModelNotFoundError, AliasNotFoundError) as exc:
             return {
                 "requested_model": request.model,
@@ -563,6 +616,7 @@ class Router:
     def reload(self, config: AppConfig, *, alias_registry: AliasRegistry | None = None) -> None:
         """Hot swap configuration: aliases take effect immediately, adapters are rebuilt."""
         with self._lock:
+            self._front_model_cursor.clear()
             old_adapters = list(self._adapters.values())
             self.config = config
             if alias_registry is not None:

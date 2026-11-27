@@ -226,6 +226,7 @@ class CredentialPool:
         exclude: Iterable[str] | None = None,
         return_cooldown: bool = False,
         session_key: str | None = None,
+        advance: bool = True,
     ) -> list[CredentialRuntime]:
         """Usable credentials for *provider_id*, best first.
 
@@ -252,7 +253,7 @@ class CredentialPool:
                     if limiter.remaining(provider_id, credential.id, credential.tags, now=moment)
                     > 0
                 ]
-            ordered = self._rotation.order(usable)
+            ordered = self._rotation.order(usable, advance=advance)
             self._apply_affinity(ordered, provider_id, session_key, moment)
             return ordered
 
@@ -653,7 +654,7 @@ class CredentialPool:
     def provider_availability(self) -> dict[str, bool]:
         """Which providers currently have at least one usable credential."""
         return {
-            provider_id: bool(self.candidates(provider_id))
+            provider_id: bool(self.candidates(provider_id, advance=False))
             for provider_id in list(self._by_provider.keys())
         }
 
@@ -661,7 +662,7 @@ class CredentialPool:
         """Explain *why* the candidate order is what it is (admin preview)."""
         moment = time.time()
         result: list[dict] = []
-        for index, credential in enumerate(self.candidates(provider_id)[:limit]):
+        for index, credential in enumerate(self.candidates(provider_id, advance=False)[:limit]):
             result.append(
                 {
                     "order": index + 1,

@@ -238,6 +238,113 @@ class TestModelCrud:
         assert "dep-amd" in dep_ids
         assert "dep-nvidia" in dep_ids
 
+    async def test_preview_marks_provider_without_credentials_unavailable(self, api, monkeypatch) -> None:
+        """预览必须和调度器一致：供应商无可用 Key 时不能仍显示健康。"""
+        client, harness = api
+        monkeypatch.setattr(harness.container.scheduler, "unavailable_deployments", lambda: set())
+        monkeypatch.setattr(
+            harness.container.pool, "provider_availability", lambda: {"fake": False}
+        )
+
+        response = await client.get(
+            "/zkadmin/router/preview?model=fake-model&prompt=hi", headers=ADMIN
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["plan"][0]["penalized"] is True
+
+    async def test_preview_marks_cooling_deployment_unavailable(self, api, monkeypatch) -> None:
+        """部署冷却/隔离必须进入预览，而不是只在真实请求里才降权。"""
+        client, harness = api
+        monkeypatch.setattr(
+            harness.container.scheduler,
+            "unavailable_deployments",
+            lambda: {"fake-model-dep"},
+        )
+
+        response = await client.get(
+            "/zkadmin/router/preview?model=fake-model&prompt=hi", headers=ADMIN
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["plan"][0]["penalized"] is True
+
+    async def test_merge_rejects_duplicate_provider_upstream_without_writes(self, api, tmp_path) -> None:
+        """同模型同供应商同上游是 DB 唯一约束，必须在写文件/内存前拒绝。"""
+        client, harness = api
+        harness.container.settings.config_dir = str(tmp_path)
+        harness.container.config.source_files["models"] = "models.yaml"
+        path = harness.container.settings.resolved_config_dir / "models.yaml"
+        original = """models:
+  - id: fake-model
+    context_window: 8192
+    deployments:
+      - id: fake-model-dep
+        provider_id: fake
+        model: fake-model
+"""
+        path.write_text(original, encoding="utf-8")
+        from app.core.config_writer import note_loaded
+        note_loaded(path)
+
+        response = await client.post(
+            "/zkadmin/models",
+            headers=ADMIN,
+            json={
+                "id": "fake-model",
+                "merge": True,
+                "context_window": 8192,
+                "deployments": [{"id": "dup-dep", "provider_id": "fake", "model": "fake-model"}],
+            },
+        )
+
+        assert response.status_code == 400, response.text
+        assert [d.id for d in harness.container.config.models["fake-model"].deployments] == [
+            "fake-model-dep"
+        ]
+        assert path.read_text(encoding="utf-8") == original
+
+    async def test_merge_db_failure_rolls_back_memory_and_yaml(self, api, monkeypatch, tmp_path) -> None:
+        """文件写成功后 DB 失败，必须回滚文件且不能污染内存。"""
+        client, harness = api
+        harness.container.settings.config_dir = str(tmp_path)
+        harness.container.config.source_files["models"] = "models.yaml"
+        path = harness.container.settings.resolved_config_dir / "models.yaml"
+        original = """models:
+  - id: fake-model
+    context_window: 8192
+    deployments:
+      - id: fake-model-dep
+        provider_id: fake
+        model: fake-model
+"""
+        path.write_text(original, encoding="utf-8")
+        from app.core.config_writer import note_loaded
+        note_loaded(path)
+        harness.container.refresh_config_watch()
+
+        async def fail(_model):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(harness.container.config_repository, "upsert_model", fail)
+        with pytest.raises(RuntimeError, match="db down"):
+            await client.post(
+                "/zkadmin/models",
+                headers=ADMIN,
+                json={
+                    "id": "fake-model",
+                    "merge": True,
+                    "context_window": 8192,
+                    "deployments": [{"id": "new-dep", "provider_id": "fake", "model": "other"}],
+                },
+            )
+
+        assert [d.id for d in harness.container.config.models["fake-model"].deployments] == [
+            "fake-model-dep"
+        ]
+        assert path.read_text(encoding="utf-8").find("new-dep") == -1
+        assert "fake-model-dep" in path.read_text(encoding="utf-8")
+
     async def test_model_level_strategy(self, api) -> None:
         """模型可设 strategy 字段，直接调模型名时生效。"""
         client, harness = api
